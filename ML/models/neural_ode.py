@@ -55,6 +55,20 @@ class NODE_Model(L.LightningModule):
     self.n_input_features = dm.n_input_features
     self.n_target_features = dm.n_target_features
 
+  def _odeint(self, y0, t_span):
+      """Central odeint call — solver configured from yaml."""
+      options = {}
+      if self.cfg.train.solver == 'rk4':
+          step_size = getattr(self.cfg.train, 'step_size', None)
+          if step_size:
+              options['step_size'] = step_size
+      return odeint(
+          self.func, y0, t_span,
+          method=self.cfg.train.solver,
+          rtol=self.rtol, atol=self.atol,
+          options=options if options else None,
+      )
+
   def _forward_batch(self, batch):
     """
     Shared forward pass for train/val/test.
@@ -75,10 +89,7 @@ class NODE_Model(L.LightningModule):
     t_span = self.t_span.to(trajectories.device)
     self.func.set_forcing(t_span, forcing_profiles)
 
-    target_pred = odeint(
-        self.func, y0, t_span,
-        method='dopri5', rtol=self.rtol, atol=self.atol,
-    )
+    target_pred = self._odeint(y0, t_span)
     target_pred = target_pred.permute(1, 0, 2)
 
     return target_pred, target_true
@@ -314,10 +325,7 @@ class NODE_Model(L.LightningModule):
         t_short = t_span[t:t+2]     # Integrate from t to t+1
         
         with torch.no_grad():
-          pred_t1 = odeint(
-            self.func, y_t, t_short,
-            method='dopri5', rtol=self.rtol, atol=self.atol,
-          )[-1]  # Take last timepoint = t+1
+          pred_t1 = self._odeint(y_t, t_short)[-1]# Take last timepoint = t+1
         
         tf_preds[batch_start:batch_end, t+1, :] = pred_t1.cpu().numpy()
     
@@ -353,46 +361,46 @@ class NODE_Model(L.LightningModule):
 
   # ─── Jacobian Sensitivity Analysis ───────────────────────────────────
   def compute_state_jacobian(self, t_eval, y_eval, forcing_eval):
-      y_eval = y_eval.detach().requires_grad_(True)
-      
-      was_training = self.func.training
-      self.func.train()
-      self.func.set_forcing(t_eval, forcing_eval)
-      
-      with torch.enable_grad():
+    with torch.inference_mode(False):
+        y_eval = y_eval.clone().requires_grad_(True)
+        
+        was_training = self.func.training
+        self.func.train()
+        self.func.set_forcing(t_eval, forcing_eval)
+        
         dydt = self.func(t_eval[0], y_eval)
         
         jacobians = []
         for i in range(dydt.shape[-1]):
-          grad = torch.autograd.grad(
-            dydt[:, i].sum(), y_eval,
-            retain_graph=True, create_graph=False
-          )[0]
-          jacobians.append(grad)
-      
-      self.func.train(was_training)
-      return torch.stack(jacobians, dim=1)
+            grad = torch.autograd.grad(
+                dydt[:, i].sum(), y_eval,
+                retain_graph=True, create_graph=False
+            )[0]
+            jacobians.append(grad)
+        
+        self.func.train(was_training)
+        return torch.stack(jacobians, dim=1)
 
   def compute_forcing_jacobian(self, t_eval, y_eval, forcing_eval):
-      forcing_eval = forcing_eval.detach().requires_grad_(True)
-      
-      was_training = self.func.training
-      self.func.train()
-      self.func.set_forcing(t_eval, forcing_eval)
-      
-      with torch.enable_grad():
-        dydt = self.func(t_eval[0], y_eval.detach())
+    with torch.inference_mode(False):
+        forcing_eval = forcing_eval.clone().requires_grad_(True)
+        
+        was_training = self.func.training
+        self.func.train()
+        self.func.set_forcing(t_eval, forcing_eval)
+        
+        dydt = self.func(t_eval[0], y_eval.clone().detach())
         
         jacobians = []
         for i in range(dydt.shape[-1]):
-          grad = torch.autograd.grad(
-            dydt[:, i].sum(), forcing_eval,
-            retain_graph=True, create_graph=False
-          )[0]
-          jacobians.append(grad[:, 0, :])
-      
-      self.func.train(was_training)
-      return torch.stack(jacobians, dim=1)
+            grad = torch.autograd.grad(
+                dydt[:, i].sum(), forcing_eval,
+                retain_graph=True, create_graph=False
+            )[0]
+            jacobians.append(grad[:, 0, :])
+        
+        self.func.train(was_training)
+        return torch.stack(jacobians, dim=1)
 
   def _compute_jacobian_analysis(self, all_inputs_scaled, all_trues_scaled,
                                  target_names, forcing_names):
@@ -666,10 +674,7 @@ class NODE_Model(L.LightningModule):
         
         self.func.set_forcing(t_span, forcing_profiles)
         
-        pred = odeint(
-          self.func, y0, t_span,
-          method='dopri5', rtol=self.rtol, atol=self.atol,
-        ).permute(1, 0, 2)
+        pred = self._odeint(y0, t_span).permute(1, 0, 2)
         
         all_preds[batch_start:batch_end] = pred.cpu().numpy()
     

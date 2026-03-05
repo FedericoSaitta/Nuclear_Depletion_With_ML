@@ -127,19 +127,18 @@ def plot_losses(train_losses, val_losses, save_dir, nfes=None):
   eps = 1e-10
   log_train_losses = np.log10(np.array(train_losses) + eps)
   log_val_losses = np.log10(np.array(val_losses) + eps)
-  epochs = np.arange(len(log_train_losses))
 
   fig, ax_loss = plt.subplots(figsize=(10, 6))
 
-  ax_loss.plot(epochs, log_train_losses, label='Training Loss (log10)', linewidth=2, color='#2E86AB')
-  ax_loss.plot(epochs, log_val_losses, label='Validation Loss (log10)', linewidth=2, color='#A23B72')
+  ax_loss.plot(log_train_losses, label='Training Loss (log10)', linewidth=2, color='#2E86AB')
+  ax_loss.plot(log_val_losses, label='Validation Loss (log10)', linewidth=2, color='#A23B72')
   ax_loss.set_xlabel('Epoch', fontsize=12)
   ax_loss.set_ylabel('Log10(Loss)', fontsize=12)
   ax_loss.grid(True, alpha=0.3)
 
   if nfes and len(nfes) == len(train_losses):
     ax_nfe = ax_loss.twinx()
-    ax_nfe.plot(epochs, nfes, label='NFE', linewidth=1.5, color='#FF9800',
+    ax_nfe.plot(nfes, label='NFE', linewidth=1.5, color='#FF9800',
                 linestyle='--', alpha=0.8)
     ax_nfe.set_ylabel('Function Evaluations (NFE)', fontsize=12, color='#FF9800')
     ax_nfe.tick_params(axis='y', labelcolor='#FF9800')
