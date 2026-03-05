@@ -123,25 +123,41 @@ def plot_data_distributions(X, col_index_map, save_dir=None, name='Raw_Data'):
   plt.close()
   logger.info(f"Feature distributions saved to: {filepath}")
 
-def plot_losses(train_losses, val_losses, save_dir):
-  # Convert losses to log10 scale (add small epsilon to avoid log(0))
+def plot_losses(train_losses, val_losses, save_dir, nfes=None):
   eps = 1e-10
   log_train_losses = np.log10(np.array(train_losses) + eps)
   log_val_losses = np.log10(np.array(val_losses) + eps)
+  epochs = np.arange(len(log_train_losses))
 
-  plt.figure(figsize=(10, 6))
-  plt.plot(log_train_losses, label='Training Loss (log10)', linewidth=2)
-  plt.plot(log_val_losses, label='Validation Loss (log10)', linewidth=2)
-  plt.xlabel('Epoch', fontsize=12)
-  plt.ylabel('Log10(Loss)', fontsize=12)
-  plt.title('Logarithm of Training and Validation Loss Over Time', fontsize=14)
-  plt.legend(fontsize=10)
-  plt.grid(True, alpha=0.3)
+  fig, ax_loss = plt.subplots(figsize=(10, 6))
+
+  ax_loss.plot(epochs, log_train_losses, label='Training Loss (log10)', linewidth=2, color='#2E86AB')
+  ax_loss.plot(epochs, log_val_losses, label='Validation Loss (log10)', linewidth=2, color='#A23B72')
+  ax_loss.set_xlabel('Epoch', fontsize=12)
+  ax_loss.set_ylabel('Log10(Loss)', fontsize=12)
+  ax_loss.grid(True, alpha=0.3)
+
+  if nfes and len(nfes) == len(train_losses):
+    ax_nfe = ax_loss.twinx()
+    ax_nfe.plot(epochs, nfes, label='NFE', linewidth=1.5, color='#FF9800',
+                linestyle='--', alpha=0.8)
+    ax_nfe.set_ylabel('Function Evaluations (NFE)', fontsize=12, color='#FF9800')
+    ax_nfe.tick_params(axis='y', labelcolor='#FF9800')
+
+    # Combine legends from both axes
+    lines_loss, labels_loss = ax_loss.get_legend_handles_labels()
+    lines_nfe, labels_nfe = ax_nfe.get_legend_handles_labels()
+    ax_loss.legend(lines_loss + lines_nfe, labels_loss + labels_nfe,
+                   fontsize=10, loc='upper right')
+  else:
+    ax_loss.legend(fontsize=10)
+
+  ax_loss.set_title('Training and Validation Loss Over Time', fontsize=14)
   plt.tight_layout()
 
   filepath = os.path.join(save_dir, 'training_loss_log.png')
-  plt.savefig(filepath, dpi=300)
-  plt.close()
+  fig.savefig(filepath, dpi=300)
+  plt.close(fig)
 
   logger.info(f"Logarithmic Train and Validation Losses saved to: {filepath}")
 

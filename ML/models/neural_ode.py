@@ -41,6 +41,7 @@ class NODE_Model(L.LightningModule):
     # Collect losses for plotting
     self._train_losses = []
     self._val_losses = []
+    self._train_nfes = []
 
     # Collect data for test-level metrics
     self._test_preds = []
@@ -110,11 +111,14 @@ class NODE_Model(L.LightningModule):
     epoch_loss = self.trainer.callback_metrics["train_loss"].item()
     self._train_losses.append(epoch_loss)
 
+    epoch_nfe = self.trainer.callback_metrics["nfe"].item()
+    self._train_nfes.append(epoch_nfe)
+
     lr = self.optimizers().param_groups[0]['lr']
     self.log('lr', lr, on_epoch=True, prog_bar=True)
 
   def on_train_end(self):
-    plot.plot_losses(self._train_losses, self._val_losses, self.result_dir)
+    plot.plot_losses(self._train_losses, self._val_losses, self.result_dir, nfes=self._train_nfes)
     logger.info("Training complete.")
 
   # ── Validation ───────────────────────────────────────────────────────
