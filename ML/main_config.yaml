@@ -1,11 +1,11 @@
 dataset:
   path_to_data: data/casl_3305_runs_inter.h5
-  fraction_of_data: 0.5
+  fraction_of_data: 0.1
 
   inputs:
     power_W_g: MinMax
   targets:
-    Np239: MinMax
+    U238: MinMax
 
   target_delta_conc: False
   train:
@@ -17,7 +17,7 @@ model:
   n_input_features: 1    # power only
   n_target_features: 1   # U238
 
-  name: NODE_Np239_Test_with_jac
+  name: testing_git_pull_worked_gpuA
   layers: [64, 64]
   dropout_probability: 0.0
   activation: tanh
@@ -29,10 +29,14 @@ train:
   learning_rate: 1e-3
   weight_decay: 0.0
   lr_scheduler_patience: 15
-  num_epochs: 10000
+  num_epochs: 10
   early_stopping_patience: 100
   grad_clip: 0.0 # Lets try and disable grad clip
   drop_last: false
+  solver: dopri5    # dopri5 rk4 implicit_adams
+  rtol: 1e-5        
+  atol: 1e-7        
+  step_size: null   # only used for rk4
 
 runtime:
   mode: train
