@@ -410,17 +410,23 @@ class NODE_Model(L.LightningModule):
           
           dydt = self.func(t_eval[t_idx], y_eval.clone().detach())
           
+          # Find which forcing index the interpolation actually used
+          with torch.no_grad():
+              t_clamped = t_eval[t_idx].clamp(t_eval[0], t_eval[-1])
+              interp_idx = (torch.searchsorted(t_eval, t_clamped.unsqueeze(0)).squeeze() - 1).clamp(0, len(t_eval) - 2)
+          
           jacobians = []
           for i in range(dydt.shape[-1]):
               grad = torch.autograd.grad(
                   dydt[:, i].sum(), forcing_eval,
                   retain_graph=True, create_graph=False
               )[0]
-              jacobians.append(grad[:, t_idx, :])  # correct slice
+              jacobians.append(grad[:, interp_idx, :])  # ← match the interpolation index
           
           self.func.train(was_training)
           return torch.stack(jacobians, dim=1)
-
+      
+      
   def _compute_jacobian_analysis(self, all_inputs_scaled, all_trues_scaled,
                                  target_names, forcing_names):
     """
