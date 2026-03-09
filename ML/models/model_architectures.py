@@ -60,17 +60,18 @@ class ODEFuncForced(nn.Module):
     self.forcing_profiles = forcing_profiles  # (batch, steps, n_input)
 
   def _interpolate_forcing(self, t):
+    """Piecewise-constant (zero-order hold) forcing interpolation.
+    
+    Returns the forcing value at the left endpoint of whichever interval
+    t falls into, i.e. the value is held constant until the next grid point.
+    This is correct for power profiles that are sampled independently at
+    each timestep (step-function behaviour).
+    """
     t_clamped = t.clamp(self.t_points[0], self.t_points[-1])
     idx = torch.searchsorted(self.t_points, t_clamped.unsqueeze(0)).squeeze() - 1
     idx = idx.clamp(0, len(self.t_points) - 2)
 
-    t0 = self.t_points[idx]
-    t1 = self.t_points[idx + 1]
-    frac = (t_clamped - t0) / (t1 - t0 + 1e-8)
-
-    f0 = self.forcing_profiles[:, idx, :]   # (batch, n_input)
-    f1 = self.forcing_profiles[:, idx + 1, :]
-    return f0 + frac * (f1 - f0)
+    return self.forcing_profiles[:, idx, :]   # (batch, n_input)
 
   def forward(self, t, y):
     self.nfe += 1
