@@ -76,6 +76,10 @@ class NODE_Model(L.LightningModule):
     Trajectory layout: [forcing_features..., target_features...]
     batch[0] is (batch_size, steps, n_input_features + n_target_features)
     
+    The ODE integrator feeds the FULL state vector y (all isotopes) back
+    into the network at every solver step. This means all isotopes
+    inform all future predictions — the coupling is automatic.
+
     Returns: target_pred (batch_size, steps, n_target), target_true (batch_size, steps, n_target)
     """
     trajectories = batch[0]
@@ -84,11 +88,14 @@ class NODE_Model(L.LightningModule):
     
     forcing_profiles = trajectories[:, :, :n_in]
     target_true = trajectories[:, :, n_in:]
-    y0 = target_true[:, 0, :]
+    y0 = target_true[:, 0, :]  # All isotope concentrations at t=0
 
     t_span = self.t_span.to(trajectories.device)
     self.func.set_forcing(t_span, forcing_profiles)
 
+    # odeint integrates the full state vector [isotope_1, isotope_2, ...]
+    # so at each internal solver step, the network receives ALL current
+    # isotope predictions to compute ALL derivatives.
     target_pred = self._odeint(y0, t_span)
     target_pred = target_pred.permute(1, 0, 2)
 
@@ -247,21 +254,30 @@ class NODE_Model(L.LightningModule):
       trues_unscaled, ar_preds_unscaled, tf_preds_unscaled, target_names
     )
 
-    # 7. Trajectory-specific plots
+    # 7. Trajectory-specific plots — loop over ALL targets
     t_np = self.t_span.cpu().numpy()
     num_to_plot = min(5, num_runs)
-    for i in range(num_to_plot):
-      plot.plot_node_trajectory(
-        t_np, ar_preds_unscaled[i, :, 0], trues_unscaled[i, :, 0], inputs_unscaled[i, :, 0],
-        title=f'Test Trajectory {i+1}',
-        save_path=f'{self.result_dir}/test_traj_{i+1}.png',
-      )
+    for target_idx, target_name in enumerate(target_names):
+      target_dir = os.path.join(self.result_dir, target_name)
+      os.makedirs(target_dir, exist_ok=True)
 
-    plot.plot_node_trajectory_summary(
-      t_np, ar_preds_unscaled[:, :, 0], trues_unscaled[:, :, 0],
-      title=f'All Test Trajectories ({num_runs} runs)',
-      save_path=f'{self.result_dir}/test_all_trajectories.png',
-    )
+      for i in range(num_to_plot):
+        plot.plot_node_trajectory(
+          t_np,
+          ar_preds_unscaled[i, :, target_idx],
+          trues_unscaled[i, :, target_idx],
+          inputs_unscaled[i, :, 0],  # Power (first input) as reference
+          title=f'{target_name} — Test Trajectory {i+1}',
+          save_path=os.path.join(target_dir, f'test_traj_{i+1}.png'),
+        )
+
+      plot.plot_node_trajectory_summary(
+        t_np,
+        ar_preds_unscaled[:, :, target_idx],
+        trues_unscaled[:, :, target_idx],
+        title=f'{target_name} — All Test Trajectories ({num_runs} runs)',
+        save_path=os.path.join(target_dir, f'test_all_trajectories.png'),
+      )
 
     # 8. Log to database
     if hasattr(self.trainer, 'logger') and hasattr(self.trainer.logger, 'update_final_results'):
@@ -292,6 +308,9 @@ class NODE_Model(L.LightningModule):
     as initial condition and integrate one dt forward to predict y(t+1).
     This is analogous to the DNN's teacher-forcing mode.
     
+    y(t) is the FULL state vector (all isotopes), so the network uses
+    ground truth for ALL isotopes at each step.
+    
     Returns: (num_runs, steps, n_target) array of scaled predictions.
     """
     num_runs, steps, n_target = all_trues_scaled.shape
@@ -321,11 +340,11 @@ class NODE_Model(L.LightningModule):
       
       # Single-step integration for each timestep
       for t in range(steps - 1):
-        y_t = trues_batch[:, t, :]  # Ground truth at t
+        y_t = trues_batch[:, t, :]  # Ground truth ALL isotopes at t
         t_short = t_span[t:t+2]     # Integrate from t to t+1
         
         with torch.no_grad():
-          pred_t1 = self._odeint(y_t, t_short)[-1]# Take last timepoint = t+1
+          pred_t1 = self._odeint(y_t, t_short)[-1]  # Take last timepoint = t+1
         
         tf_preds[batch_start:batch_end, t+1, :] = pred_t1.cpu().numpy()
     
@@ -360,47 +379,47 @@ class NODE_Model(L.LightningModule):
         per_target_metrics[idx]['mare_ar'] = float(mare_ar)
 
   # ─── Jacobian Sensitivity Analysis ───────────────────────────────────
-  def compute_state_jacobian(self, t_eval, y_eval, forcing_eval):
-    with torch.inference_mode(False):
-        y_eval = y_eval.clone().requires_grad_(True)
-        
-        was_training = self.func.training
-        self.func.train()
-        self.func.set_forcing(t_eval, forcing_eval)
-        
-        dydt = self.func(t_eval[0], y_eval)
-        
-        jacobians = []
-        for i in range(dydt.shape[-1]):
-            grad = torch.autograd.grad(
-                dydt[:, i].sum(), y_eval,
-                retain_graph=True, create_graph=False
-            )[0]
-            jacobians.append(grad)
-        
-        self.func.train(was_training)
-        return torch.stack(jacobians, dim=1)
+  def compute_state_jacobian(self, t_eval, y_eval, forcing_eval, t_idx):
+      with torch.inference_mode(False):
+          y_eval = y_eval.clone().requires_grad_(True)
+          
+          was_training = self.func.training
+          self.func.train()
+          self.func.set_forcing(t_eval, forcing_eval)
+          
+          dydt = self.func(t_eval[t_idx], y_eval)  # correct time
+          
+          jacobians = []
+          for i in range(dydt.shape[-1]):
+              grad = torch.autograd.grad(
+                  dydt[:, i].sum(), y_eval,
+                  retain_graph=True, create_graph=False
+              )[0]
+              jacobians.append(grad)
+          
+          self.func.train(was_training)
+          return torch.stack(jacobians, dim=1)
 
-  def compute_forcing_jacobian(self, t_eval, y_eval, forcing_eval):
-    with torch.inference_mode(False):
-        forcing_eval = forcing_eval.clone().requires_grad_(True)
-        
-        was_training = self.func.training
-        self.func.train()
-        self.func.set_forcing(t_eval, forcing_eval)
-        
-        dydt = self.func(t_eval[0], y_eval.clone().detach())
-        
-        jacobians = []
-        for i in range(dydt.shape[-1]):
-            grad = torch.autograd.grad(
-                dydt[:, i].sum(), forcing_eval,
-                retain_graph=True, create_graph=False
-            )[0]
-            jacobians.append(grad[:, 0, :])
-        
-        self.func.train(was_training)
-        return torch.stack(jacobians, dim=1)
+  def compute_forcing_jacobian(self, t_eval, y_eval, forcing_eval, t_idx):
+      with torch.inference_mode(False):
+          forcing_eval = forcing_eval.clone().requires_grad_(True)
+          
+          was_training = self.func.training
+          self.func.train()
+          self.func.set_forcing(t_eval, forcing_eval)
+          
+          dydt = self.func(t_eval[t_idx], y_eval.clone().detach())
+          
+          jacobians = []
+          for i in range(dydt.shape[-1]):
+              grad = torch.autograd.grad(
+                  dydt[:, i].sum(), forcing_eval,
+                  retain_graph=True, create_graph=False
+              )[0]
+              jacobians.append(grad[:, t_idx, :])  # correct slice
+          
+          self.func.train(was_training)
+          return torch.stack(jacobians, dim=1)
 
   def _compute_jacobian_analysis(self, all_inputs_scaled, all_trues_scaled,
                                  target_names, forcing_names):
@@ -454,11 +473,11 @@ class NODE_Model(L.LightningModule):
         y_t = trues_batch[:, t_idx, :]  # (batch, n_target)
         
         # State Jacobian: ∂f/∂y
-        state_jac = self.compute_state_jacobian(t_span, y_t, inputs_batch)
+        state_jac = self.compute_state_jacobian(t_span, y_t, inputs_batch, int(t_idx))
         abs_state_jac = state_jac.abs().cpu().numpy()  # (batch, n_target, n_target)
         
         # Forcing Jacobian: ∂f/∂u
-        forcing_jac = self.compute_forcing_jacobian(t_span, y_t, inputs_batch)
+        forcing_jac = self.compute_forcing_jacobian(t_span, y_t, inputs_batch, int(t_idx))
         abs_forcing_jac = forcing_jac.abs().cpu().numpy()  # (batch, n_target, n_input)
         
         # Collect per-sample Jacobians
