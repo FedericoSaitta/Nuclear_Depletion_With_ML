@@ -12,7 +12,7 @@ from torchdiffeq import odeint
 
 from ML.utils import plot
 from ML.utils import metrics
-from ML.models.model_architectures import ODEFuncForced
+from ML.models.model_architectures import ODEFuncForced, ODEFuncMatrix
 from ML.models.model_helper import get_loss_fn
 import ML.datamodule.data_scalers as data_scaler
 
@@ -24,8 +24,14 @@ class NODE_Model(L.LightningModule):
     self.save_hyperparameters(OmegaConf.to_container(config_object, resolve=True))
     self.cfg = config_object
 
-    # Model
-    self.func = ODEFuncForced(config_object)
+    # Model — choose between standard ODE and matrix-based ODE
+    self.matrix_ode = getattr(config_object.model, 'matrix_ode', False)
+    if self.matrix_ode:
+      self.func = ODEFuncMatrix(config_object)
+      logger.info("Using matrix-based NODE: dy/dt = A(forcing) @ y")
+    else:
+      logger.info("Using standard NODE: dy/dt = y")
+      self.func = ODEFuncForced(config_object)
 
     # Training Config
     self.loss_fn = get_loss_fn(config_object.train.loss)
@@ -243,6 +249,12 @@ class NODE_Model(L.LightningModule):
     self._compute_jacobian_analysis(
       all_inputs_scaled, all_trues_scaled, target_names, forcing_names
     )
+
+    # 4b. Depletion matrix visualization (matrix ODE only)
+    if self.matrix_ode:
+      self._compute_depletion_matrix_analysis(
+        all_inputs_scaled, target_names
+      )
     
     # 5. Prediction comparison plots (TF vs AR)
     self._plot_prediction_comparisons(
@@ -667,6 +679,101 @@ class NODE_Model(L.LightningModule):
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
 
+    # ─── Depletion Matrix Analysis (matrix ODE only) ─────────────────────
+ 
+  def _compute_depletion_matrix_analysis(self, all_inputs_scaled, target_names):
+    """Extract and visualise the learned depletion matrix A(t) over time."""
+    import matplotlib.pyplot as plt
+ 
+    logger.info(f"\n{'='*20}")
+    logger.info("DEPLETION MATRIX ANALYSIS")
+    logger.info(f"{'='*20}")
+ 
+    num_runs, steps, n_input = all_inputs_scaled.shape
+    n_target = len(target_names)
+    device = self.device
+    t_span = self.t_span.to(device)
+ 
+    max_runs = min(20, num_runs)
+    timestep_indices = np.linspace(0, steps - 1, min(30, steps), dtype=int)
+ 
+    # Collect matrices at each timestep: {t_idx: list of (n_target, n_target)}
+    matrices_by_time = {t: [] for t in timestep_indices}
+ 
+    batch_size = 32
+    for batch_start in range(0, max_runs, batch_size):
+      batch_end = min(batch_start + batch_size, max_runs)
+ 
+      inputs_batch = torch.tensor(
+        all_inputs_scaled[batch_start:batch_end], dtype=torch.float32, device=device
+      )
+ 
+      self.func.set_forcing(t_span, inputs_batch)
+ 
+      for t_idx in timestep_indices:
+        with torch.no_grad():
+          forcing_t = self.func._interpolate_forcing(t_span[int(t_idx)])
+          A = self.func._build_matrix(forcing_t)  # (batch, n, n)
+ 
+        for b in range(A.shape[0]):
+          matrices_by_time[t_idx].append(A[b].cpu().numpy())
+ 
+    # ── Plot 1: Mean depletion matrix (time-averaged) ──
+    all_matrices = []
+    for t_idx in timestep_indices:
+      all_matrices.extend(matrices_by_time[t_idx])
+    mean_A = np.mean(all_matrices, axis=0)
+    std_A = np.std(all_matrices, axis=0)
+ 
+    fig, ax = plt.subplots(figsize=(max(6, n_target * 1.5), max(5, n_target * 1.2)))
+    im = ax.imshow(mean_A, cmap='RdBu_r', aspect='auto',
+                   vmin=-np.abs(mean_A).max(), vmax=np.abs(mean_A).max())
+    plt.colorbar(im, ax=ax, label='Matrix entry value')
+ 
+    ax.set_xticks(range(n_target))
+    ax.set_xticklabels(target_names, rotation=45, ha='right', fontsize=10)
+    ax.set_yticks(range(n_target))
+    ax.set_yticklabels([f'd{n}/dt' for n in target_names], fontsize=10)
+    ax.set_title('Learned Depletion Matrix A (time-averaged)')
+ 
+    for i in range(n_target):
+      for j in range(n_target):
+        val = mean_A[i, j]
+        color = 'white' if abs(val) > np.abs(mean_A).max() * 0.6 else 'black'
+        ax.text(j, i, f'{val:.4f}\n({std_A[i,j]:.4f})',
+                ha='center', va='center', fontsize=9, color=color)
+ 
+    plt.tight_layout()
+    plt.savefig(os.path.join(self.result_dir, 'depletion_matrix_mean.png'), dpi=150, bbox_inches='tight')
+    plt.close()
+ 
+    # ── Plot 2: Matrix entries over time ──
+    sorted_ts = sorted(timestep_indices)
+    time_fractions = self.t_span.cpu().numpy()[sorted_ts]
+ 
+    mean_over_time = np.array([
+      np.mean(matrices_by_time[t], axis=0) for t in sorted_ts
+    ])  # (n_timesteps, n_target, n_target)
+ 
+    fig, axes = plt.subplots(n_target, n_target, figsize=(4 * n_target, 3 * n_target), sharex=True)
+    for i in range(n_target):
+      for j in range(n_target):
+        ax = axes[i, j] if n_target > 1 else axes
+        ax.plot(time_fractions, mean_over_time[:, i, j], linewidth=1.5,
+                color='tab:red' if i == j else 'tab:blue')
+        ax.set_title(f'A[{target_names[i]},{target_names[j]}]', fontsize=9)
+        ax.grid(True, alpha=0.3)
+        ax.axhline(0, color='gray', linewidth=0.5, linestyle='--')
+        if i == n_target - 1:
+          ax.set_xlabel('Normalised time')
+ 
+    fig.suptitle('Depletion Matrix Entries Over Time', fontsize=13, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(os.path.join(self.result_dir, 'depletion_matrix_evolution.png'), dpi=150, bbox_inches='tight')
+    plt.close()
+ 
+    logger.info(f"  Depletion matrix plots saved to: {self.result_dir}")
+    
   # ─── Batch Forward (for other analyses) ──────────────────────────────
 
   def _batch_forward_numpy(self, inputs_scaled, trues_scaled):

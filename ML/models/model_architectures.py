@@ -1,4 +1,5 @@
 import torch.nn as nn
+import torch.nn.functional as F
 from ML.models.model_helper import get_activation
 import torch
 
@@ -78,3 +79,74 @@ class ODEFuncForced(nn.Module):
     forcing = self._interpolate_forcing(t)      # (batch, n_input)
     combined = torch.cat([forcing, y], dim=-1)   # (batch, n_input + n_target)
     return self.net(combined)
+  
+# ─── Matrix ODE Function ─────────────────────────────────────────────────────
+ 
+class ODEFuncMatrix(nn.Module):
+  """ODE function that predicts a depletion matrix A(t) from forcing inputs.
+ 
+  dy/dt = A(forcing(t)) @ y(t)
+ 
+  Physical constraints:
+    - Diagonal entries are negative (decay/absorption losses)
+    - Off-diagonal entries are positive (production from transmutation)
+  """
+ 
+  def __init__(self, cfg):
+    super().__init__()
+    self.nfe = 0
+    self.t_points = None
+    self.forcing_profiles = None
+ 
+    n_input = cfg.model.n_input_features
+    self.n_target = cfg.model.n_target_features
+ 
+    # Network takes forcing only -> outputs n_target^2 matrix entries
+    self.net = Deep_Neural_Network(
+      n_inputs=n_input,
+      n_outputs=self.n_target * self.n_target,
+      hidden_layers=cfg.model.layers,
+      dropout_prob=cfg.model.dropout_probability,
+      activation=cfg.model.activation,
+      output_activation='none',  # We apply our own constraints
+      residual=cfg.model.residual_connections,
+    )
+ 
+  def set_forcing(self, t_points, forcing_profiles):
+    self.t_points = t_points
+    self.forcing_profiles = forcing_profiles  # (batch, steps, n_input)
+ 
+  def _interpolate_forcing(self, t):
+    """Piecewise-constant (zero-order hold) forcing interpolation."""
+    t_clamped = t.clamp(self.t_points[0], self.t_points[-1])
+    idx = torch.searchsorted(self.t_points, t_clamped.unsqueeze(0)).squeeze() - 1
+    idx = idx.clamp(0, len(self.t_points) - 2)
+ 
+    return self.forcing_profiles[:, idx, :]   # (batch, n_input)
+ 
+  def _build_matrix(self, forcing):
+    """Build constrained depletion matrix from forcing input.
+ 
+    Returns: (batch, n_target, n_target) matrix with negative diagonal
+             and positive off-diagonal entries.
+    """
+    raw = self.net(forcing)                              # (batch, n_target^2)
+    raw = raw.view(-1, self.n_target, self.n_target)
+ 
+    # Off-diagonal: positive (production terms)
+    A = F.softplus(raw)
+ 
+    # Diagonal: negative (loss terms)
+    diag_mask = torch.eye(self.n_target, device=raw.device, dtype=torch.bool)
+    A = torch.where(diag_mask, -F.softplus(raw), A)
+ 
+    return A
+ 
+  def forward(self, t, y):
+    self.nfe += 1
+    forcing = self._interpolate_forcing(t)       # (batch, n_input)
+    A = self._build_matrix(forcing)              # (batch, n_target, n_target)
+ 
+    # dy/dt = A @ y
+    dydt = torch.bmm(A, y.unsqueeze(-1)).squeeze(-1)   # (batch, n_target)
+    return dydt
