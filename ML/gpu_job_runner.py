@@ -11,8 +11,8 @@ EMAIL = 'federico.saitta@student.manchester.ac.uk'
 # abel.castanedarodriguez@student.manchester.ac.uk
 
 # Additional configuration
-PARTITION = 'gpuA' # Options: 'gpuA', 'gpuA40GB', 'gpuL'
-WALLTIME = '0-6'   # 1 day (format: days-hours)
+PARTITION = 'gpuL' # Options: 'gpuA', 'gpuA40GB', 'gpuL'
+WALLTIME = '0-12'   # 1 day (format: days-hours)
 JOB_NAME = 'gpu_job'
 CUDA_VERSION = '11.8.0'  # Update this to an available version
 PYTHON_SCRIPT = 'main.py'

@@ -43,8 +43,8 @@ class ODEFuncForced(nn.Module):
     self.t_points = None
     self.forcing_profiles = None
 
-    n_input = cfg.model.n_input_features
-    n_target = cfg.model.n_target_features
+    n_input = len(cfg.dataset.inputs)
+    n_target = len(cfg.dataset.targets)
 
     self.net = Deep_Neural_Network(
       n_inputs=n_input + n_target,
@@ -98,8 +98,8 @@ class ODEFuncMatrix(nn.Module):
     self.t_points = None
     self.forcing_profiles = None
  
-    n_input = cfg.model.n_input_features
-    self.n_target = cfg.model.n_target_features
+    n_input = len(cfg.dataset.inputs)
+    n_target = len(cfg.dataset.targets)
  
     # Network takes forcing only -> outputs n_target^2 matrix entries
     self.net = Deep_Neural_Network(

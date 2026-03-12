@@ -1,13 +1,15 @@
 dataset:
   path_to_data: data/casl_3305_runs_inter.h5
-  fraction_of_data: 0.2
+  fraction_of_data: 0.1
 
   inputs:
     power_W_g: MinMax
   targets:
     U238: MinMax
+    U239: MinMax
     Np239: MinMax
     Pu239: MinMax
+
 
   target_delta_conc: False
   train:
@@ -16,10 +18,7 @@ dataset:
     batch_size: 300
     
 model:
-  n_input_features: 1    # power only
-  n_target_features: 3   # U238
-
-  name: matrix_ode_3x3_burnup
+  name: matrix_ode_4x4_RK4
   matrix_ode: true        # Use depletion matrix: dy/dt = A(forcing) @ y
   layers: [64, 64]
   dropout_probability: 0.0
@@ -29,23 +28,23 @@ model:
 
 train:
   loss: mse
-  learning_rate: 1e-3
+  learning_rate: 3e-3
   weight_decay: 0.0
   lr_scheduler_patience: 25
-  num_epochs: 1
+  num_epochs: 10000
   early_stopping_patience: 100
   grad_clip: 0.0 # Lets try and disable grad clip
   drop_last: false
 
-  solver: dopri5    # dopri5 rk4 implicit_adams
-  rtol: 1e-5        
-  atol: 1e-7        
-  step_size: null   # only used for rk4
+  solver: rk4    # dopri5 rk4 implicit_adams
+  rtol: 1e-4       
+  atol: 1e-6        
+  step_size: 0.01   # only used for rk4
 
 runtime:
   mode: train
   model: NODE
-  ckp_path: null
+  ckp_path: /mnt/iusers01/fse-ugpgt01/compsci01/t97807fs/scratch/Nuclear_Transport_With_ML/ML/results/matrix_ode_3x3_burnup/best-matrix_ode_3x3_burnup-epoch=283.ckpt
   device: cuda
   seed: 42
   num_workers: 12
