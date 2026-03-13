@@ -227,7 +227,7 @@ class NODE_Model(L.LightningModule):
         mae_per_output[idx], rmse_per_output[idx], r2_per_output[idx],
         output_dir
       )
-      plot.plot_residuals_combined(y_true_flat, y_pred_flat, output_dir)
+      plot.plot_residuals_combined(y_true_flat, y_pred_flat, output_dir, steps_per_run=steps)
       
       per_target_metrics.append({
         'name': target_name,

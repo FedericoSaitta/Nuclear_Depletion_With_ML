@@ -90,6 +90,7 @@ class ODEFuncMatrix(nn.Module):
   Physical constraints:
     - Diagonal entries are negative (decay/absorption losses)
     - Off-diagonal entries are positive (production from transmutation)
+    - Entries listed in cfg.model.matrix_zero_entries are forced to zero
   """
  
   def __init__(self, cfg):
@@ -99,7 +100,16 @@ class ODEFuncMatrix(nn.Module):
     self.forcing_profiles = None
  
     n_input = len(cfg.dataset.inputs)
-    n_target = len(cfg.dataset.targets)
+    self.n_target = len(cfg.dataset.targets)
+ 
+    # Build sparsity mask: True = active entry, False = forced to zero
+    sparsity_mask = torch.ones(self.n_target, self.n_target, dtype=torch.bool)
+    zero_entries = getattr(cfg.model, 'matrix_zero_entries', None)
+    if zero_entries is not None:
+      for pair in zero_entries:
+        i, j = pair[0], pair[1]
+        sparsity_mask[i, j] = False
+    self.register_buffer('sparsity_mask', sparsity_mask)
  
     # Network takes forcing only -> outputs n_target^2 matrix entries
     self.net = Deep_Neural_Network(
@@ -127,8 +137,8 @@ class ODEFuncMatrix(nn.Module):
   def _build_matrix(self, forcing):
     """Build constrained depletion matrix from forcing input.
  
-    Returns: (batch, n_target, n_target) matrix with negative diagonal
-             and positive off-diagonal entries.
+    Returns: (batch, n_target, n_target) matrix with negative diagonal,
+             positive off-diagonal entries, and zero-masked entries.
     """
     raw = self.net(forcing)                              # (batch, n_target^2)
     raw = raw.view(-1, self.n_target, self.n_target)
@@ -139,6 +149,9 @@ class ODEFuncMatrix(nn.Module):
     # Diagonal: negative (loss terms)
     diag_mask = torch.eye(self.n_target, device=raw.device, dtype=torch.bool)
     A = torch.where(diag_mask, -F.softplus(raw), A)
+
+    # Zero out entries specified in the sparsity mask
+    A = A * self.sparsity_mask
  
     return A
  

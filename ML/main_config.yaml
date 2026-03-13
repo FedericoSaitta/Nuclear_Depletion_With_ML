@@ -18,27 +18,35 @@ dataset:
     batch_size: 300
     
 model:
-  name: matrix_ode_4x4_RK4
+  name: matrix_ode_4x4_zeroed_Test
   matrix_ode: true        # Use depletion matrix: dy/dt = A(forcing) @ y
   layers: [64, 64]
   dropout_probability: 0.0
-  activation: tanh
+  activation: gelu
   output_activation: none
   residual_connections: false
 
+  # Zero entries in the depletion matrix [row, col] (0-indexed, matching target order)
+  # Target order: U238(0), U239(1), Np239(2), Pu239(3)
+  # Physical chain: U238 -> U239 -> Np239 -> Pu239  (only adjacent transitions)
+  matrix_zero_entries: [      [0,1],[0,2],[0,3],
+                                    [1,2],[1,3],
+                        [2,0],            [2,3],
+                        [3,0],[3,1]             ]
+
 train:
   loss: mse
-  learning_rate: 3e-3
+  learning_rate: 4e-3
   weight_decay: 0.0
-  lr_scheduler_patience: 25
+  lr_scheduler_patience: 50
   num_epochs: 10000
-  early_stopping_patience: 100
+  early_stopping_patience: 200
   grad_clip: 0.0 # Lets try and disable grad clip
   drop_last: false
 
-  solver: rk4    # dopri5 rk4 implicit_adams
+  solver: dopri5    # dopri5 rk4 implicit_adams
   rtol: 1e-4       
-  atol: 1e-6        
+  atol: 1e-5        
   step_size: 0.01   # only used for rk4
 
 runtime:
