@@ -28,7 +28,7 @@ class NODE_Model(L.LightningModule):
     self.matrix_ode = getattr(config_object.model, 'matrix_ode', False)
     if self.matrix_ode:
       self.func = ODEFuncMatrix(config_object)
-      logger.info("Using matrix-based NODE: dy/dt = A(forcing) @ y")
+      logger.info("Using matrix-based NODE: dy/dt = A(forcing, y) @ y")
     else:
       logger.info("Using standard NODE: dy/dt = y")
       self.func = ODEFuncForced(config_object)
@@ -253,7 +253,7 @@ class NODE_Model(L.LightningModule):
     # 4b. Depletion matrix visualization (matrix ODE only)
     if self.matrix_ode:
       self._compute_depletion_matrix_analysis(
-        all_inputs_scaled, target_names
+          all_inputs_scaled, all_trues_scaled, target_names
       )
     
     # 5. Prediction comparison plots (TF vs AR)
@@ -687,7 +687,7 @@ class NODE_Model(L.LightningModule):
 
     # ─── Depletion Matrix Analysis (matrix ODE only) ─────────────────────
  
-  def _compute_depletion_matrix_analysis(self, all_inputs_scaled, target_names):
+  def _compute_depletion_matrix_analysis(self, all_inputs_scaled, all_trues_scaled, target_names):
     """Extract and visualise the learned depletion matrix A(t) over time."""
     import matplotlib.pyplot as plt
  
@@ -706,21 +706,27 @@ class NODE_Model(L.LightningModule):
     # Collect matrices at each timestep: {t_idx: list of (n_target, n_target)}
     matrices_by_time = {t: [] for t in timestep_indices}
  
+
     batch_size = 32
     for batch_start in range(0, max_runs, batch_size):
       batch_end = min(batch_start + batch_size, max_runs)
- 
+
       inputs_batch = torch.tensor(
         all_inputs_scaled[batch_start:batch_end], dtype=torch.float32, device=device
       )
- 
+
+      trues_batch = torch.tensor(
+        all_trues_scaled[batch_start:batch_end], dtype=torch.float32, device=device
+      )
+
       self.func.set_forcing(t_span, inputs_batch)
- 
+
       for t_idx in timestep_indices:
         with torch.no_grad():
           forcing_t = self.func._interpolate_forcing(t_span[int(t_idx)])
-          A = self.func._build_matrix(forcing_t)  # (batch, n, n)
- 
+          y_t = trues_batch[:, int(t_idx), :]  # true state at this timestep
+          A = self.func._build_matrix(forcing_t, y_t)  # (batch, n, n)
+
         for b in range(A.shape[0]):
           matrices_by_time[t_idx].append(A[b].cpu().numpy())
  

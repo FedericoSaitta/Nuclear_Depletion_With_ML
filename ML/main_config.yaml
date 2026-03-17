@@ -18,7 +18,7 @@ dataset:
     batch_size: 300
     
 model:
-  name: matrix_ode_4x4_zeroed_Test
+  name: matrix_ode_4x4_zeroed_Hyper
   matrix_ode: true        # Use depletion matrix: dy/dt = A(forcing) @ y
   layers: [64, 64]
   dropout_probability: 0.0
@@ -36,23 +36,23 @@ model:
 
 train:
   loss: mse
-  learning_rate: 4e-3
+  learning_rate: 6e-9
   weight_decay: 0.0
   lr_scheduler_patience: 50
-  num_epochs: 10000
-  early_stopping_patience: 200
+  num_epochs: 1
+  early_stopping_patience: 100
   grad_clip: 0.0 # Lets try and disable grad clip
   drop_last: false
 
   solver: dopri5    # dopri5 rk4 implicit_adams
-  rtol: 1e-4       
-  atol: 1e-5        
+  rtol: 1e-6     
+  atol: 1e-7      
   step_size: 0.01   # only used for rk4
 
 runtime:
-  mode: train
+  mode: train_from_ckp
   model: NODE
-  ckp_path: /mnt/iusers01/fse-ugpgt01/compsci01/t97807fs/scratch/Nuclear_Transport_With_ML/ML/results/matrix_ode_3x3_burnup/best-matrix_ode_3x3_burnup-epoch=283.ckpt
+  ckp_path: /mnt/iusers01/fse-ugpgt01/compsci01/t97807fs/scratch/Nuclear_Transport_With_ML/ML/results/matrix_ode_4x4_zeroed_Hyper/best-matrix_ode_4x4_zeroed_Hyper-epoch=1857.ckpt
   device: cuda
   seed: 42
   num_workers: 12
