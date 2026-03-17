@@ -18,7 +18,7 @@ dataset:
     batch_size: 300
     
 model:
-  name: matrix_ode_4x4_zeroed_Hyper
+  name: matrix_ode_4x4_zeroed_Hyper_new_Plot
   matrix_ode: true        # Use depletion matrix: dy/dt = A(forcing) @ y
   layers: [64, 64]
   dropout_probability: 0.0
@@ -36,7 +36,7 @@ model:
 
 train:
   loss: mse
-  learning_rate: 6e-9
+  learning_rate: 6e-12
   weight_decay: 0.0
   lr_scheduler_patience: 50
   num_epochs: 1

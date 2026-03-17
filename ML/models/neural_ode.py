@@ -686,7 +686,63 @@ class NODE_Model(L.LightningModule):
     plt.close()
 
     # ─── Depletion Matrix Analysis (matrix ODE only) ─────────────────────
+  def _get_unscaling_matrix(self, target_names):
+    """
+    Build the (n_target, n_target) conversion matrix to go from scaled to
+    physical rate coefficients.
  
+    In scaled space: dy_s/dt_n = A_s @ y_s
+    In physical space: dy/dt = A_phys @ y  (approximately, ignoring MinMax offset)
+ 
+    Conversion: A_phys[i,j] = A_s[i,j] * (range_i / range_j) / T_total
+ 
+    where range_i = y_max_i - y_min_i (from MinMax scaler) and
+    T_total = physical time span in the original time units.
+ 
+    Returns: (scale_matrix, T_total, time_unit)
+      scale_matrix: (n_target, n_target) — multiply A_scaled elementwise
+      T_total: physical time span
+      time_unit: string label for time units
+    """
+    dm = self.trainer.datamodule
+    n_target = len(target_names)
+ 
+    # Extract per-feature ranges using the existing inverse_transformer.
+    # Passing scaled values of 0 and 1 recovers the physical min and max.
+    zeros = np.zeros((1, n_target))
+    ones = np.ones((1, n_target))
+    phys_min = data_scaler.inverse_transformer(dm.target_scaler, zeros)[0]
+    phys_max = data_scaler.inverse_transformer(dm.target_scaler, ones)[0]
+    ranges = phys_max - phys_min
+ 
+    # Physical time span
+    raw_t = dm.time_array[:dm.actual_steps]
+    T_total = raw_t[-1] - raw_t[0]
+ 
+    # Determine time unit from magnitude
+    if T_total > 86400 * 30:
+      time_unit = 'days'
+      T_total_display = T_total / 86400
+    elif T_total > 3600:
+      time_unit = 'hours'
+      T_total_display = T_total / 3600
+    elif T_total > 60:
+      time_unit = 'minutes'
+      T_total_display = T_total / 60
+    else:
+      time_unit = 'seconds'
+      T_total_display = T_total
+ 
+    # Build scale matrix: scale[i,j] = range_i / (range_j * T_total)
+    # This converts A_scaled[i,j] -> A_phys[i,j] in units of 1/time
+    scale_matrix = np.outer(ranges, 1.0 / ranges) / T_total
+ 
+    logger.info(f"  Physical time span: {T_total:.2f} s ({T_total_display:.2f} {time_unit})")
+    for idx, name in enumerate(target_names):
+      logger.info(f"  {name} range: {ranges[idx]:.6e}")
+ 
+    return scale_matrix, T_total, time_unit
+  
   def _compute_depletion_matrix_analysis(self, all_inputs_scaled, all_trues_scaled, target_names):
     """Extract and visualise the learned depletion matrix A(t) over time."""
     import matplotlib.pyplot as plt
@@ -699,10 +755,14 @@ class NODE_Model(L.LightningModule):
     n_target = len(target_names)
     device = self.device
     t_span = self.t_span.to(device)
+
+    # Get unscaling conversion factors
+    scale_matrix, T_total, time_unit = self._get_unscaling_matrix(target_names)
  
     max_runs = min(20, num_runs)
     timestep_indices = np.linspace(0, steps - 1, min(30, steps), dtype=int)
- 
+
+  
     # Collect matrices at each timestep: {t_idx: list of (n_target, n_target)}
     matrices_by_time = {t: [] for t in timestep_indices}
  
@@ -728,7 +788,8 @@ class NODE_Model(L.LightningModule):
           A = self.func._build_matrix(forcing_t, y_t)  # (batch, n, n)
 
         for b in range(A.shape[0]):
-          matrices_by_time[t_idx].append(A[b].cpu().numpy())
+          A_phys = A[b].cpu().numpy() * scale_matrix
+          matrices_by_time[t_idx].append(A_phys)
  
     # ── Plot 1: Mean depletion matrix (time-averaged) ──
     all_matrices = []
@@ -740,20 +801,20 @@ class NODE_Model(L.LightningModule):
     fig, ax = plt.subplots(figsize=(max(6, n_target * 1.5), max(5, n_target * 1.2)))
     im = ax.imshow(mean_A, cmap='RdBu_r', aspect='auto',
                    vmin=-np.abs(mean_A).max(), vmax=np.abs(mean_A).max())
-    plt.colorbar(im, ax=ax, label='Matrix entry value')
+    plt.colorbar(im, ax=ax, label=f'Rate coefficient [1/{time_unit}]')
  
     ax.set_xticks(range(n_target))
     ax.set_xticklabels(target_names, rotation=45, ha='right', fontsize=10)
     ax.set_yticks(range(n_target))
     ax.set_yticklabels([f'd{n}/dt' for n in target_names], fontsize=10)
-    ax.set_title('Learned Depletion Matrix A (time-averaged)')
+    ax.set_title(f'Learned Depletion Matrix A (time-averaged, physical units)')
  
     for i in range(n_target):
       for j in range(n_target):
         val = mean_A[i, j]
         color = 'white' if abs(val) > np.abs(mean_A).max() * 0.6 else 'black'
-        ax.text(j, i, f'{val:.4f}\n({std_A[i,j]:.4f})',
-                ha='center', va='center', fontsize=9, color=color)
+        ax.text(j, i, f'{val:.4e}\n(\u00b1{std_A[i,j]:.2e})',
+                ha='center', va='center', fontsize=8, color=color)
  
     plt.tight_layout()
     plt.savefig(os.path.join(self.result_dir, 'depletion_matrix_mean.png'), dpi=150, bbox_inches='tight')
@@ -762,24 +823,41 @@ class NODE_Model(L.LightningModule):
     # ── Plot 2: Matrix entries over time ──
     sorted_ts = sorted(timestep_indices)
     time_fractions = self.t_span.cpu().numpy()[sorted_ts]
- 
+
     mean_over_time = np.array([
       np.mean(matrices_by_time[t], axis=0) for t in sorted_ts
     ])  # (n_timesteps, n_target, n_target)
+
+    std_over_time = np.array([
+      np.std(matrices_by_time[t], axis=0) for t in sorted_ts
+    ])
  
-    fig, axes = plt.subplots(n_target, n_target, figsize=(4 * n_target, 3 * n_target), sharex=True)
+    fig, axes = plt.subplots(n_target, n_target, figsize=(4 * n_target, 3.5 * n_target), sharex=True)
     for i in range(n_target):
       for j in range(n_target):
         ax = axes[i, j] if n_target > 1 else axes
-        ax.plot(time_fractions, mean_over_time[:, i, j], linewidth=1.5,
-                color='tab:red' if i == j else 'tab:blue')
+        mean_vals = mean_over_time[:, i, j]
+        std_vals = std_over_time[:, i, j]
+ 
+        color = 'tab:red' if i == j else 'tab:blue'
+        ax.plot(time_fractions, mean_vals, linewidth=1.5, color=color)
+        ax.fill_between(time_fractions, mean_vals - std_vals, mean_vals + std_vals,
+                         alpha=0.2, color=color)
         ax.set_title(f'A[{target_names[i]},{target_names[j]}]', fontsize=9)
         ax.grid(True, alpha=0.3)
         ax.axhline(0, color='gray', linewidth=0.5, linestyle='--')
+
+        # Y-axis label with units
+        if j == 0:
+          ax.set_ylabel(f'[1/{time_unit}]', fontsize=8)
+
         if i == n_target - 1:
           ax.set_xlabel('Normalised time')
  
-    fig.suptitle('Depletion Matrix Entries Over Time', fontsize=13, fontweight='bold')
+    
+    fig.suptitle(f'Depletion Matrix Entries Over Time (physical units, 1/{time_unit})\n'
+                 f'shaded = \u00b11\u03c3 across {max_runs} runs',
+                 fontsize=13, fontweight='bold')
     plt.tight_layout()
     plt.savefig(os.path.join(self.result_dir, 'depletion_matrix_evolution.png'), dpi=150, bbox_inches='tight')
     plt.close()
