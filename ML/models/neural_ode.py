@@ -693,16 +693,16 @@ class NODE_Model(L.LightningModule):
  
     In scaled space: dy_s/dt_n = A_s @ y_s
     In physical space: dy/dt = A_phys @ y  (approximately, ignoring MinMax offset)
- 
-    Conversion: A_phys[i,j] = A_s[i,j] * (range_i / range_j) / T_total
+    
+    Conversion: A_phys[i,j] = A_s[i,j] * (range_i / range_j) / T_total_days
  
     where range_i = y_max_i - y_min_i (from MinMax scaler) and
-    T_total = physical time span in the original time units.
+    T_total_days = physical time span in days (from "time_days" column).
  
-    Returns: (scale_matrix, T_total, time_unit)
+    Returns: (scale_matrix, T_total_days, time_unit)
       scale_matrix: (n_target, n_target) — multiply A_scaled elementwise
-      T_total: physical time span
-      time_unit: string label for time units
+      T_total_days: physical time span in days
+      time_unit: 'days'
     """
     dm = self.trainer.datamodule
     n_target = len(target_names)
@@ -714,34 +714,22 @@ class NODE_Model(L.LightningModule):
     phys_min = data_scaler.inverse_transformer(dm.target_scaler, zeros)[0]
     phys_max = data_scaler.inverse_transformer(dm.target_scaler, ones)[0]
     ranges = phys_max - phys_min
- 
-    # Physical time span
+
+    # Physical time span — time_array is in days (column "time_days" in HDF5)
     raw_t = dm.time_array[:dm.actual_steps]
-    T_total = raw_t[-1] - raw_t[0]
+    T_total_days = raw_t[-1] - raw_t[0]
  
-    # Determine time unit from magnitude
-    if T_total > 86400 * 30:
-      time_unit = 'days'
-      T_total_display = T_total / 86400
-    elif T_total > 3600:
-      time_unit = 'hours'
-      T_total_display = T_total / 3600
-    elif T_total > 60:
-      time_unit = 'minutes'
-      T_total_display = T_total / 60
-    else:
-      time_unit = 'seconds'
-      T_total_display = T_total
+    # Build scale matrix: scale[i,j] = range_i / (range_j * T_total_days)
+    # This converts A_scaled[i,j] -> A_phys[i,j] in units of 1/days
+    scale_matrix = np.outer(ranges, 1.0 / ranges) / T_total_days
+    time_unit = 'days'
  
-    # Build scale matrix: scale[i,j] = range_i / (range_j * T_total)
-    # This converts A_scaled[i,j] -> A_phys[i,j] in units of 1/time
-    scale_matrix = np.outer(ranges, 1.0 / ranges) / T_total
- 
-    logger.info(f"  Physical time span: {T_total:.2f} s ({T_total_display:.2f} {time_unit})")
+    logger.info(f"  Physical time span: {T_total_days:.2f} days")
+
     for idx, name in enumerate(target_names):
       logger.info(f"  {name} range: {ranges[idx]:.6e}")
  
-    return scale_matrix, T_total, time_unit
+    return scale_matrix, T_total_days, time_unit
   
   def _compute_depletion_matrix_analysis(self, all_inputs_scaled, all_trues_scaled, target_names):
     """Extract and visualise the learned depletion matrix A(t) over time."""
