@@ -1,28 +1,10 @@
 """
-BEAVRS Cycle 1 depletion data generation.
-
-Generates high-fidelity depletion data using realistic BEAVRS Cycle 1 conditions:
-  - Power history read from an external file (CSV or whitespace-delimited)
-  - Fixed state parameters at nominal hot full power conditions
-  - Quarter-pin geometry for computational efficiency
-  - Parallel workers with independent MC seeds for statistical averaging
+BEAVRS Cycle 1 depletion data generation with critical boron search
+and detailed tally extraction (flux, reaction rates, fission power fractions).
 
 Usage:
-  python generate_beavrs_data.py -p power_history.csv -n 4 -c 4
-  python generate_beavrs_data.py -p power_history.csv --particles 20000 --dt 5
-
-Power history file format (CSV with header):
-  time_days,specific_power_W_per_g
-  0,38.5
-  5,38.3
-  10,37.9
-  ...
-
-Or a simple single-column file (one power value per line, applied at each dt):
-  38.5
-  38.3
-  37.9
-  ...
+  python quarter_datagen.py -p power_history.csv -c 1 -t 10
+  python quarter_datagen.py -p power_history.csv --particles 50000 --dt 1 -c 1 -t 32
 """
 import sys
 import argparse
@@ -34,14 +16,14 @@ parser = argparse.ArgumentParser(
 
 # --- I/O ---
 parser.add_argument('-p', '--power-file', type=str, required=True,
-          help='Path to power history file (CSV or single-column)')
+          help='Path to BEAVRS power history CSV (Day, Percent Rated Power)')
 parser.add_argument('-f', '--chain-file', type=str, default='chain_casl_pwr.xml',
           help='Depletion chain file name')
 
 # --- Parallelism ---
 parser.add_argument('-n', '--runs', type=int, default=1,
           help='Number of data generation runs (outer loop)')
-parser.add_argument('-c', '--cores', type=int, default=10        ,
+parser.add_argument('-c', '--cores', type=int, default=1,
           help='Number of parallel worker processes per run')
 parser.add_argument('-t', '--threads', type=int, default=1,
           help='OpenMP threads per worker')
@@ -58,8 +40,12 @@ parser.add_argument('--temp-method', type=str, default='interpolation',
           help='Cross section temperature treatment')
 
 # --- Depletion settings ---
-parser.add_argument('--dt', type=float, default=10.0,
+parser.add_argument('--dt', type=float, default=1.0,
           help='Depletion time step size in days')
+
+# --- BEAVRS nominal power ---
+parser.add_argument('--rated-power', type=float, default=41.7,
+          help='100%% rated specific power [W/g] for converting percent to W/g')
 
 # --- Fixed reactor state (BEAVRS Cycle 1 nominal HFP) ---
 parser.add_argument('--fuel-temp', type=float, default=900.0,
@@ -71,9 +57,13 @@ parser.add_argument('--clad-temp', type=float, default=620.0,
 parser.add_argument('--mod-density', type=float, default=0.74,
           help='Moderator density [g/cm3]')
 parser.add_argument('--boron-ppm', type=float, default=975.0,
-          help='Soluble boron concentration [ppm]')
+          help='Initial boron for materials setup [ppm]')
+parser.add_argument('--boron-bracket', type=float, nargs=2, default=[0.0, 6000.0],
+          help='Bracket range for boron search [ppm]')
+parser.add_argument('--boron-tol', type=float, default=1e-2,
+          help='keff tolerance for boron search (1e-2 = 1000 pcm)')
 parser.add_argument('--enrichment', type=float, default=3.1,
-          help='U-235 enrichment [%]')
+          help='U-235 enrichment [%%]')
 parser.add_argument('--fuel-density', type=float, default=10.4,
           help='UO2 fuel density [g/cm3]')
 
@@ -85,7 +75,7 @@ parser.add_argument('-s', '--seed', type=int, default=None,
 if __name__ == "__main__":
   args = parser.parse_args()
 else:
-  args = None  # Will not run as module
+  args = None
 
 import os
 os.environ["OMP_NUM_THREADS"] = str(args.threads if args else 1)
@@ -94,6 +84,7 @@ import openmc
 import openmc.deplete
 import time
 import uuid
+import glob
 import numpy as np
 import pandas as pd
 import random
@@ -105,6 +96,11 @@ from quarter_sim import (
   set_material_volumes_quarter,
   create_quarter_geometry,
   create_settings,
+  create_tallies,
+  update_water_composition,
+  FISSION_NUCLIDES,
+  CAPTURE_NUCLIDES,
+  FISSION_Q_VALUES,
 )
 
 HOUR_IN_SECONDS = 3600
@@ -112,77 +108,63 @@ DAY_IN_SECONDS = 24 * HOUR_IN_SECONDS
 
 
 # ---------------------------------------------------------------------------
-# Power history loading
+# BEAVRS power history loading
 # ---------------------------------------------------------------------------
 
-def load_power_history(filepath, dt_days=None):
-  """Load a power history from file.
-  
-  Supports two formats:
-  
-  1) CSV with columns 'time_days' and 'specific_power_W_per_g':
-     Returns the power values directly. If time steps in the file
-     don't match dt_days, the history is interpolated onto a uniform
-     grid with spacing dt_days.
-  
-  2) Single-column file (one power value per line, comments with #):
-     Each value is the specific power [W/g] for one depletion step
-     of duration dt_days.
-  
-  Returns:
-    powers: list of specific power values [W/g], one per depletion step
-    dt:   time step size in seconds
+def load_beavrs_power_history(filepath, nominal_specific_power_W_per_g, dt_days):
+  """Load BEAVRS power history and interpolate onto uniform grid.
+
+  Expected CSV format:
+    Cycle 1
+    Day,Percent Rated Power
+    0.0,1.598205
+    ...
+
+  Only Cycle 1 data is used.
   """
   filepath = os.path.abspath(filepath)
   if not os.path.exists(filepath):
     raise FileNotFoundError(f"Power history file not found: {filepath}")
 
-  # Try CSV with header first
-  try:
-    df = pd.read_csv(filepath, comment='#')
-    cols_lower = {c.strip().lower(): c for c in df.columns}
+  days = []
+  percents = []
+  header_found = False
 
-    if 'time_days' in cols_lower and 'specific_power_w_per_g' in cols_lower:
-      times = df[cols_lower['time_days']].values
-      powers_raw = df[cols_lower['specific_power_w_per_g']].values
-
-      if dt_days is not None:
-        # Interpolate onto uniform grid
-        t_end = times[-1]
-        num_steps = int(np.round(t_end / dt_days))
-        t_uniform = np.linspace(0, t_end, num_steps + 1)
-        # Power at each step is the average over the interval;
-        # approximate by the value at the start of each interval
-        powers_interp = np.interp(t_uniform[:-1], times, powers_raw)
-        return list(powers_interp), dt_days * DAY_IN_SECONDS
-
-      else:
-        # Use the time steps as given in the file
-        dt_values = np.diff(times)
-        if not np.allclose(dt_values, dt_values[0], rtol=1e-3):
-          raise ValueError(
-            "Non-uniform time steps detected in power file. "
-            "Specify --dt to interpolate onto a uniform grid."
-          )
-        return list(powers_raw[:-1]), dt_values[0] * DAY_IN_SECONDS
-
-  except (pd.errors.ParserError, KeyError, ValueError):
-    pass
-
-  # Fallback: single-column file
-  powers = []
   with open(filepath) as f:
     for line in f:
       line = line.strip()
-      if not line or line.startswith('#'):
+      if not line:
+        if header_found:
+          break
         continue
-      powers.append(float(line))
+      if line.lower().startswith('cycle 1'):
+        continue
+      if line.lower().startswith('day'):
+        header_found = True
+        continue
+      if line.lower().startswith('cycle') or line[0].isalpha():
+        break
+      try:
+        parts = line.split(',')
+        days.append(float(parts[0]))
+        percents.append(float(parts[1]))
+      except (ValueError, IndexError):
+        break
 
-  if dt_days is None:
-    raise ValueError(
-      "Single-column power file requires --dt to set the step size."
-    )
-  return powers, dt_days * DAY_IN_SECONDS
+  days = np.array(days)
+  powers_raw = np.array(percents) / 100.0 * nominal_specific_power_W_per_g
+
+  t_end = days[-1]
+  num_steps = int(np.round(t_end / dt_days))
+  t_uniform = np.arange(num_steps) * dt_days
+  powers_interp = np.interp(t_uniform, days, powers_raw)
+
+  print(f"Loaded BEAVRS Cycle 1 power history: {len(days)} raw points")
+  print(f"  Interpolated to {num_steps} steps at dt = {dt_days:.2f} days")
+  print(f"  Duration: {t_end:.1f} days")
+  print(f"  Power range: [{powers_interp.min():.2f}, {powers_interp.max():.2f}] W/g")
+
+  return list(powers_interp), t_uniform
 
 
 # ---------------------------------------------------------------------------
@@ -209,28 +191,166 @@ def setup_paths(script_dir, worker_id, chain_filename):
 
 
 def setup_reactor_model(config, results_dir):
-    """Build and export the quarter-pin reactor model."""
-    fuel, gap, clad, water = create_materials(config)
-    set_material_volumes_quarter(
-        fuel, gap, clad, water,
-        radii=config['geometry_radii'],
-        pitch=config['geometry_pitch']
-    )
+  """Build and export the quarter-pin reactor model."""
+  fuel, gap, clad, water = create_materials(config)
+  set_material_volumes_quarter(
+    fuel, gap, clad, water,
+    radii=config['geometry_radii'],
+    pitch=config['geometry_pitch']
+  )
 
-    materials = openmc.Materials([fuel, gap, clad, water])
-    geometry = create_quarter_geometry(
-        (fuel, gap, clad, water),
-        radii=config['geometry_radii'],
-        pitch=config['geometry_pitch']
-    )
-    settings = create_settings(config)
+  materials = openmc.Materials([fuel, gap, clad, water])
+  geometry = create_quarter_geometry(
+    (fuel, gap, clad, water),
+    radii=config['geometry_radii'],
+    pitch=config['geometry_pitch']
+  )
+  settings = create_settings(config)
+  tallies = create_tallies(fuel)
 
-    geometry.export_to_xml(path=results_dir)
-    settings.export_to_xml(path=results_dir)
+  geometry.export_to_xml(path=results_dir)
+  settings.export_to_xml(path=results_dir)
+  materials.export_to_xml(path=results_dir)
+
+  return fuel, gap, clad, water, materials, geometry, settings, tallies
+
+
+# ---------------------------------------------------------------------------
+# Critical boron search
+# ---------------------------------------------------------------------------
+
+def find_critical_boron(water, materials, geometry, settings, results_dir,
+            bracket, tol, prev_crit_boron=None):
+  """Find the boron concentration that gives keff = 1.0.
+
+  Note: the boron search models do NOT include custom tallies — only the
+  depletion transport solve gets tallies. This avoids unnecessary I/O
+  during the search iterations.
+  """
+  mod_density = water.density
+
+  def build_model(boron_ppm):
+    update_water_composition(water, boron_ppm, mod_density)
     materials.export_to_xml(path=results_dir)
+    # No tallies here — search models are lightweight
+    return openmc.model.Model(geometry, materials, settings)
 
-    return fuel, gap, clad, water, materials, geometry, settings
+  if prev_crit_boron is not None:
+    margin = 200.0
+    lo = max(bracket[0], prev_crit_boron - margin)
+    hi = min(bracket[1], prev_crit_boron + margin)
+    search_bracket = [lo, hi]
+  else:
+    search_bracket = list(bracket)
 
+  crit_ppm, guesses, keffs = openmc.search_for_keff(
+    build_model,
+    bracket=search_bracket,
+    tol=tol,
+    bracketed_method='bisect',
+    print_iterations=True,
+  )
+
+  update_water_composition(water, crit_ppm, mod_density)
+  return crit_ppm, guesses, keffs
+
+
+# ---------------------------------------------------------------------------
+# Statepoint tally extraction
+# ---------------------------------------------------------------------------
+
+def extract_tallies_from_statepoint(batches):
+  """Read the latest statepoint and extract flux + reaction rate tallies.
+
+  Returns a dict with tally data, or None values if statepoint not found.
+  """
+  sp_file = f"statepoint.{batches}.h5"
+
+  result = {
+    'flux': float('nan'),
+    'flux_std': float('nan'),
+  }
+  for nuc in FISSION_NUCLIDES:
+    result[f'{nuc}_fission'] = float('nan')
+    result[f'{nuc}_fission_std'] = float('nan')
+  for nuc in CAPTURE_NUCLIDES:
+    result[f'{nuc}_capture'] = float('nan')
+    result[f'{nuc}_capture_std'] = float('nan')
+
+  if not os.path.exists(sp_file):
+    # Try glob as fallback
+    sp_files = sorted(glob.glob('statepoint.*.h5'))
+    if sp_files:
+      sp_file = sp_files[-1]
+    else:
+      print("  WARNING: No statepoint file found, tallies will be NaN")
+      return result
+
+  try:
+    sp = openmc.StatePoint(sp_file)
+
+    # Flux
+    try:
+      t = sp.get_tally(id=9001)
+      result['flux'] = t.mean.flatten()[0]
+      result['flux_std'] = t.std_dev.flatten()[0]
+    except Exception as e:
+      print(f"  WARNING: Could not read flux tally: {e}")
+
+    # Fission rates
+    try:
+      t = sp.get_tally(id=9002)
+      means = t.mean.flatten()
+      stds  = t.std_dev.flatten()
+      for j, nuc in enumerate(FISSION_NUCLIDES):
+        result[f'{nuc}_fission'] = means[j]
+        result[f'{nuc}_fission_std'] = stds[j]
+    except Exception as e:
+      print(f"  WARNING: Could not read fission tally: {e}")
+
+    # Capture rates
+    try:
+      t = sp.get_tally(id=9003)
+      means = t.mean.flatten()
+      stds  = t.std_dev.flatten()
+      for j, nuc in enumerate(CAPTURE_NUCLIDES):
+        result[f'{nuc}_capture'] = means[j]
+        result[f'{nuc}_capture_std'] = stds[j]
+    except Exception as e:
+      print(f"  WARNING: Could not read capture tally: {e}")
+
+    sp.close()
+
+  except Exception as e:
+    print(f"  WARNING: Could not open statepoint {sp_file}: {e}")
+
+  return result
+
+
+def compute_fission_power_fractions(tally_data):
+  """Compute fraction of fission power from each nuclide.
+
+  Power_i = fission_rate_i * Q_i
+  Fraction_i = Power_i / sum(Power_j)
+  """
+  fracs = {}
+  total_power = 0.0
+  for nuc in FISSION_NUCLIDES:
+    rate = tally_data.get(f'{nuc}_fission', 0.0)
+    if np.isnan(rate):
+      rate = 0.0
+    total_power += rate * FISSION_Q_VALUES[nuc]
+
+  for nuc in FISSION_NUCLIDES:
+    rate = tally_data.get(f'{nuc}_fission', 0.0)
+    if np.isnan(rate):
+      rate = 0.0
+    if total_power > 0:
+      fracs[f'{nuc}_fission_power_frac'] = (rate * FISSION_Q_VALUES[nuc]) / total_power
+    else:
+      fracs[f'{nuc}_fission_power_frac'] = 0.0
+
+  return fracs
 
 
 # ---------------------------------------------------------------------------
@@ -252,32 +372,92 @@ def run_depletion_step(model, chain, time_step_s, power_watts, prev_results_file
 
 
 def run_depletion_simulation(fuel, gap, clad, water, materials, geometry, settings,
-                             chain, powers, dt_seconds, fuel_mass_g,
-                             worker_id, results_dir):
-    """Step through the power history, running coupled transport + depletion."""
-    num_steps = len(powers)
+               tallies, chain, powers, dt_seconds, fuel_mass_g,
+               worker_id, results_dir, boron_bracket, boron_tol):
+  """Step through the power history with critical boron search and tally extraction.
 
-    for i in range(num_steps):
-        step_power_W = powers[i] * fuel_mass_g  # specific power -> total power
-        print(f"Worker {worker_id} | Step {i+1}/{num_steps} | "
-              f"P = {powers[i]:.2f} W/g | P_total = {step_power_W:.1f} W")
+  At each depletion step:
+    1. Find critical boron via search_for_keff
+    2. Run coupled transport + depletion (with tallies)
+    3. Read statepoint to extract flux and reaction rates
+    4. Compute fission power fractions
 
-        # Materials are fixed (no temperature/density updates per step)
-        # If you later want step-dependent boron letdown, update water here.
-        materials.export_to_xml(path=results_dir)
+  Returns:
+    step_data: dict of lists, one entry per depletion step
+  """
+  num_steps = len(powers)
+  batches = settings.batches
 
-        model = openmc.model.Model(geometry, materials, settings)
-        prev_results_file = "depletion_results.h5" if i > 0 else None
+  # Initialise per-step storage
+  step_keys = ['boron_ppm', 'flux', 'flux_std']
+  for nuc in FISSION_NUCLIDES:
+    step_keys.extend([f'{nuc}_fission', f'{nuc}_fission_std', f'{nuc}_fission_power_frac'])
+  for nuc in CAPTURE_NUCLIDES:
+    step_keys.extend([f'{nuc}_capture', f'{nuc}_capture_std'])
 
-        run_depletion_step(model, chain, dt_seconds, step_power_W, prev_results_file)
+  step_data = {k: [] for k in step_keys}
+  prev_crit_boron = None
+
+  for i in range(num_steps):
+    step_power_W = powers[i] * fuel_mass_g
+
+    # --- 1. Critical boron search ---
+    print(f"\nWorker {worker_id} | Step {i+1}/{num_steps} | "
+        f"P = {powers[i]:.2f} W/g | Searching for critical boron...")
+
+    crit_ppm, guesses, keffs = find_critical_boron(
+      water, materials, geometry, settings, results_dir,
+      bracket=boron_bracket, tol=boron_tol,
+      prev_crit_boron=prev_crit_boron
+    )
+    step_data['boron_ppm'].append(crit_ppm)
+    prev_crit_boron = crit_ppm
+
+    print(f"Worker {worker_id} | Step {i+1}/{num_steps} | "
+        f"P = {powers[i]:.2f} W/g | B_crit = {crit_ppm:.1f} ppm | "
+        f"({len(guesses)} search iters)")
+
+    # --- 2. Depletion with tallies ---
+    materials.export_to_xml(path=results_dir)
+    model = openmc.model.Model(geometry, materials, settings, tallies)
+    prev_results_file = "depletion_results.h5" if i > 0 else None
+
+    run_depletion_step(model, chain, dt_seconds, step_power_W, prev_results_file)
+
+    # --- 3. Extract tallies from statepoint ---
+    tally_data = extract_tallies_from_statepoint(batches)
+
+    step_data['flux'].append(tally_data['flux'])
+    step_data['flux_std'].append(tally_data['flux_std'])
+
+    for nuc in FISSION_NUCLIDES:
+      step_data[f'{nuc}_fission'].append(tally_data[f'{nuc}_fission'])
+      step_data[f'{nuc}_fission_std'].append(tally_data[f'{nuc}_fission_std'])
+
+    for nuc in CAPTURE_NUCLIDES:
+      step_data[f'{nuc}_capture'].append(tally_data[f'{nuc}_capture'])
+      step_data[f'{nuc}_capture_std'].append(tally_data[f'{nuc}_capture_std'])
+
+    # --- 4. Fission power fractions ---
+    fracs = compute_fission_power_fractions(tally_data)
+    for nuc in FISSION_NUCLIDES:
+      step_data[f'{nuc}_fission_power_frac'].append(fracs[f'{nuc}_fission_power_frac'])
+
+    # Log key results for this step
+    u235_frac = fracs.get('U235_fission_power_frac', 0)
+    pu239_frac = fracs.get('Pu239_fission_power_frac', 0)
+    print(f"  flux = {tally_data['flux']:.4e} +/- {tally_data['flux_std']:.4e} | "
+        f"U235 power frac = {u235_frac:.3f} | Pu239 power frac = {pu239_frac:.3f}")
+
+  return step_data
 
 
 # ---------------------------------------------------------------------------
 # Results extraction
 # ---------------------------------------------------------------------------
 
-def extract_results_data(results, powers, dt_seconds):
-  """Extract time series of keff and nuclide concentrations."""
+def extract_results_data(results, powers, dt_seconds, step_data):
+  """Combine depletion results with per-step tally data into a single dict."""
   time_arr, k = results.get_keff()
   time_days = time_arr / DAY_IN_SECONDS
 
@@ -287,17 +467,23 @@ def extract_results_data(results, powers, dt_seconds):
   num_points = len(time_days)
   num_steps  = len(powers)
 
-  # Pad powers to match num_points (results have n_steps+1 entries)
-  powers_padded = list(powers) + [float('nan')] * (num_points - num_steps)
+  def pad(lst):
+    """Pad step-level data (n values) to match results length (n+1)."""
+    return list(lst) + [float('nan')] * (num_points - num_steps)
 
   data = {
-    'run_label':  [label] * num_points,
-    'time_days':  time_days,
-    'k_eff':    k[:, 0],
-    'k_eff_std':  k[:, 1],
-    'power_W_g':  powers_padded,
+    'run_label':   [label] * num_points,
+    'time_days':   time_days,
+    'k_eff':       k[:, 0],
+    'k_eff_std':   k[:, 1],
+    'power_W_g':   pad(powers),
   }
 
+  # Add all per-step data (boron, flux, reaction rates, fission fracs)
+  for key, values in step_data.items():
+    data[key] = pad(values)
+
+  # Add nuclide concentrations
   nuclides = results[0].index_nuc.keys()
   for nuclide in nuclides:
     _, concentration = results.get_atoms("1", nuclide, nuc_units="atom/b-cm")
@@ -307,15 +493,15 @@ def extract_results_data(results, powers, dt_seconds):
 
 
 def save_results(data, script_dir, worker_id):
-    """Append results to worker-specific CSV."""
-    data_dir = os.path.join(script_dir, "data")
-    os.makedirs(data_dir, exist_ok=True)
+  """Append results to worker-specific CSV."""
+  data_dir = os.path.join(script_dir, "data")
+  os.makedirs(data_dir, exist_ok=True)
 
-    df = pd.DataFrame(data)
-    file_path = os.path.join(data_dir, f"worker_{worker_id}_nuclide_concentrations.csv")
-    file_exists = os.path.isfile(file_path)
-    df.to_csv(file_path, mode='a', index=False, header=not file_exists)
-    print(f"Worker {worker_id} | Results saved to {file_path}")
+  df = pd.DataFrame(data)
+  file_path = os.path.join(data_dir, f"worker_{worker_id}_nuclide_concentrations.csv")
+  file_exists = os.path.isfile(file_path)
+  df.to_csv(file_path, mode='a', index=False, header=not file_exists)
+  print(f"Worker {worker_id} | Results saved to {file_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -323,32 +509,39 @@ def save_results(data, script_dir, worker_id):
 # ---------------------------------------------------------------------------
 
 def generate_data(config):
-    """Single worker: build model, run depletion, save results."""
-    worker_id  = config['worker_id']
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+  """Single worker: build model, run depletion with boron search + tallies."""
+  worker_id  = config['worker_id']
+  script_dir = os.path.dirname(os.path.abspath(__file__))
 
-    results_dir, chain = setup_paths(script_dir, worker_id, config['chain_file'])
+  results_dir, chain = setup_paths(script_dir, worker_id, config['chain_file'])
 
-    print(f"Worker {worker_id} | seed={config['seed']} | "
-          f"steps={len(config['powers'])} | dt={config['dt_seconds']/DAY_IN_SECONDS:.1f} d | "
-          f"particles={config['particles']}")
+  print(f"Worker {worker_id} | seed={config['seed']} | "
+      f"steps={len(config['powers'])} | "
+      f"dt={config['dt_seconds']/DAY_IN_SECONDS:.2f} d | "
+      f"particles={config['particles']} | "
+      f"boron bracket={config['boron_bracket']}")
 
-    np.random.seed(config['seed'])
+  np.random.seed(config['seed'])
 
-    fuel, gap, clad, water, materials, geometry, settings = setup_reactor_model(config, results_dir)
-    os.chdir(results_dir)
+  fuel, gap, clad, water, materials, geometry, settings, tallies = \
+    setup_reactor_model(config, results_dir)
+  os.chdir(results_dir)
 
-    fuel_mass_g = config['fuel_density'] * fuel.volume
+  fuel_mass_g = config['fuel_density'] * fuel.volume
 
-    run_depletion_simulation(
-        fuel, gap, clad, water, materials, geometry, settings, chain,
-        config['powers'], config['dt_seconds'], fuel_mass_g,
-        worker_id, results_dir
-    )
+  step_data = run_depletion_simulation(
+    fuel, gap, clad, water, materials, geometry, settings, tallies,
+    chain, config['powers'], config['dt_seconds'], fuel_mass_g,
+    worker_id, results_dir,
+    boron_bracket=config['boron_bracket'],
+    boron_tol=config['boron_tol']
+  )
 
-    results = openmc.deplete.Results("depletion_results.h5")
-    data, nuclides = extract_results_data(results, config['powers'], config['dt_seconds'])
-    save_results(data, script_dir, worker_id)
+  results = openmc.deplete.Results("depletion_results.h5")
+  data, nuclides = extract_results_data(
+    results, config['powers'], config['dt_seconds'], step_data
+  )
+  save_results(data, script_dir, worker_id)
 
 
 # ---------------------------------------------------------------------------
@@ -356,39 +549,39 @@ def generate_data(config):
 # ---------------------------------------------------------------------------
 
 def create_worker_configs(base_config, num_workers, master_seed=None):
-    """Create per-worker configs with unique IDs and MC seeds."""
-    if master_seed is not None:
-        random.seed(master_seed)
-        print(f"Master seed: {master_seed}")
-    else:
-        random.seed()
-        print("No master seed (random)")
+  """Create per-worker configs with unique IDs and MC seeds."""
+  if master_seed is not None:
+    random.seed(master_seed)
+    print(f"Master seed: {master_seed}")
+  else:
+    random.seed()
+    print("No master seed (random)")
 
-    configs = []
-    for i in range(1, num_workers + 1):
-        config = base_config.copy()
-        config['worker_id'] = f"{i}_{uuid.uuid4().hex[:8]}"
-        config['seed'] = random.randint(1, 2**31 - 1)
-        configs.append(config)
-    return configs
+  configs = []
+  for i in range(1, num_workers + 1):
+    config = base_config.copy()
+    config['worker_id'] = f"{i}_{uuid.uuid4().hex[:8]}"
+    config['seed'] = random.randint(1, 2**31 - 1)
+    configs.append(config)
+  return configs
 
 
 def run_parallel_simulations(configs):
-    """Launch workers as separate processes."""
-    processes = []
-    try:
-        for config in configs:
-            p = mp.Process(target=generate_data, args=(config,))
-            p.start()
-            processes.append(p)
-        for p in processes:
-            p.join()
-    except Exception as e:
-        print(f"Error during parallel generation: {e}")
-        for p in processes:
-            if p.is_alive():
-                p.terminate()
-        raise
+  """Launch workers as separate processes."""
+  processes = []
+  try:
+    for config in configs:
+      p = mp.Process(target=generate_data, args=(config,))
+      p.start()
+      processes.append(p)
+    for p in processes:
+      p.join()
+  except Exception as e:
+    print(f"Error during parallel generation: {e}")
+    for p in processes:
+      if p.is_alive():
+        p.terminate()
+    raise
 
 
 # ---------------------------------------------------------------------------
@@ -397,47 +590,52 @@ def run_parallel_simulations(configs):
 
 if __name__ == "__main__":
 
-    # Load power history
-    powers, dt_seconds = load_power_history(args.power_file, dt_days=args.dt)
-    print(f"Loaded {len(powers)} power steps from {args.power_file}")
-    print(f"  dt = {dt_seconds / DAY_IN_SECONDS:.2f} days")
-    print(f"  Total irradiation = {len(powers) * dt_seconds / DAY_IN_SECONDS:.1f} days")
-    print(f"  Power range: [{min(powers):.2f}, {max(powers):.2f}] W/g")
+  # Load BEAVRS power history
+  powers, time_days = load_beavrs_power_history(
+    args.power_file,
+    nominal_specific_power_W_per_g=args.rated_power,
+    dt_days=args.dt
+  )
+  dt_seconds = args.dt * DAY_IN_SECONDS
 
-    base_config = {
-        # --- Depletion ---
-        'powers':      powers,
-        'dt_seconds':  dt_seconds,
+  base_config = {
+    # --- Depletion ---
+    'powers':        powers,
+    'dt_seconds':    dt_seconds,
 
-        # --- MC transport ---
-        'particles':   args.particles,
-        'inactive':    args.inactive,
-        'batches':     args.batches,
-        'temp_method': args.temp_method,
-        'chain_file':  args.chain_file,
+    # --- MC transport ---
+    'particles':     args.particles,
+    'inactive':      args.inactive,
+    'batches':       args.batches,
+    'temp_method':   args.temp_method,
+    'chain_file':    args.chain_file,
 
-        # --- Fixed BEAVRS state ---
-        'enrichment':   args.enrichment,
-        'fuel_density': args.fuel_density,
-        'fuel_temp':    args.fuel_temp,
-        'mod_temp':     args.mod_temp,
-        'clad_temp':    args.clad_temp,
-        'mod_density':  args.mod_density,
-        'boron_ppm':    args.boron_ppm,
+    # --- Critical boron search ---
+    'boron_bracket': args.boron_bracket,
+    'boron_tol':     args.boron_tol,
 
-        # --- Geometry (BEAVRS pin cell: fuel_or, gap_or, clad_or) ---
-        'geometry_radii': [0.39218, 0.40005, 0.45720],
-        'geometry_pitch': 1.25984,
-    }
+    # --- Fixed BEAVRS state ---
+    'enrichment':    args.enrichment,
+    'fuel_density':  args.fuel_density,
+    'fuel_temp':     args.fuel_temp,
+    'mod_temp':      args.mod_temp,
+    'clad_temp':     args.clad_temp,
+    'mod_density':   args.mod_density,
+    'boron_ppm':     args.boron_ppm,
 
-    NUM_RUNS    = args.runs
-    NUM_WORKERS = args.cores
+    # --- Geometry (BEAVRS pin cell: fuel_or, gap_or, clad_or) ---
+    'geometry_radii': [0.39218, 0.40005, 0.45720],
+    'geometry_pitch': 1.25984,
+  }
 
-    for i in range(NUM_RUNS):
-        configs = create_worker_configs(base_config, NUM_WORKERS, master_seed=args.seed)
+  NUM_RUNS    = args.runs
+  NUM_WORKERS = args.cores
 
-        t0 = time.perf_counter()
-        run_parallel_simulations(configs)
-        elapsed = time.perf_counter() - t0
+  for i in range(NUM_RUNS):
+    configs = create_worker_configs(base_config, NUM_WORKERS, master_seed=args.seed)
 
-        print(f"Run {i+1}/{NUM_RUNS} complete | {NUM_WORKERS} workers | {elapsed:.1f}s")
+    t0 = time.perf_counter()
+    run_parallel_simulations(configs)
+    elapsed = time.perf_counter() - t0
+
+    print(f"Run {i+1}/{NUM_RUNS} complete | {NUM_WORKERS} workers | {elapsed:.1f}s")
