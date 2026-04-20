@@ -156,3 +156,21 @@ def train_from_checkpoint_and_test(datamodule, model_class, cfg):
   logger.info(f"Best model saved at: {best_path}")
 
   trainer.test(model=model, datamodule=datamodule, ckpt_path=best_path)
+
+
+def inference(datamodule, model_class, cfg):
+  """Load a checkpoint, fit scalers on training data, test on inference data."""
+  logger.info(f"Inference mode — loading checkpoint: {cfg.runtime.ckp_path}")
+
+  model = model_class(cfg)
+  model = load_checkpoint_into_model(model, cfg.runtime.ckp_path, save_fixed=False)
+
+  datamodule.inference_mode = True
+
+  trainer = L.Trainer(
+    accelerator=cfg.runtime.device,
+    devices="auto",
+    logger=False,
+  )
+
+  trainer.test(model=model, datamodule=datamodule)
