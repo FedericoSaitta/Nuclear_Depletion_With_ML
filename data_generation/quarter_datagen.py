@@ -226,314 +226,160 @@ def setup_reactor_model(config, results_dir):
 
     return fuel, gap, clad, water, materials, geometry, settings, tallies
 
-
-# ---------------------------------------------------------------------------
-# Checkpointing
-# ---------------------------------------------------------------------------
-
-CHECKPOINT_FILE = "step_data_checkpoint.json"
-
-
-def count_completed_steps(results_file="depletion_results.h5"):
-    """Count how many depletion steps have been completed.
-
-    The results file contains N+1 entries for N completed steps
-    (entry 0 is the initial condition).
-    """
-    if not os.path.exists(results_file):
-        return 0
-    try:
-        results = openmc.deplete.Results(results_file)
-        # Number of entries minus 1 = number of completed steps
-        n = len(results) - 1
-        print(f"  Found {n} completed steps in {results_file}")
-        return n
-    except Exception as e:
-        print(f"  WARNING: Could not read {results_file}: {e}")
-        return 0
-
-
-def save_step_checkpoint(step_data, step_index):
-    """Save per-step tally data to a JSON checkpoint file.
-
-    Converts any non-serialisable types (numpy) to Python floats.
-    """
-    serialisable = {}
-    for key, values in step_data.items():
-        serialisable[key] = [float(v) if not isinstance(v, (int, float)) else v
-                             for v in values]
-    serialisable['_completed_steps'] = step_index + 1
-
-    with open(CHECKPOINT_FILE, 'w') as f:
-        json.dump(serialisable, f)
-
-
-def load_step_checkpoint():
-    """Load per-step tally data from checkpoint file.
-
-    Returns (step_data dict, number of completed steps) or (None, 0).
-    """
-    if not os.path.exists(CHECKPOINT_FILE):
-        return None, 0
-
-    try:
-        with open(CHECKPOINT_FILE) as f:
-            data = json.load(f)
-
-        completed = data.pop('_completed_steps', 0)
-        print(f"  Loaded tally checkpoint: {completed} steps")
-        return data, completed
-    except Exception as e:
-        print(f"  WARNING: Could not load checkpoint: {e}")
-        return None, 0
-
-
 # ---------------------------------------------------------------------------
 # Statepoint tally extraction
 # ---------------------------------------------------------------------------
 
-def extract_tallies_from_statepoint(batches):
-    """Read the latest statepoint and extract flux + reaction rate tallies."""
-    sp_file = f"statepoint.{batches}.h5"
 
-    result = {
-        'flux': float('nan'),
-        'flux_std': float('nan'),
-    }
+def _nan_tally():
+    r = {'flux': float('nan'), 'flux_std': float('nan')}
     for nuc in FISSION_NUCLIDES:
-        result[f'{nuc}_fission'] = float('nan')
-        result[f'{nuc}_fission_std'] = float('nan')
+        r[f'{nuc}_fission'] = float('nan')
+        r[f'{nuc}_fission_std'] = float('nan')
     for nuc in CAPTURE_NUCLIDES:
-        result[f'{nuc}_capture'] = float('nan')
-        result[f'{nuc}_capture_std'] = float('nan')
-
-    if not os.path.exists(sp_file):
-        sp_files = sorted(glob.glob('statepoint.*.h5'))
-        if sp_files:
-            sp_file = sp_files[-1]
-        else:
-            return result
-
+        r[f'{nuc}_capture'] = float('nan')
+        r[f'{nuc}_capture_std'] = float('nan')
+    return r
+ 
+ 
+def _read_statepoint_tallies(sp_path):
+    """Read flux / fission / capture tallies from one statepoint file."""
+    result = _nan_tally()
     try:
-        sp = openmc.StatePoint(sp_file)
-
+        sp = openmc.StatePoint(sp_path)
         try:
             t = sp.get_tally(id=9001)
-            result['flux'] = t.mean.flatten()[0]
-            result['flux_std'] = t.std_dev.flatten()[0]
-        except Exception as e:
-            print(f"  WARNING: Could not read flux tally: {e}")
-
+            result['flux']     = float(t.mean.flatten()[0])
+            result['flux_std'] = float(t.std_dev.flatten()[0])
+        except Exception:
+            pass
         try:
             t = sp.get_tally(id=9002)
-            means = t.mean.flatten()
-            stds  = t.std_dev.flatten()
+            m = t.mean.flatten()
+            s = t.std_dev.flatten()
             for j, nuc in enumerate(FISSION_NUCLIDES):
-                result[f'{nuc}_fission'] = means[j]
-                result[f'{nuc}_fission_std'] = stds[j]
-        except Exception as e:
-            print(f"  WARNING: Could not read fission tally: {e}")
-
+                result[f'{nuc}_fission']     = float(m[j])
+                result[f'{nuc}_fission_std'] = float(s[j])
+        except Exception:
+            pass
         try:
             t = sp.get_tally(id=9003)
-            means = t.mean.flatten()
-            stds  = t.std_dev.flatten()
+            m = t.mean.flatten()
+            s = t.std_dev.flatten()
             for j, nuc in enumerate(CAPTURE_NUCLIDES):
-                result[f'{nuc}_capture'] = means[j]
-                result[f'{nuc}_capture_std'] = stds[j]
-        except Exception as e:
-            print(f"  WARNING: Could not read capture tally: {e}")
-
+                result[f'{nuc}_capture']     = float(m[j])
+                result[f'{nuc}_capture_std'] = float(s[j])
+        except Exception:
+            pass
         sp.close()
-
     except Exception as e:
-        print(f"  WARNING: Could not open statepoint {sp_file}: {e}")
-
+        print(f"  WARNING: could not read {sp_path}: {e}")
     return result
-
-
-def make_nan_tally_data():
-    """Return a tally data dict with all NaN values (for decay-only steps)."""
-    result = {'flux': 0.0, 'flux_std': 0.0}
-    for nuc in FISSION_NUCLIDES:
-        result[f'{nuc}_fission'] = 0.0
-        result[f'{nuc}_fission_std'] = 0.0
-    for nuc in CAPTURE_NUCLIDES:
-        result[f'{nuc}_capture'] = 0.0
-        result[f'{nuc}_capture_std'] = 0.0
-    return result
-
-
-def compute_fission_power_fractions(tally_data):
-    """Compute fraction of fission power from each nuclide."""
+ 
+ 
+def _fission_power_fractions(tally):
+    """Same semantics as the original compute_fission_power_fractions()."""
     fracs = {}
-    total_power = 0.0
+    total = 0.0
     for nuc in FISSION_NUCLIDES:
-        rate = tally_data.get(f'{nuc}_fission', 0.0)
-        if np.isnan(rate):
-            rate = 0.0
-        total_power += rate * FISSION_Q_VALUES[nuc]
-
+        r = tally.get(f'{nuc}_fission', 0.0)
+        if np.isnan(r):
+            r = 0.0
+        total += r * FISSION_Q_VALUES[nuc]
     for nuc in FISSION_NUCLIDES:
-        rate = tally_data.get(f'{nuc}_fission', 0.0)
-        if np.isnan(rate):
-            rate = 0.0
-        if total_power > 0:
-            fracs[f'{nuc}_fission_power_frac'] = (rate * FISSION_Q_VALUES[nuc]) / total_power
-        else:
-            fracs[f'{nuc}_fission_power_frac'] = 0.0
-
+        r = tally.get(f'{nuc}_fission', 0.0)
+        if np.isnan(r):
+            r = 0.0
+        fracs[f'{nuc}_fission_power_frac'] = (r * FISSION_Q_VALUES[nuc] / total) \
+                                             if total > 0 else 0.0
     return fracs
 
 
 # ---------------------------------------------------------------------------
 # Depletion driver with checkpointing and decay optimisation
 # ---------------------------------------------------------------------------
-
 def run_depletion_with_tallies(fuel, materials, geometry, settings, tallies,
                                chain, powers, dt_seconds, fuel_mass_g,
                                worker_id, results_dir, config):
-    """Step-by-step depletion with checkpointing and zero-power optimisation.
-
-    Features:
-      - Resumes from last completed step if --resume is set
-      - Zero-power steps use minimal particles (decay-only regime)
-      - Saves tally checkpoint after each step
+    """Single-integrate() depletion with per-step tally extraction.
+ 
+    powers: list of specific powers in W/g (one per timestep). Zero
+            entries are passed straight through; OpenMC treats them as
+            decay-only internally.
     """
     num_steps = len(powers)
-    batches = settings.batches
-    power_threshold = config.get('power_threshold', 0.01)
-    decay_particles = config.get('decay_particles', 100)
-    decay_batches = config.get('decay_batches', 10)
-    decay_inactive = config.get('decay_inactive', 3)
-    do_resume = config.get('resume', False)
-
-    # Per-step storage
+ 
+    # --- Build one Model, one Operator, one Integrator, one integrate() ---
+    model = openmc.model.Model(geometry, materials, settings, tallies)
+    operator = openmc.deplete.CoupledOperator(model, chain)
+ 
+    # Convert W/g -> W for each step. Zero stays zero.
+    powers_W = [p * fuel_mass_g for p in powers]
+    timesteps = [dt_seconds] * num_steps
+ 
+    integrator = openmc.deplete.PredictorIntegrator(
+        operator, timesteps, powers_W, timestep_units='s'
+    )
+ 
+    print(f"Worker {worker_id} | running integrate() once for "
+          f"{num_steps} steps "
+          f"(non-zero steps: {sum(1 for p in powers if p > 0)}, "
+          f"decay-only: {sum(1 for p in powers if p == 0)})")
+ 
+    integrator.integrate()  # THE fix: one call, not N calls
+ 
+    # --- Per-step tally extraction from statepoints ---
+    # OpenMC writes openmc_simulation_n{step}.h5 for each step that
+    # actually ran transport (i.e. source_rate > 0). Decay steps don't
+    # write a statepoint — we fill them with zeros.
     step_keys = ['flux', 'flux_std']
     for nuc in FISSION_NUCLIDES:
         step_keys.extend([f'{nuc}_fission', f'{nuc}_fission_std',
                           f'{nuc}_fission_power_frac'])
     for nuc in CAPTURE_NUCLIDES:
         step_keys.extend([f'{nuc}_capture', f'{nuc}_capture_std'])
-
-    # --- Check for existing progress ---
-    start_step = 0
     step_data = {k: [] for k in step_keys}
-
-    if do_resume:
-        depl_completed = count_completed_steps("depletion_results.h5")
-        checkpoint_data, ckpt_completed = load_step_checkpoint()
-
-        if depl_completed > 0 and checkpoint_data is not None:
-            # Use the minimum of both to be safe
-            start_step = min(depl_completed, ckpt_completed)
-            # Restore step_data up to start_step
-            for key in step_keys:
-                if key in checkpoint_data:
-                    step_data[key] = checkpoint_data[key][:start_step]
-                else:
-                    step_data[key] = [float('nan')] * start_step
-
-            print(f"RESUMING from step {start_step}/{num_steps}")
-        elif depl_completed > 0:
-            # Have depletion results but no tally checkpoint — can't resume
-            # tally data, but can resume depletion. Fill tallies with NaN.
-            start_step = depl_completed
-            for key in step_keys:
-                step_data[key] = [float('nan')] * start_step
-            print(f"RESUMING from step {start_step}/{num_steps} "
-                  f"(tally data for skipped steps will be NaN)")
+ 
+    # Build a dict {step_index -> statepoint path}. OpenMC names files
+    # with an integer step index. We tolerate either naming convention
+    # (openmc_simulation_nN.h5 or statepoint.N.h5).
+    sp_by_step = {}
+    for pattern in ('openmc_simulation_n*.h5', 'statepoint.*.h5'):
+        for sp in glob.glob(os.path.join(results_dir, pattern)):
+            base = os.path.basename(sp)
+            try:
+                num = int(''.join(ch for ch in base.split('.')[0]
+                                  if ch.isdigit()))
+            except ValueError:
+                continue
+            sp_by_step.setdefault(num, sp)
+ 
+    for i in range(num_steps):
+        if powers[i] == 0.0:
+            t = {'flux': 0.0, 'flux_std': 0.0}
+            for nuc in FISSION_NUCLIDES:
+                t[f'{nuc}_fission'] = 0.0
+                t[f'{nuc}_fission_std'] = 0.0
+            for nuc in CAPTURE_NUCLIDES:
+                t[f'{nuc}_capture'] = 0.0
+                t[f'{nuc}_capture_std'] = 0.0
         else:
-            print("No previous progress found, starting from step 1")
-
-    if start_step >= num_steps:
-        print("All steps already completed!")
-        return step_data
-
-    # --- Main depletion loop ---
-    for i in range(start_step, num_steps):
-        step_power_W = powers[i] * fuel_mass_g
-        is_decay_only = powers[i] < power_threshold
-
-        step_type = "DECAY" if is_decay_only else "POWER"
-        print(f"\nWorker {worker_id} | Step {i+1}/{num_steps} | "
-              f"P = {powers[i]:.2f} W/g | {step_type}")
-
-        # --- Build model with appropriate fidelity ---
-        if is_decay_only:
-            # Minimal transport for decay-only steps
-            decay_settings = openmc.Settings()
-            decay_settings.particles = decay_particles
-            decay_settings.inactive  = decay_inactive
-            decay_settings.batches   = decay_batches
-            decay_settings.verbosity = 1
-            decay_settings.output    = {'tallies': False}
-
-            source = openmc.IndependentSource()
-            source.space  = openmc.stats.Point((0.05, 0.05, 0))
-            source.angle  = openmc.stats.Isotropic()
-            source.energy = openmc.stats.Watt()
-            decay_settings.source = source
-            decay_settings.temperature = settings.temperature
-
-            if settings.seed is not None:
-                decay_settings.seed = settings.seed
-
-            decay_settings.export_to_xml(path=results_dir)
-            model = openmc.model.Model(geometry, materials, decay_settings)
-        else:
-            # Full fidelity with tallies
-            settings.export_to_xml(path=results_dir)
-            model = openmc.model.Model(geometry, materials, settings, tallies)
-
-        # --- Run depletion step ---
-        prev_results_file = "depletion_results.h5" if i > 0 else None
-
-        if prev_results_file and os.path.exists(prev_results_file):
-            prev_results = openmc.deplete.Results(prev_results_file)
-            operator = openmc.deplete.CoupledOperator(model, chain,
-                                                       prev_results=prev_results)
-        else:
-            operator = openmc.deplete.CoupledOperator(model, chain)
-
-        integrator = openmc.deplete.PredictorIntegrator(
-            operator, [dt_seconds], [step_power_W], timestep_units='s'
-        )
-        integrator.integrate()
-
-        # --- Extract tallies ---
-        if is_decay_only:
-            tally_data = make_nan_tally_data()
-        else:
-            tally_data = extract_tallies_from_statepoint(batches)
-
-        step_data['flux'].append(tally_data['flux'])
-        step_data['flux_std'].append(tally_data['flux_std'])
-
+            sp = sp_by_step.get(i)
+            t = _read_statepoint_tallies(sp) if sp else _nan_tally()
+ 
+        fracs = _fission_power_fractions(t)
+ 
+        step_data['flux'].append(t['flux'])
+        step_data['flux_std'].append(t['flux_std'])
         for nuc in FISSION_NUCLIDES:
-            step_data[f'{nuc}_fission'].append(tally_data[f'{nuc}_fission'])
-            step_data[f'{nuc}_fission_std'].append(tally_data[f'{nuc}_fission_std'])
-
-        for nuc in CAPTURE_NUCLIDES:
-            step_data[f'{nuc}_capture'].append(tally_data[f'{nuc}_capture'])
-            step_data[f'{nuc}_capture_std'].append(tally_data[f'{nuc}_capture_std'])
-
-        fracs = compute_fission_power_fractions(tally_data)
-        for nuc in FISSION_NUCLIDES:
+            step_data[f'{nuc}_fission'].append(t[f'{nuc}_fission'])
+            step_data[f'{nuc}_fission_std'].append(t[f'{nuc}_fission_std'])
             step_data[f'{nuc}_fission_power_frac'].append(
                 fracs[f'{nuc}_fission_power_frac'])
-
-        # --- Save checkpoint ---
-        save_step_checkpoint(step_data, i)
-
-        # --- Log ---
-        if not is_decay_only:
-            u235_frac  = fracs.get('U235_fission_power_frac', 0)
-            pu239_frac = fracs.get('Pu239_fission_power_frac', 0)
-            print(f"  flux = {tally_data['flux']:.4e} +/- "
-                  f"{tally_data['flux_std']:.4e} | "
-                  f"U235 frac = {u235_frac:.3f} | Pu239 frac = {pu239_frac:.3f}")
-
+        for nuc in CAPTURE_NUCLIDES:
+            step_data[f'{nuc}_capture'].append(t[f'{nuc}_capture'])
+            step_data[f'{nuc}_capture_std'].append(t[f'{nuc}_capture_std'])
+ 
     return step_data
 
 
