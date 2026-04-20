@@ -182,8 +182,23 @@ def plot_predictions_vs_actuals(actuals, predictions, mae, rmse, r2, plots_folde
   logger.info(f"Model predictions saved to: {filepath}")
 
 
-def plot_residuals_combined(actuals, predictions, plots_folder):
-    residuals = actuals - predictions
+def plot_residuals_combined(actuals, predictions, plots_folder, steps_per_run):
+    # Compute concentration differences (deltas) within each trajectory,
+    # avoiding differencing across trajectory boundaries.
+    n_total = len(actuals)
+    n_runs = n_total // steps_per_run
+ 
+    delta_actuals = np.diff(actuals)
+    delta_predictions = np.diff(predictions)
+ 
+    # Mask out diffs that cross trajectory boundaries
+    boundary_mask = np.ones(n_total - 1, dtype=bool)
+    for r in range(1, n_runs):
+        boundary_mask[r * steps_per_run - 1] = False
+ 
+    delta_actuals = delta_actuals[boundary_mask]
+    delta_predictions = delta_predictions[boundary_mask]
+    residuals = delta_actuals - delta_predictions
     
     # ==========================================
     # PLOT 1: Linear Scale (Original)
@@ -191,27 +206,28 @@ def plot_residuals_combined(actuals, predictions, plots_folder):
     fig, axes = plt.subplots(1, 2, figsize=(16, 6))
     
     # Left: Residual scatter
-    axes[0].scatter(predictions, residuals, alpha=0.5, s=20, edgecolors='k', linewidth=0.5)
+    axes[0].scatter(delta_predictions, residuals, alpha=0.5, s=20, edgecolors='k', linewidth=0.5)
     axes[0].axhline(y=0, color='r', linestyle='--', linewidth=2)
-    axes[0].set_xlabel('Predicted Values', fontsize=12)
-    axes[0].set_ylabel('Residuals (Actual - Predicted)', fontsize=12)
-    axes[0].set_title('Residual Plot', fontsize=14)
+    axes[0].set_xlabel('Predicted Δc', fontsize=12)
+    axes[0].set_ylabel('Residuals (Actual Δc - Predicted Δc)', fontsize=12)
+    axes[0].set_title('Concentration Change Residuals', fontsize=14)
     axes[0].grid(True, alpha=0.3)
     
     # Right: Residual distribution
     axes[1].hist(residuals, bins=50, edgecolor='black', alpha=0.7, color='steelblue')
     axes[1].axvline(x=0, color='r', linestyle='--', linewidth=2)
     axes[1].set_xlabel('Residuals', fontsize=12)
-    axes[1].set_ylabel('Frequency', fontsize=12)
-    axes[1].set_title(f'Residual Distribution\nMean: {residuals.mean():.4e}, Std: {residuals.std():.4e}', 
+    axes[1].set_xlabel('Residuals (Δc)', fontsize=12)
+    axes[1].set_title(f'Δc Residual Distribution\nMean: {residuals.mean():.4e}, Std: {residuals.std():.4e}',
                       fontsize=14)
+    axes[1].grid(True, alpha=0.3)
     axes[1].grid(True, alpha=0.3)
     
     plt.tight_layout()
     filepath = os.path.join(plots_folder, 'residuals_combined.png')
     plt.savefig(filepath, dpi=300)
     plt.close()
-    logger.info(f"Model prediction residuals (linear scale) saved to: {filepath}")
+    logger.info(f"Concentration-change residuals (linear scale) saved to: {filepath}")
     
     # ==========================================
     # PLOT 2: Log-Log Scale (ABSOLUTE VALUES)
@@ -219,49 +235,51 @@ def plot_residuals_combined(actuals, predictions, plots_folder):
     fig, axes = plt.subplots(1, 2, figsize=(16, 6))
     
     # Use ABSOLUTE values for log plotting
-    abs_predictions = np.abs(predictions)
+    abs_delta_preds = np.abs(delta_predictions)
     abs_residuals = np.abs(residuals)
     
     # Filter only zeros (log can't handle zero)
-    mask_nonzero_pred = abs_predictions > 0
+    mask_nonzero_pred = abs_delta_preds > 0
     mask_nonzero_res = abs_residuals > 0
     mask_combined = mask_nonzero_pred & mask_nonzero_res
     
     if np.sum(mask_combined) > 0:
         # Left: Residual scatter (log-log) with ABSOLUTE VALUES
         # Color by whether original prediction was positive or negative
-        mask_pos_pred = (predictions > 0) & mask_combined
-        mask_neg_pred = (predictions < 0) & mask_combined
-        
-        n_pos = np.sum(mask_pos_pred)
-        n_neg = np.sum(mask_neg_pred)
+         # Left: Residual scatter (log-log)
+        # Color by sign of predicted concentration change
+        mask_pos = (delta_predictions > 0) & mask_combined
+        mask_neg = (delta_predictions < 0) & mask_combined
+ 
+        n_pos = np.sum(mask_pos)
+        n_neg = np.sum(mask_neg)
         
         if n_pos > 0:
-            axes[0].scatter(abs_predictions[mask_pos_pred], 
-                           abs_residuals[mask_pos_pred], 
-                           alpha=0.5, s=20, edgecolors='k', linewidth=0.5, 
-                           color='blue', 
-                           label=f'Positive predictions ({n_pos} pts)')
+             axes[0].scatter(abs_delta_preds[mask_pos],
+                           abs_residuals[mask_pos],
+                           alpha=0.5, s=20, edgecolors='k', linewidth=0.5,
+                           color='blue',
+                           label=f'Positive Δc ({n_pos} pts)')
         
         if n_neg > 0:
-            axes[0].scatter(abs_predictions[mask_neg_pred], 
-                           abs_residuals[mask_neg_pred], 
-                           alpha=0.5, s=20, edgecolors='k', linewidth=0.5, 
-                           color='red', 
-                           label=f'Negative predictions ({n_neg} pts)')
+            axes[0].scatter(abs_delta_preds[mask_neg],
+                           abs_residuals[mask_neg],
+                           alpha=0.5, s=20, edgecolors='k', linewidth=0.5,
+                           color='red',
+                           label=f'Negative Δc ({n_neg} pts)')
         
         axes[0].set_xscale('log')
         axes[0].set_yscale('log')
-        axes[0].set_xlabel('|Predicted Values| (log scale)', fontsize=12)
+        axes[0].set_xlabel('|Predicted Δc| (log scale)', fontsize=12)
         axes[0].set_ylabel('|Residuals| (log scale)', fontsize=12)
-        axes[0].set_title('Residual Plot (Log-Log Scale, Absolute Values)', fontsize=14)
+        axes[0].set_title('Δc Residuals (Log-Log Scale)', fontsize=14)
         axes[0].legend(fontsize=10)
         axes[0].grid(True, which='both', alpha=0.3)
         
         # Add reference line: |residual| = |prediction| (100% error)
-        pred_range = [abs_predictions[mask_combined].min(), 
-                      abs_predictions[mask_combined].max()]
-        axes[0].plot(pred_range, pred_range, 'k--', alpha=0.3, linewidth=1, 
+        pred_range = [abs_delta_preds[mask_combined].min(),
+                      abs_delta_preds[mask_combined].max()]
+        axes[0].plot(pred_range, pred_range, 'k--', alpha=0.3, linewidth=1,
                     label='100% error line')
         axes[0].legend(fontsize=10)
         
@@ -273,18 +291,18 @@ def plot_residuals_combined(actuals, predictions, plots_folder):
             max_res = np.max(abs_residuals_valid)
             log_bins = np.logspace(np.log10(min_res), np.log10(max_res), 50)
             
-            counts, bins, patches = axes[1].hist(abs_residuals_valid, bins=log_bins, 
-                                                  edgecolor='black', alpha=0.7, 
+            counts, bins, patches = axes[1].hist(abs_residuals_valid, bins=log_bins,
+                                                  edgecolor='black', alpha=0.7,
                                                   color='steelblue')
             axes[1].set_xscale('log')
             axes[1].set_yscale('log')
-            axes[1].set_xlabel('|Residuals| (log scale)', fontsize=12)
+            axes[1].set_xlabel('|Δc Residuals| (log scale)', fontsize=12)
             axes[1].set_ylabel('Frequency (log scale)', fontsize=12)
             
             median_abs_res = np.median(abs_residuals_valid)
             mean_abs_res = np.mean(abs_residuals_valid)
-            axes[1].set_title(f'|Residual| Distribution (Log Scale)\n'
-                            f'Median: {median_abs_res:.4e}, Mean: {mean_abs_res:.4e}', 
+            axes[1].set_title(f'|Δc Residual| Distribution (Log Scale)\n'
+                            f'Median: {median_abs_res:.4e}, Mean: {mean_abs_res:.4e}',
                             fontsize=14)
             axes[1].grid(True, which='both', alpha=0.3)
             
@@ -292,16 +310,16 @@ def plot_residuals_combined(actuals, predictions, plots_folder):
             axes[1].text(0.5, 0.5, 'No non-zero residuals to plot', 
                         ha='center', va='center', transform=axes[1].transAxes)
     else:
-        axes[0].text(0.5, 0.5, 'Insufficient data for log-log plot\n(need non-zero predictions and residuals)', 
+        axes[0].text(0.5, 0.5, 'Insufficient data for log-log plot\n(need non-zero Δc and residuals)',
                     ha='center', va='center', transform=axes[0].transAxes)
-        axes[1].text(0.5, 0.5, 'Insufficient data for log-log plot', 
+        axes[1].text(0.5, 0.5, 'Insufficient data for log-log plot',
                     ha='center', va='center', transform=axes[1].transAxes)
     
     plt.tight_layout()
     filepath_log = os.path.join(plots_folder, 'residuals_combined_loglog.png')
     plt.savefig(filepath_log, dpi=300)
     plt.close()
-    logger.info(f"Model prediction residuals (log-log scale) saved to: {filepath_log}")
+    logger.info(f"Concentration-change residuals (log-log scale) saved to: {filepath_log}")
 
 def plot_feature_importance(importance_means, importance_stds, feature_names, baseline, plots_folder, metric_name, n_top=20):
   n_features = len(importance_means)

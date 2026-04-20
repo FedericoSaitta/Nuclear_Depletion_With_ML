@@ -1,47 +1,67 @@
 dataset:
-  path_to_data: data/casl_3305_runs_inter.h5
+  path_to_data: data/casl_3305_runs_inter.h5          # training data (for scaler fitting)
+  path_to_inference_data: data/daily_results_almost_complete.csv
   fraction_of_data: 0.1
 
   inputs:
     power_W_g: MinMax
   targets:
     U238: MinMax
+    U239: MinMax
+    Np239: MinMax
+    Pu239: MinMax
+    Pu240: MinMax
+    Pu241: MinMax
+    Pu242: MinMax
 
   target_delta_conc: False
   train:
     batch_size: 64
   val:
     batch_size: 300
-    
-model:
-  n_input_features: 1    # power only
-  n_target_features: 1   # U238
 
-  name: testing_git_pull_worked_gpuA
-  layers: [64, 64]
+model:
+  name: MODEL_INFERENCE_TRUE
+  matrix_ode: true
+  layers: [128, 128]
   dropout_probability: 0.0
-  activation: tanh
+  activation: gelu
   output_activation: none
   residual_connections: false
 
+  # Target order: U238(0), U239(1), Np239(2), Pu239(3), Pu240(4), Pu241(5), Pu242(6)
+  # Physical chain: U238 -> U239 -> Np239 -> Pu239 -> Pu240 -> Pu241 -> Pu242
+  # Only adjacent transitions allowed, so zero out all non-adjacent off-diagonals
+  # Allowed non-zero: diagonal (i,i), and (i+1,i) sub-diagonal feed terms, and (i,i+1) loss terms
+  matrix_zero_entries: [
+          [0,1],[0,2],[0,3],[0,4],[0,5],[0,6],
+                [1,2],[1,3],[1,4],[1,5],[1,6],
+    [2,0],            [2,3],[2,4],[2,5],[2,6],
+    [3,0],[3,1],            [3,4],[3,5],[3,6],
+    [4,0],[4,1],[4,2],            [4,5],[4,6],
+    [5,0],[5,1],[5,2],[5,3],            [5,6],
+    [6,0],[6,1],[6,2],[6,3],[6,4]
+  ]
+
 train:
   loss: mse
-  learning_rate: 1e-3
+  learning_rate: 0.0
   weight_decay: 0.0
-  lr_scheduler_patience: 15
-  num_epochs: 10
+  lr_scheduler_patience: 50
+  num_epochs: 1
   early_stopping_patience: 100
-  grad_clip: 0.0 # Lets try and disable grad clip
+  grad_clip: 0.0
   drop_last: false
-  solver: dopri5    # dopri5 rk4 implicit_adams
-  rtol: 1e-5        
-  atol: 1e-7        
-  step_size: null   # only used for rk4
+
+  solver: dopri5
+  rtol: 1e-6
+  atol: 1e-7
+  step_size: 0.01
 
 runtime:
-  mode: train
+  mode: inference
   model: NODE
-  ckp_path: null
+  ckp_path: /mnt/iusers01/fse-ugpgt01/compsci01/t97807fs/scratch/Nuclear_Transport_With_ML/ML/results/matrix_ode_7x7_breeding_chain/best-matrix_ode_7x7_breeding_chain-epoch=2367.ckpt
   device: cuda
   seed: 42
   num_workers: 12
