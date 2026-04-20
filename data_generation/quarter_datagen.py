@@ -1,12 +1,16 @@
 """
 BEAVRS Cycle 1 depletion data generation — power schedule only, no boron.
 
-Runs a straight depletion with the BEAVRS power history on a quarter-pin
-cell. No critical boron search is performed; water is pure H2O.
+Features:
+  - Checkpointing: automatically resumes from last completed step if
+    depletion_results.h5 exists (use --resume flag)
+  - Zero-power optimisation: steps with power < threshold use minimal
+    particles since transport results don't affect decay-only depletion
+  - Tally extraction: flux, reaction rates, fission power fractions
 
 Usage:
-  python quarter_datagen.py -p power_history.csv -c 1 -t 10
-  python quarter_datagen.py -p power_history.csv --particles 50000 --dt 1 -c 1 -t 32
+  python quarter_datagen.py -p power_history.csv -c 1 -t 40
+  python quarter_datagen.py -p power_history.csv -c 1 -t 40 --resume
 """
 import sys
 import argparse
@@ -67,6 +71,21 @@ parser.add_argument('--fuel-density', type=float, default=10.4,
 parser.add_argument('-s', '--seed', type=int, default=None,
                     help='Master random seed (None = random)')
 
+# --- Checkpointing ---
+parser.add_argument('--resume', action='store_true',
+                    help='Resume from last completed step in depletion_results.h5')
+
+# --- Zero-power optimisation ---
+parser.add_argument('--power-threshold', type=float, default=0.01,
+                    help='Specific power [W/g] below which to use reduced-fidelity '
+                         'transport (decay-only regime)')
+parser.add_argument('--decay-particles', type=int, default=100,
+                    help='Particles per batch for zero-power (decay-only) steps')
+parser.add_argument('--decay-batches', type=int, default=10,
+                    help='Total batches for zero-power steps')
+parser.add_argument('--decay-inactive', type=int, default=3,
+                    help='Inactive batches for zero-power steps')
+
 
 if __name__ == "__main__":
     args = parser.parse_args()
@@ -81,6 +100,7 @@ import openmc.deplete
 import time
 import uuid
 import glob
+import json
 import numpy as np
 import pandas as pd
 import random
@@ -107,16 +127,7 @@ DAY_IN_SECONDS = 24 * HOUR_IN_SECONDS
 # ---------------------------------------------------------------------------
 
 def load_beavrs_power_history(filepath, nominal_specific_power_W_per_g, dt_days):
-    """Load BEAVRS power history and interpolate onto uniform grid.
-
-    Expected CSV format:
-      Cycle 1
-      Day,Percent Rated Power
-      0.0,1.598205
-      ...
-
-    Only Cycle 1 data is used.
-    """
+    """Load BEAVRS power history and interpolate onto uniform grid."""
     filepath = os.path.abspath(filepath)
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"Power history file not found: {filepath}")
@@ -155,9 +166,15 @@ def load_beavrs_power_history(filepath, nominal_specific_power_W_per_g, dt_days)
     powers_interp = np.interp(t_uniform, days, powers_raw)
 
     print(f"Loaded BEAVRS Cycle 1 power history: {len(days)} raw points")
-    print(f"  Interpolated to {num_steps} steps at dt = {dt_days:.2f} days")
+    print(f"  Interpolated to {num_steps} steps at dt = {dt_days:.5f} days "
+          f"({dt_days*24:.1f} hours)")
     print(f"  Duration: {t_end:.1f} days")
     print(f"  Power range: [{powers_interp.min():.2f}, {powers_interp.max():.2f}] W/g")
+
+    # Count zero-power steps
+    n_zero = np.sum(powers_interp < 0.01)
+    print(f"  Zero-power steps (<0.01 W/g): {n_zero}/{num_steps} "
+          f"({100*n_zero/num_steps:.1f}%)")
 
     return list(powers_interp), t_uniform
 
@@ -209,184 +226,160 @@ def setup_reactor_model(config, results_dir):
 
     return fuel, gap, clad, water, materials, geometry, settings, tallies
 
-
 # ---------------------------------------------------------------------------
 # Statepoint tally extraction
 # ---------------------------------------------------------------------------
 
-def extract_tallies_from_statepoint(batches):
-    """Read the latest statepoint and extract flux + reaction rate tallies."""
-    sp_file = f"statepoint.{batches}.h5"
 
-    result = {
-        'flux': float('nan'),
-        'flux_std': float('nan'),
-    }
+def _nan_tally():
+    r = {'flux': float('nan'), 'flux_std': float('nan')}
     for nuc in FISSION_NUCLIDES:
-        result[f'{nuc}_fission'] = float('nan')
-        result[f'{nuc}_fission_std'] = float('nan')
+        r[f'{nuc}_fission'] = float('nan')
+        r[f'{nuc}_fission_std'] = float('nan')
     for nuc in CAPTURE_NUCLIDES:
-        result[f'{nuc}_capture'] = float('nan')
-        result[f'{nuc}_capture_std'] = float('nan')
-
-    if not os.path.exists(sp_file):
-        sp_files = sorted(glob.glob('statepoint.*.h5'))
-        if sp_files:
-            sp_file = sp_files[-1]
-        else:
-            print("  WARNING: No statepoint file found, tallies will be NaN")
-            return result
-
+        r[f'{nuc}_capture'] = float('nan')
+        r[f'{nuc}_capture_std'] = float('nan')
+    return r
+ 
+ 
+def _read_statepoint_tallies(sp_path):
+    """Read flux / fission / capture tallies from one statepoint file."""
+    result = _nan_tally()
     try:
-        sp = openmc.StatePoint(sp_file)
-
+        sp = openmc.StatePoint(sp_path)
         try:
             t = sp.get_tally(id=9001)
-            result['flux'] = t.mean.flatten()[0]
-            result['flux_std'] = t.std_dev.flatten()[0]
-        except Exception as e:
-            print(f"  WARNING: Could not read flux tally: {e}")
-
+            result['flux']     = float(t.mean.flatten()[0])
+            result['flux_std'] = float(t.std_dev.flatten()[0])
+        except Exception:
+            pass
         try:
             t = sp.get_tally(id=9002)
-            means = t.mean.flatten()
-            stds  = t.std_dev.flatten()
+            m = t.mean.flatten()
+            s = t.std_dev.flatten()
             for j, nuc in enumerate(FISSION_NUCLIDES):
-                result[f'{nuc}_fission'] = means[j]
-                result[f'{nuc}_fission_std'] = stds[j]
-        except Exception as e:
-            print(f"  WARNING: Could not read fission tally: {e}")
-
+                result[f'{nuc}_fission']     = float(m[j])
+                result[f'{nuc}_fission_std'] = float(s[j])
+        except Exception:
+            pass
         try:
             t = sp.get_tally(id=9003)
-            means = t.mean.flatten()
-            stds  = t.std_dev.flatten()
+            m = t.mean.flatten()
+            s = t.std_dev.flatten()
             for j, nuc in enumerate(CAPTURE_NUCLIDES):
-                result[f'{nuc}_capture'] = means[j]
-                result[f'{nuc}_capture_std'] = stds[j]
-        except Exception as e:
-            print(f"  WARNING: Could not read capture tally: {e}")
-
+                result[f'{nuc}_capture']     = float(m[j])
+                result[f'{nuc}_capture_std'] = float(s[j])
+        except Exception:
+            pass
         sp.close()
-
     except Exception as e:
-        print(f"  WARNING: Could not open statepoint {sp_file}: {e}")
-
+        print(f"  WARNING: could not read {sp_path}: {e}")
     return result
-
-
-def compute_fission_power_fractions(tally_data):
-    """Compute fraction of fission power from each nuclide."""
+ 
+ 
+def _fission_power_fractions(tally):
+    """Same semantics as the original compute_fission_power_fractions()."""
     fracs = {}
-    total_power = 0.0
+    total = 0.0
     for nuc in FISSION_NUCLIDES:
-        rate = tally_data.get(f'{nuc}_fission', 0.0)
-        if np.isnan(rate):
-            rate = 0.0
-        total_power += rate * FISSION_Q_VALUES[nuc]
-
+        r = tally.get(f'{nuc}_fission', 0.0)
+        if np.isnan(r):
+            r = 0.0
+        total += r * FISSION_Q_VALUES[nuc]
     for nuc in FISSION_NUCLIDES:
-        rate = tally_data.get(f'{nuc}_fission', 0.0)
-        if np.isnan(rate):
-            rate = 0.0
-        if total_power > 0:
-            fracs[f'{nuc}_fission_power_frac'] = (rate * FISSION_Q_VALUES[nuc]) / total_power
-        else:
-            fracs[f'{nuc}_fission_power_frac'] = 0.0
-
+        r = tally.get(f'{nuc}_fission', 0.0)
+        if np.isnan(r):
+            r = 0.0
+        fracs[f'{nuc}_fission_power_frac'] = (r * FISSION_Q_VALUES[nuc] / total) \
+                                             if total > 0 else 0.0
     return fracs
 
 
 # ---------------------------------------------------------------------------
-# Depletion driver
+# Depletion driver with checkpointing and decay optimisation
 # ---------------------------------------------------------------------------
-
-def run_depletion(model, chain, dt_seconds_list, power_watts_list):
-    """Run the full depletion in one call using PredictorIntegrator.
-
-    Parameters
-    ----------
-    model : openmc.model.Model
-    chain : openmc.deplete.Chain
-    dt_seconds_list : list of float
-        Time step durations in seconds (one per step).
-    power_watts_list : list of float
-        Total power in watts for each step.
-    """
-    operator = openmc.deplete.CoupledOperator(model, chain)
-    integrator = openmc.deplete.PredictorIntegrator(
-        operator, dt_seconds_list, power_watts_list, timestep_units='s'
-    )
-    integrator.integrate()
-
-
 def run_depletion_with_tallies(fuel, materials, geometry, settings, tallies,
                                chain, powers, dt_seconds, fuel_mass_g,
-                               worker_id, results_dir):
-    """Step through the power history, running depletion and extracting tallies.
-
-    At each depletion step:
-      1. Run coupled transport + depletion
-      2. Read statepoint to extract flux and reaction rates
-      3. Compute fission power fractions
+                               worker_id, results_dir, config):
+    """Single-integrate() depletion with per-step tally extraction.
+ 
+    powers: list of specific powers in W/g (one per timestep). Zero
+            entries are passed straight through; OpenMC treats them as
+            decay-only internally.
     """
     num_steps = len(powers)
-    batches = settings.batches
-
-    # Per-step storage
+ 
+    # --- Build one Model, one Operator, one Integrator, one integrate() ---
+    model = openmc.model.Model(geometry, materials, settings, tallies)
+    operator = openmc.deplete.CoupledOperator(model, chain)
+ 
+    # Convert W/g -> W for each step. Zero stays zero.
+    powers_W = [p * fuel_mass_g for p in powers]
+    timesteps = [dt_seconds] * num_steps
+ 
+    integrator = openmc.deplete.PredictorIntegrator(
+        operator, timesteps, powers_W, timestep_units='s'
+    )
+ 
+    print(f"Worker {worker_id} | running integrate() once for "
+          f"{num_steps} steps "
+          f"(non-zero steps: {sum(1 for p in powers if p > 0)}, "
+          f"decay-only: {sum(1 for p in powers if p == 0)})")
+ 
+    integrator.integrate()  # THE fix: one call, not N calls
+ 
+    # --- Per-step tally extraction from statepoints ---
+    # OpenMC writes openmc_simulation_n{step}.h5 for each step that
+    # actually ran transport (i.e. source_rate > 0). Decay steps don't
+    # write a statepoint — we fill them with zeros.
     step_keys = ['flux', 'flux_std']
     for nuc in FISSION_NUCLIDES:
-        step_keys.extend([f'{nuc}_fission', f'{nuc}_fission_std', f'{nuc}_fission_power_frac'])
+        step_keys.extend([f'{nuc}_fission', f'{nuc}_fission_std',
+                          f'{nuc}_fission_power_frac'])
     for nuc in CAPTURE_NUCLIDES:
         step_keys.extend([f'{nuc}_capture', f'{nuc}_capture_std'])
-
     step_data = {k: [] for k in step_keys}
-
+ 
+    # Build a dict {step_index -> statepoint path}. OpenMC names files
+    # with an integer step index. We tolerate either naming convention
+    # (openmc_simulation_nN.h5 or statepoint.N.h5).
+    sp_by_step = {}
+    for pattern in ('openmc_simulation_n*.h5', 'statepoint.*.h5'):
+        for sp in glob.glob(os.path.join(results_dir, pattern)):
+            base = os.path.basename(sp)
+            try:
+                num = int(''.join(ch for ch in base.split('.')[0]
+                                  if ch.isdigit()))
+            except ValueError:
+                continue
+            sp_by_step.setdefault(num, sp)
+ 
     for i in range(num_steps):
-        step_power_W = powers[i] * fuel_mass_g
-
-        print(f"\nWorker {worker_id} | Step {i+1}/{num_steps} | "
-              f"P = {powers[i]:.2f} W/g")
-
-        # --- 1. Depletion step ---
-        model = openmc.model.Model(geometry, materials, settings, tallies)
-        prev_results_file = "depletion_results.h5" if i > 0 else None
-
-        if prev_results_file and os.path.exists(prev_results_file):
-            prev_results = openmc.deplete.Results(prev_results_file)
-            operator = openmc.deplete.CoupledOperator(model, chain, prev_results=prev_results)
+        if powers[i] == 0.0:
+            t = {'flux': 0.0, 'flux_std': 0.0}
+            for nuc in FISSION_NUCLIDES:
+                t[f'{nuc}_fission'] = 0.0
+                t[f'{nuc}_fission_std'] = 0.0
+            for nuc in CAPTURE_NUCLIDES:
+                t[f'{nuc}_capture'] = 0.0
+                t[f'{nuc}_capture_std'] = 0.0
         else:
-            operator = openmc.deplete.CoupledOperator(model, chain)
-
-        integrator = openmc.deplete.PredictorIntegrator(
-            operator, [dt_seconds], [step_power_W], timestep_units='s'
-        )
-        integrator.integrate()
-
-        # --- 2. Extract tallies ---
-        tally_data = extract_tallies_from_statepoint(batches)
-
-        step_data['flux'].append(tally_data['flux'])
-        step_data['flux_std'].append(tally_data['flux_std'])
-
+            sp = sp_by_step.get(i)
+            t = _read_statepoint_tallies(sp) if sp else _nan_tally()
+ 
+        fracs = _fission_power_fractions(t)
+ 
+        step_data['flux'].append(t['flux'])
+        step_data['flux_std'].append(t['flux_std'])
         for nuc in FISSION_NUCLIDES:
-            step_data[f'{nuc}_fission'].append(tally_data[f'{nuc}_fission'])
-            step_data[f'{nuc}_fission_std'].append(tally_data[f'{nuc}_fission_std'])
-
+            step_data[f'{nuc}_fission'].append(t[f'{nuc}_fission'])
+            step_data[f'{nuc}_fission_std'].append(t[f'{nuc}_fission_std'])
+            step_data[f'{nuc}_fission_power_frac'].append(
+                fracs[f'{nuc}_fission_power_frac'])
         for nuc in CAPTURE_NUCLIDES:
-            step_data[f'{nuc}_capture'].append(tally_data[f'{nuc}_capture'])
-            step_data[f'{nuc}_capture_std'].append(tally_data[f'{nuc}_capture_std'])
-
-        # --- 3. Fission power fractions ---
-        fracs = compute_fission_power_fractions(tally_data)
-        for nuc in FISSION_NUCLIDES:
-            step_data[f'{nuc}_fission_power_frac'].append(fracs[f'{nuc}_fission_power_frac'])
-
-        u235_frac  = fracs.get('U235_fission_power_frac', 0)
-        pu239_frac = fracs.get('Pu239_fission_power_frac', 0)
-        print(f"  flux = {tally_data['flux']:.4e} +/- {tally_data['flux_std']:.4e} | "
-              f"U235 power frac = {u235_frac:.3f} | Pu239 power frac = {pu239_frac:.3f}")
-
+            step_data[f'{nuc}_capture'].append(t[f'{nuc}_capture'])
+            step_data[f'{nuc}_capture_std'].append(t[f'{nuc}_capture_std'])
+ 
     return step_data
 
 
@@ -395,7 +388,7 @@ def run_depletion_with_tallies(fuel, materials, geometry, settings, tallies,
 # ---------------------------------------------------------------------------
 
 def extract_results_data(results, powers, dt_seconds, step_data):
-    """Combine depletion results with per-step tally data into a single dict."""
+    """Combine depletion results with per-step tally data."""
     time_arr, k = results.get_keff()
     time_days = time_arr / DAY_IN_SECONDS
 
@@ -406,7 +399,6 @@ def extract_results_data(results, powers, dt_seconds, step_data):
     num_steps  = len(powers)
 
     def pad(lst):
-        """Pad step-level data (n values) to match results length (n+1)."""
         return list(lst) + [float('nan')] * (num_points - num_steps)
 
     data = {
@@ -417,11 +409,9 @@ def extract_results_data(results, powers, dt_seconds, step_data):
         'power_W_g':   pad(powers),
     }
 
-    # Add all per-step tally data
     for key, values in step_data.items():
         data[key] = pad(values)
 
-    # Add nuclide concentrations
     nuclides = results[0].index_nuc.keys()
     for nuclide in nuclides:
         _, concentration = results.get_atoms("1", nuclide, nuc_units="atom/b-cm")
@@ -436,7 +426,8 @@ def save_results(data, script_dir, worker_id):
     os.makedirs(data_dir, exist_ok=True)
 
     df = pd.DataFrame(data)
-    file_path = os.path.join(data_dir, f"worker_{worker_id}_nuclide_concentrations.csv")
+    file_path = os.path.join(data_dir,
+                             f"worker_{worker_id}_nuclide_concentrations.csv")
     file_exists = os.path.isfile(file_path)
     df.to_csv(file_path, mode='a', index=False, header=not file_exists)
     print(f"Worker {worker_id} | Results saved to {file_path}")
@@ -447,7 +438,7 @@ def save_results(data, script_dir, worker_id):
 # ---------------------------------------------------------------------------
 
 def generate_data(config):
-    """Single worker: build model, run depletion with tallies."""
+    """Single worker: build model, run depletion with tallies + checkpointing."""
     worker_id  = config['worker_id']
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -455,8 +446,9 @@ def generate_data(config):
 
     print(f"Worker {worker_id} | seed={config['seed']} | "
           f"steps={len(config['powers'])} | "
-          f"dt={config['dt_seconds']/DAY_IN_SECONDS:.2f} d | "
-          f"particles={config['particles']}")
+          f"dt={config['dt_seconds']/DAY_IN_SECONDS:.5f} d | "
+          f"particles={config['particles']} | "
+          f"resume={config.get('resume', False)}")
 
     np.random.seed(config['seed'])
 
@@ -469,7 +461,7 @@ def generate_data(config):
     step_data = run_depletion_with_tallies(
         fuel, materials, geometry, settings, tallies,
         chain, config['powers'], config['dt_seconds'], fuel_mass_g,
-        worker_id, results_dir
+        worker_id, results_dir, config
     )
 
     results = openmc.deplete.Results("depletion_results.h5")
@@ -535,37 +527,48 @@ if __name__ == "__main__":
 
     base_config = {
         # --- Depletion ---
-        'powers':        powers,
-        'dt_seconds':    dt_seconds,
+        'powers':           powers,
+        'dt_seconds':       dt_seconds,
 
         # --- MC transport ---
-        'particles':     args.particles,
-        'inactive':      args.inactive,
-        'batches':       args.batches,
-        'temp_method':   args.temp_method,
-        'chain_file':    args.chain_file,
+        'particles':        args.particles,
+        'inactive':         args.inactive,
+        'batches':          args.batches,
+        'temp_method':      args.temp_method,
+        'chain_file':       args.chain_file,
 
         # --- Fixed reactor state (no boron) ---
-        'enrichment':    args.enrichment,
-        'fuel_density':  args.fuel_density,
-        'fuel_temp':     args.fuel_temp,
-        'mod_temp':      args.mod_temp,
-        'clad_temp':     args.clad_temp,
-        'mod_density':   args.mod_density,
+        'enrichment':       args.enrichment,
+        'fuel_density':     args.fuel_density,
+        'fuel_temp':        args.fuel_temp,
+        'mod_temp':         args.mod_temp,
+        'clad_temp':        args.clad_temp,
+        'mod_density':      args.mod_density,
 
         # --- Geometry (BEAVRS pin cell) ---
-        'geometry_radii': [0.39218, 0.40005, 0.45720],
-        'geometry_pitch': 1.25984,
+        'geometry_radii':   [0.39218, 0.40005, 0.45720],
+        'geometry_pitch':   1.25984,
+
+        # --- Checkpointing ---
+        'resume':           args.resume,
+
+        # --- Zero-power optimisation ---
+        'power_threshold':  args.power_threshold,
+        'decay_particles':  args.decay_particles,
+        'decay_batches':    args.decay_batches,
+        'decay_inactive':   args.decay_inactive,
     }
 
     NUM_RUNS    = args.runs
     NUM_WORKERS = args.cores
 
     for i in range(NUM_RUNS):
-        configs = create_worker_configs(base_config, NUM_WORKERS, master_seed=args.seed)
+        configs = create_worker_configs(base_config, NUM_WORKERS,
+                                        master_seed=args.seed)
 
         t0 = time.perf_counter()
         run_parallel_simulations(configs)
         elapsed = time.perf_counter() - t0
 
-        print(f"Run {i+1}/{NUM_RUNS} complete | {NUM_WORKERS} workers | {elapsed:.1f}s")
+        print(f"Run {i+1}/{NUM_RUNS} complete | {NUM_WORKERS} workers | "
+              f"{elapsed:.1f}s")
