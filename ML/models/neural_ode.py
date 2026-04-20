@@ -12,7 +12,7 @@ from torchdiffeq import odeint
 
 from ML.utils import plot
 from ML.utils import metrics
-from ML.models.model_architectures import ODEFuncForced
+from ML.models.model_architectures import ODEFuncForced, ODEFuncMatrix
 from ML.models.model_helper import get_loss_fn
 import ML.datamodule.data_scalers as data_scaler
 
@@ -24,8 +24,14 @@ class NODE_Model(L.LightningModule):
     self.save_hyperparameters(OmegaConf.to_container(config_object, resolve=True))
     self.cfg = config_object
 
-    # Model
-    self.func = ODEFuncForced(config_object)
+    # Model — choose between standard ODE and matrix-based ODE
+    self.matrix_ode = getattr(config_object.model, 'matrix_ode', False)
+    if self.matrix_ode:
+      self.func = ODEFuncMatrix(config_object)
+      logger.info("Using matrix-based NODE: dy/dt = A(forcing, y) @ y")
+    else:
+      logger.info("Using standard NODE: dy/dt = y")
+      self.func = ODEFuncForced(config_object)
 
     # Training Config
     self.loss_fn = get_loss_fn(config_object.train.loss)
@@ -221,7 +227,7 @@ class NODE_Model(L.LightningModule):
         mae_per_output[idx], rmse_per_output[idx], r2_per_output[idx],
         output_dir
       )
-      plot.plot_residuals_combined(y_true_flat, y_pred_flat, output_dir)
+      plot.plot_residuals_combined(y_true_flat, y_pred_flat, output_dir, steps_per_run=steps)
       
       per_target_metrics.append({
         'name': target_name,
@@ -243,6 +249,12 @@ class NODE_Model(L.LightningModule):
     self._compute_jacobian_analysis(
       all_inputs_scaled, all_trues_scaled, target_names, forcing_names
     )
+
+    # 4b. Depletion matrix visualization (matrix ODE only)
+    if self.matrix_ode:
+      self._compute_depletion_matrix_analysis(
+          all_inputs_scaled, all_trues_scaled, target_names
+      )
     
     # 5. Prediction comparison plots (TF vs AR)
     self._plot_prediction_comparisons(
@@ -381,6 +393,9 @@ class NODE_Model(L.LightningModule):
   # ─── Jacobian Sensitivity Analysis ───────────────────────────────────
   def compute_state_jacobian(self, t_eval, y_eval, forcing_eval, t_idx):
       with torch.inference_mode(False):
+          # Clone all tensors to escape inference-mode tracking
+          t_eval = t_eval.clone()
+          forcing_eval = forcing_eval.clone()
           y_eval = y_eval.clone().requires_grad_(True)
           
           was_training = self.func.training
@@ -403,12 +418,15 @@ class NODE_Model(L.LightningModule):
   def compute_forcing_jacobian(self, t_eval, y_eval, forcing_eval, t_idx):
       with torch.inference_mode(False):
           forcing_eval = forcing_eval.clone().requires_grad_(True)
+          # Clone all tensors to escape inference-mode tracking
+          t_eval = t_eval.clone()
+          y_eval = y_eval.clone().detach()
           
           was_training = self.func.training
           self.func.train()
           self.func.set_forcing(t_eval, forcing_eval)
           
-          dydt = self.func(t_eval[t_idx], y_eval.clone().detach())
+          dydt = self.func(t_eval[t_idx], y_eval)
           
           # Find which forcing index the interpolation actually used
           with torch.no_grad():
@@ -667,6 +685,173 @@ class NODE_Model(L.LightningModule):
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
 
+    # ─── Depletion Matrix Analysis (matrix ODE only) ─────────────────────
+  def _get_unscaling_matrix(self, target_names):
+    """
+    Build the (n_target, n_target) conversion matrix to go from scaled to
+    physical rate coefficients.
+ 
+    In scaled space: dy_s/dt_n = A_s @ y_s
+    In physical space: dy/dt = A_phys @ y  (approximately, ignoring MinMax offset)
+    
+    Conversion: A_phys[i,j] = A_s[i,j] * (range_i / range_j) / T_total_days
+ 
+    where range_i = y_max_i - y_min_i (from MinMax scaler) and
+    T_total_days = physical time span in days (from "time_days" column).
+ 
+    Returns: (scale_matrix, T_total_days, time_unit)
+      scale_matrix: (n_target, n_target) — multiply A_scaled elementwise
+      T_total_days: physical time span in days
+      time_unit: 'days'
+    """
+    dm = self.trainer.datamodule
+    n_target = len(target_names)
+ 
+    # Extract per-feature ranges using the existing inverse_transformer.
+    # Passing scaled values of 0 and 1 recovers the physical min and max.
+    zeros = np.zeros((1, n_target))
+    ones = np.ones((1, n_target))
+    phys_min = data_scaler.inverse_transformer(dm.target_scaler, zeros)[0]
+    phys_max = data_scaler.inverse_transformer(dm.target_scaler, ones)[0]
+    ranges = phys_max - phys_min
+
+    # Physical time span — time_array is in days (column "time_days" in HDF5)
+    raw_t = dm.time_array[:dm.actual_steps]
+    T_total_days = raw_t[-1] - raw_t[0]
+ 
+    # Build scale matrix: scale[i,j] = range_i / (range_j * T_total_days)
+    # This converts A_scaled[i,j] -> A_phys[i,j] in units of 1/days
+    scale_matrix = np.outer(ranges, 1.0 / ranges) / T_total_days
+    time_unit = 'days'
+ 
+    logger.info(f"  Physical time span: {T_total_days:.2f} days")
+
+    for idx, name in enumerate(target_names):
+      logger.info(f"  {name} range: {ranges[idx]:.6e}")
+ 
+    return scale_matrix, T_total_days, time_unit
+  
+  def _compute_depletion_matrix_analysis(self, all_inputs_scaled, all_trues_scaled, target_names):
+    """Extract and visualise the learned depletion matrix A(t) over time."""
+    import matplotlib.pyplot as plt
+ 
+    logger.info(f"\n{'='*20}")
+    logger.info("DEPLETION MATRIX ANALYSIS")
+    logger.info(f"{'='*20}")
+ 
+    num_runs, steps, n_input = all_inputs_scaled.shape
+    n_target = len(target_names)
+    device = self.device
+    t_span = self.t_span.to(device)
+
+    # Get unscaling conversion factors
+    scale_matrix, T_total, time_unit = self._get_unscaling_matrix(target_names)
+ 
+    max_runs = min(20, num_runs)
+    timestep_indices = np.linspace(0, steps - 1, min(30, steps), dtype=int)
+
+  
+    # Collect matrices at each timestep: {t_idx: list of (n_target, n_target)}
+    matrices_by_time = {t: [] for t in timestep_indices}
+ 
+
+    batch_size = 32
+    for batch_start in range(0, max_runs, batch_size):
+      batch_end = min(batch_start + batch_size, max_runs)
+
+      inputs_batch = torch.tensor(
+        all_inputs_scaled[batch_start:batch_end], dtype=torch.float32, device=device
+      )
+
+      trues_batch = torch.tensor(
+        all_trues_scaled[batch_start:batch_end], dtype=torch.float32, device=device
+      )
+
+      self.func.set_forcing(t_span, inputs_batch)
+
+      for t_idx in timestep_indices:
+        with torch.no_grad():
+          forcing_t = self.func._interpolate_forcing(t_span[int(t_idx)])
+          y_t = trues_batch[:, int(t_idx), :]  # true state at this timestep
+          A = self.func._build_matrix(forcing_t, y_t)  # (batch, n, n)
+
+        for b in range(A.shape[0]):
+          A_phys = A[b].cpu().numpy() * scale_matrix
+          matrices_by_time[t_idx].append(A_phys)
+ 
+    # ── Plot 1: Mean depletion matrix (time-averaged) ──
+    all_matrices = []
+    for t_idx in timestep_indices:
+      all_matrices.extend(matrices_by_time[t_idx])
+    mean_A = np.mean(all_matrices, axis=0)
+    std_A = np.std(all_matrices, axis=0)
+ 
+    fig, ax = plt.subplots(figsize=(max(6, n_target * 1.5), max(5, n_target * 1.2)))
+    im = ax.imshow(mean_A, cmap='RdBu_r', aspect='auto',
+                   vmin=-np.abs(mean_A).max(), vmax=np.abs(mean_A).max())
+    plt.colorbar(im, ax=ax, label=f'Rate coefficient [1/{time_unit}]')
+ 
+    ax.set_xticks(range(n_target))
+    ax.set_xticklabels(target_names, rotation=45, ha='right', fontsize=10)
+    ax.set_yticks(range(n_target))
+    ax.set_yticklabels([f'd{n}/dt' for n in target_names], fontsize=10)
+    ax.set_title(f'Learned Depletion Matrix A (time-averaged, physical units)')
+ 
+    for i in range(n_target):
+      for j in range(n_target):
+        val = mean_A[i, j]
+        color = 'white' if abs(val) > np.abs(mean_A).max() * 0.6 else 'black'
+        ax.text(j, i, f'{val:.4e}\n(\u00b1{std_A[i,j]:.2e})',
+                ha='center', va='center', fontsize=8, color=color)
+ 
+    plt.tight_layout()
+    plt.savefig(os.path.join(self.result_dir, 'depletion_matrix_mean.png'), dpi=150, bbox_inches='tight')
+    plt.close()
+ 
+    # ── Plot 2: Matrix entries over time ──
+    sorted_ts = sorted(timestep_indices)
+    time_fractions = self.t_span.cpu().numpy()[sorted_ts]
+
+    mean_over_time = np.array([
+      np.mean(matrices_by_time[t], axis=0) for t in sorted_ts
+    ])  # (n_timesteps, n_target, n_target)
+
+    std_over_time = np.array([
+      np.std(matrices_by_time[t], axis=0) for t in sorted_ts
+    ])
+ 
+    fig, axes = plt.subplots(n_target, n_target, figsize=(4 * n_target, 3.5 * n_target), sharex=True)
+    for i in range(n_target):
+      for j in range(n_target):
+        ax = axes[i, j] if n_target > 1 else axes
+        mean_vals = mean_over_time[:, i, j]
+        std_vals = std_over_time[:, i, j]
+ 
+        color = 'tab:red' if i == j else 'tab:blue'
+        ax.plot(time_fractions, mean_vals, linewidth=1.5, color=color)
+        ax.fill_between(time_fractions, mean_vals - std_vals, mean_vals + std_vals,
+                         alpha=0.2, color=color)
+        ax.set_title(f'A[{target_names[i]},{target_names[j]}]', fontsize=9)
+        ax.grid(True, alpha=0.3)
+        ax.axhline(0, color='gray', linewidth=0.5, linestyle='--')
+
+        # Y-axis label with units
+        if j == 0:
+          ax.set_ylabel(f'[1/{time_unit}]', fontsize=8)
+
+        if i == n_target - 1:
+          ax.set_xlabel('Normalised time')
+ 
+    
+    fig.suptitle(f'Depletion Matrix Entries Over Time (physical units, 1/{time_unit})\n'
+                 f'shaded = \u00b11\u03c3 across {max_runs} runs',
+                 fontsize=13, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(os.path.join(self.result_dir, 'depletion_matrix_evolution.png'), dpi=150, bbox_inches='tight')
+    plt.close()
+ 
+    logger.info(f"  Depletion matrix plots saved to: {self.result_dir}")
+    
   # ─── Batch Forward (for other analyses) ──────────────────────────────
 
   def _batch_forward_numpy(self, inputs_scaled, trues_scaled):

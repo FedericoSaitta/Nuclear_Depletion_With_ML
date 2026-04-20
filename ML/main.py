@@ -24,3 +24,4 @@ if __name__ == "__main__":
 
   if (lightning_mode == 'train'): modes.train_and_test(datamodule, model, cfg)
   elif (lightning_mode == 'train_from_ckp'): modes.train_from_checkpoint_and_test(datamodule, model, cfg)
+  elif (lightning_mode == 'inference'): modes.inference(datamodule, model, cfg)
