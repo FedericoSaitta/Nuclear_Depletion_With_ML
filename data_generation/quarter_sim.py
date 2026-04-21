@@ -3,6 +3,29 @@ Reactor model setup for BEAVRS-based depletion data generation.
 
 Quarter-pin geometry with tallies for flux and reaction rates.
 No boron — water is pure H2O with S(α,β) thermal scattering.
+
+Tally coverage for the 7-isotope uncertainty analysis
+-----------------------------------------------------
+The depletion uncertainty analysis (see uncertainty_analysis.py)
+reconstructs the 7x7 Bateman matrix for the chain:
+
+    U238 --(n,γ)--> U239 --(β⁻)--> Np239 --(β⁻)--> Pu239
+                                                     |(n,γ)
+                                                     v
+                               Pu242 <--(n,γ)-- Pu241 <--(n,γ)-- Pu240
+                                                                   ^
+                                                                   |(n,γ)
+                                                                 Pu239
+
+CAPTURE tallies are scored for every isotope in the chain so that the
+matrix can be built directly from measured one-group data rather than
+relying on literature α = σ_c/σ_f ratios for the Pu isotopes.
+
+FISSION tallies are scored only for isotopes with non-negligible fission
+cross sections in a PWR thermal spectrum (U235, U238, Pu239, Pu240, Pu241).
+U239, Np239, and Pu242 are omitted from the fission list because their
+fission rates are negligible at thermal energies and scoring them would
+add statistical noise without adding information to the matrix.
 """
 import openmc
 import math
@@ -18,7 +41,16 @@ FISSION_Q_VALUES = {
 }
 
 FISSION_NUCLIDES = list(FISSION_Q_VALUES.keys())
-CAPTURE_NUCLIDES = ['U238']
+
+# Capture tallies for every isotope in the 7-isotope chain.
+# This lets uncertainty_analysis.py build the Bateman matrix entirely from
+# measured data — no need to assume α = σ_c/σ_f ratios for the Pu isotopes.
+# Note: U239 and Np239 are short-lived (minutes/days) but valid nuclides
+# for (n,γ) tallies provided the cross-section library includes them
+# (ENDF/B-VIII.0 does). If a library lacks data for one of these nuclides,
+# OpenMC will fail at initialization — in that case, drop the offending
+# nuclide from this list.
+CAPTURE_NUCLIDES = ['U238', 'U239', 'Np239', 'Pu239', 'Pu240', 'Pu241', 'Pu242']
 
 
 def create_materials(config):
@@ -133,8 +165,12 @@ def create_tallies(fuel):
 
     Returns an openmc.Tallies object with:
       - 'fuel_flux':     total neutron flux in fuel
-      - 'fission_rates': fission rate per nuclide
-      - 'capture_rates': (n,gamma) capture rate for U238
+      - 'fission_rates': fission rate per nuclide (FISSION_NUCLIDES)
+      - 'capture_rates': (n,gamma) rate per nuclide (CAPTURE_NUCLIDES)
+
+    CAPTURE_NUCLIDES covers every isotope in the 7-isotope chain
+    (U238, U239, Np239, Pu239-Pu242) so the uncertainty analysis can
+    build the Bateman matrix entirely from measured one-group rates.
     """
     tallies = openmc.Tallies()
     mat_filter = openmc.MaterialFilter(fuel)

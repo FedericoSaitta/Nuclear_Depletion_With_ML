@@ -8,6 +8,15 @@ Features:
     particles since transport results don't affect decay-only depletion
   - Tally extraction: flux, reaction rates, fission power fractions
 
+Tally coverage
+--------------
+Capture (n,γ) tallies are scored for every isotope in the 7-isotope
+breeding chain (U238, U239, Np239, Pu239, Pu240, Pu241, Pu242) so that
+uncertainty_analysis.py can build the Bateman matrix directly from
+measured data. The list lives in quarter_sim.CAPTURE_NUCLIDES — any
+changes there are picked up automatically here (column names in the CSV
+follow the pattern {nuclide}_capture and {nuclide}_capture_std).
+
 Usage:
   python quarter_datagen.py -p power_history.csv -c 1 -t 40
   python quarter_datagen.py -p power_history.csv -c 1 -t 40 --resume
@@ -232,6 +241,12 @@ def setup_reactor_model(config, results_dir):
 
 
 def _nan_tally():
+    """Build a dict of NaN placeholders for every tally column.
+
+    Column names are generated from FISSION_NUCLIDES and CAPTURE_NUCLIDES
+    imported from quarter_sim, so extending those lists automatically
+    extends the CSV schema.
+    """
     r = {'flux': float('nan'), 'flux_std': float('nan')}
     for nuc in FISSION_NUCLIDES:
         r[f'{nuc}_fission'] = float('nan')
@@ -240,10 +255,14 @@ def _nan_tally():
         r[f'{nuc}_capture'] = float('nan')
         r[f'{nuc}_capture_std'] = float('nan')
     return r
- 
- 
+
+
 def _read_statepoint_tallies(sp_path):
-    """Read flux / fission / capture tallies from one statepoint file."""
+    """Read flux / fission / capture tallies from one statepoint file.
+
+    Tally 9003 contains (n,γ) rates for every nuclide listed in
+    CAPTURE_NUCLIDES, in the order they appear there.
+    """
     result = _nan_tally()
     try:
         sp = openmc.StatePoint(sp_path)
@@ -275,8 +294,8 @@ def _read_statepoint_tallies(sp_path):
     except Exception as e:
         print(f"  WARNING: could not read {sp_path}: {e}")
     return result
- 
- 
+
+
 def _fission_power_fractions(tally):
     """Same semantics as the original compute_fission_power_fractions()."""
     fracs = {}
@@ -302,32 +321,32 @@ def run_depletion_with_tallies(fuel, materials, geometry, settings, tallies,
                                chain, powers, dt_seconds, fuel_mass_g,
                                worker_id, results_dir, config):
     """Single-integrate() depletion with per-step tally extraction.
- 
+
     powers: list of specific powers in W/g (one per timestep). Zero
             entries are passed straight through; OpenMC treats them as
             decay-only internally.
     """
     num_steps = len(powers)
- 
+
     # --- Build one Model, one Operator, one Integrator, one integrate() ---
     model = openmc.model.Model(geometry, materials, settings, tallies)
     operator = openmc.deplete.CoupledOperator(model, chain)
- 
+
     # Convert W/g -> W for each step. Zero stays zero.
     powers_W = [p * fuel_mass_g for p in powers]
     timesteps = [dt_seconds] * num_steps
- 
+
     integrator = openmc.deplete.PredictorIntegrator(
         operator, timesteps, powers_W, timestep_units='s'
     )
- 
+
     print(f"Worker {worker_id} | running integrate() once for "
           f"{num_steps} steps "
           f"(non-zero steps: {sum(1 for p in powers if p > 0)}, "
           f"decay-only: {sum(1 for p in powers if p == 0)})")
- 
+
     integrator.integrate()  # THE fix: one call, not N calls
- 
+
     # --- Per-step tally extraction from statepoints ---
     # OpenMC writes openmc_simulation_n{step}.h5 for each step that
     # actually ran transport (i.e. source_rate > 0). Decay steps don't
@@ -339,7 +358,7 @@ def run_depletion_with_tallies(fuel, materials, geometry, settings, tallies,
     for nuc in CAPTURE_NUCLIDES:
         step_keys.extend([f'{nuc}_capture', f'{nuc}_capture_std'])
     step_data = {k: [] for k in step_keys}
- 
+
     # Build a dict {step_index -> statepoint path}. OpenMC names files
     # with an integer step index. We tolerate either naming convention
     # (openmc_simulation_nN.h5 or statepoint.N.h5).
@@ -353,7 +372,7 @@ def run_depletion_with_tallies(fuel, materials, geometry, settings, tallies,
             except ValueError:
                 continue
             sp_by_step.setdefault(num, sp)
- 
+
     for i in range(num_steps):
         if powers[i] == 0.0:
             t = {'flux': 0.0, 'flux_std': 0.0}
@@ -366,9 +385,9 @@ def run_depletion_with_tallies(fuel, materials, geometry, settings, tallies,
         else:
             sp = sp_by_step.get(i)
             t = _read_statepoint_tallies(sp) if sp else _nan_tally()
- 
+
         fracs = _fission_power_fractions(t)
- 
+
         step_data['flux'].append(t['flux'])
         step_data['flux_std'].append(t['flux_std'])
         for nuc in FISSION_NUCLIDES:
@@ -379,7 +398,7 @@ def run_depletion_with_tallies(fuel, materials, geometry, settings, tallies,
         for nuc in CAPTURE_NUCLIDES:
             step_data[f'{nuc}_capture'].append(t[f'{nuc}_capture'])
             step_data[f'{nuc}_capture_std'].append(t[f'{nuc}_capture_std'])
- 
+
     return step_data
 
 
@@ -449,6 +468,8 @@ def generate_data(config):
           f"dt={config['dt_seconds']/DAY_IN_SECONDS:.5f} d | "
           f"particles={config['particles']} | "
           f"resume={config.get('resume', False)}")
+    print(f"Worker {worker_id} | fission tallies: {FISSION_NUCLIDES}")
+    print(f"Worker {worker_id} | capture tallies: {CAPTURE_NUCLIDES}")
 
     np.random.seed(config['seed'])
 
