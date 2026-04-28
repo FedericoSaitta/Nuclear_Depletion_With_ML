@@ -1,6 +1,6 @@
 dataset:
   path_to_data: data/casl_3305_runs_inter.h5          # training data (for scaler fitting)
-  path_to_inference_data: data/daily_results_almost_complete.csv
+  path_to_inference_data: data/Daily_Results.csv
   fraction_of_data: 0.1
 
   inputs:
