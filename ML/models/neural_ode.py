@@ -55,11 +55,18 @@ class NODE_Model(L.LightningModule):
     self._test_input_trajs = []
 
   def setup(self, stage=None):
-    """Called after datamodule.setup — grab t_span and feature layout."""
-    dm = self.trainer.datamodule
-    self.t_span = dm.t_span.to(self.device)
-    self.n_input_features = dm.n_input_features
-    self.n_target_features = dm.n_target_features
+      dm = self.trainer.datamodule
+      self.t_span = dm.t_span.to(self.device)
+      self.n_input_features = dm.n_input_features
+      self.n_target_features = dm.n_target_features
+
+      if self.matrix_ode:
+          n = self.n_target_features
+          phys_min = data_scaler.inverse_transformer(dm.target_scaler, np.zeros((1, n)))[0]
+          phys_max = data_scaler.inverse_transformer(dm.target_scaler, np.ones((1, n)))[0]
+          self.func.set_ranges(phys_max - phys_min)
+          logger.info(f"ODEFuncMatrix ranges set: {phys_max - phys_min}")
+          
 
   def _odeint(self, y0, t_span):
       """Central odeint call — solver configured from yaml."""

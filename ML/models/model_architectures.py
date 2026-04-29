@@ -83,17 +83,21 @@ class ODEFuncForced(nn.Module):
 # ─── Matrix ODE Function ─────────────────────────────────────────────────────
  
 class ODEFuncMatrix(nn.Module):
-  """ODE function that predicts a depletion matrix A(t) from forcing inputs.
+  """ODE function with a constrained depletion matrix A(t).
 
   dy/dt = A(forcing(t), y(t)) @ y(t)
 
-  Physical constraints:
-    - Diagonal entries are negative (decay/absorption losses)
-    - Off-diagonal entries are positive (production from transmutation)
-    - Entries listed in cfg.model.matrix_zero_entries are forced to zero
+  Constraints (all configurable):
+    - matrix_zero_entries:           forced to zero (sparsity).
+    - Diagonal entries:              -softplus output (loss).
+    - Off-diagonal entries:          +softplus output (production).
+    - matrix_equal_opposite_pairs:   [primary, linked] with A[linked] = -A[primary]
+                                     (mass conservation for single-channel transitions).
+    - matrix_constant_pairs:         subset of equal-opposite pairs whose magnitude
+                                     is a learnable scalar (e.g. beta-decay rates).
 
-  The network only outputs active (non-zero) matrix entries, so no
-  capacity is wasted on entries that are immediately masked out.
+  The network only outputs entries that are NOT (a) zeroed, (b) linked, or
+  (c) constants — so capacity is not wasted on derived quantities.
   """
 
   def __init__(self, cfg):
@@ -104,34 +108,114 @@ class ODEFuncMatrix(nn.Module):
 
     n_input = len(cfg.dataset.inputs)
     self.n_target = len(cfg.dataset.targets)
-    n_net_input = n_input + self.n_target  # forcing + isotope concentrations
+    n_net_input = n_input + self.n_target
 
-    # Build sparsity mask and identify active entries
+    # ── Sparsity mask ──
     sparsity_mask = torch.ones(self.n_target, self.n_target, dtype=torch.bool)
-    zero_entries = getattr(cfg.model, 'matrix_zero_entries', None)
-    if zero_entries is not None:
-      for pair in zero_entries:
-        i, j = pair[0], pair[1]
-        sparsity_mask[i, j] = False
+    zero_entries = getattr(cfg.model, 'matrix_zero_entries', None) or []
+    for pair in zero_entries:
+      sparsity_mask[int(pair[0]), int(pair[1])] = False
     self.register_buffer('sparsity_mask', sparsity_mask)
 
-    # Precompute indices of active entries (row, col) and which are diagonal
-    active_rows, active_cols = torch.where(sparsity_mask)
-    self.register_buffer('active_rows', active_rows)
-    self.register_buffer('active_cols', active_cols)
-    self.register_buffer('active_is_diag', active_rows == active_cols)
-    self.n_active = int(active_rows.shape[0])
+    # ── Equal-opposite pairs: (linked_pos) -> (primary_pos) ──
+    eo_pairs = getattr(cfg.model, 'matrix_equal_opposite_pairs', None) or []
+    linked_to_primary = {}
+    for pair in eo_pairs:
+      p = (int(pair[0][0]), int(pair[0][1]))
+      l = (int(pair[1][0]), int(pair[1][1]))
+      if not sparsity_mask[p]:
+        raise ValueError(f"Equal-opposite primary {p} is in matrix_zero_entries.")
+      if not sparsity_mask[l]:
+        raise ValueError(f"Equal-opposite linked {l} is in matrix_zero_entries.")
+      if (p[0] == p[1]) == (l[0] == l[1]):
+        raise ValueError(
+          f"Equal-opposite pair {p}<->{l}: one entry must be diagonal "
+          f"and the other off-diagonal."
+        )
+      linked_to_primary[l] = p
 
-    # Network outputs only the active entries
+    # ── Constant pairs ──
+    const_pairs = getattr(cfg.model, 'matrix_constant_pairs', None) or []
+    constant_primaries = set()
+    for pair in const_pairs:
+      p = (int(pair[0][0]), int(pair[0][1]))
+      l = (int(pair[1][0]), int(pair[1][1]))
+      if linked_to_primary.get(l) != p:
+        raise ValueError(
+          f"Constant pair {p}<->{l} must also appear in matrix_equal_opposite_pairs."
+        )
+      constant_primaries.add(p)
+
+    # ── Classify each active entry: net / constant-primary / linked ──
+    active_rows, active_cols = torch.where(sparsity_mask)
+
+    net_rows, net_cols, net_is_diag = [], [], []
+    const_rows, const_cols = [], []
+    linked_rows, linked_cols = [], []
+    linked_primary_rows, linked_primary_cols = [], []  # where to read primary from
+
+    for k in range(active_rows.shape[0]):
+      i, j = int(active_rows[k]), int(active_cols[k])
+      pos = (i, j)
+      if pos in linked_to_primary:
+        continue  # handled in second pass
+      if pos in constant_primaries:
+        const_rows.append(i); const_cols.append(j)
+      else:
+        net_rows.append(i); net_cols.append(j); net_is_diag.append(i == j)
+
+    for k in range(active_rows.shape[0]):
+      i, j = int(active_rows[k]), int(active_cols[k])
+      pos = (i, j)
+      if pos not in linked_to_primary:
+        continue
+      pr, pc = linked_to_primary[pos]
+      linked_rows.append(i); linked_cols.append(j)
+      linked_primary_rows.append(pr); linked_primary_cols.append(pc)
+
+    # ── Register everything ──
+    L = torch.long
+    self.register_buffer('net_rows',    torch.tensor(net_rows,    dtype=L))
+    self.register_buffer('net_cols',    torch.tensor(net_cols,    dtype=L))
+    self.register_buffer('net_is_diag', torch.tensor(net_is_diag, dtype=torch.bool))
+    self.n_net = len(net_rows)
+
+    self.register_buffer('const_rows', torch.tensor(const_rows, dtype=L))
+    self.register_buffer('const_cols', torch.tensor(const_cols, dtype=L))
+    self.n_const = len(const_rows)
+    if self.n_const > 0:
+      self.const_raw = nn.Parameter(torch.zeros(self.n_const))
+      self.register_buffer('const_is_diag',
+                           (self.const_rows == self.const_cols))
+    else:
+      self.register_parameter('const_raw', None)
+
+    self.register_buffer('linked_rows',         torch.tensor(linked_rows,         dtype=L))
+    self.register_buffer('linked_cols',         torch.tensor(linked_cols,         dtype=L))
+    self.register_buffer('linked_primary_rows', torch.tensor(linked_primary_rows, dtype=L))
+    self.register_buffer('linked_primary_cols', torch.tensor(linked_primary_cols, dtype=L))
+    self.n_linked = len(linked_rows)
+
+    self.register_buffer('ranges', torch.ones(self.n_target))
+  
+    # Network outputs ONLY the entries that need it
     self.net = Deep_Neural_Network(
       n_inputs=n_net_input,
-      n_outputs=self.n_active,
+      n_outputs=max(self.n_net, 1),  # guard against degenerate n_net=0
       hidden_layers=cfg.model.layers,
       dropout_prob=cfg.model.dropout_probability,
       activation=cfg.model.activation,
-      output_activation='none',  # We apply our own constraints
+      output_activation='none',
       residual=cfg.model.residual_connections,
     )
+
+
+
+  def set_ranges(self, ranges):
+      """Per-target physical ranges (max - min from MinMax scaler)."""
+      if not isinstance(ranges, torch.Tensor):
+          ranges = torch.tensor(ranges, dtype=torch.float32)
+      self.ranges = ranges.to(self.ranges.device).to(self.ranges.dtype)
 
   def set_forcing(self, t_points, forcing_profiles):
     self.t_points = t_points
@@ -142,38 +226,50 @@ class ODEFuncMatrix(nn.Module):
     t_clamped = t.clamp(self.t_points[0], self.t_points[-1])
     idx = torch.searchsorted(self.t_points, t_clamped.unsqueeze(0)).squeeze() - 1
     idx = idx.clamp(0, len(self.t_points) - 2)
-
     return self.forcing_profiles[:, idx, :]   # (batch, n_input)
 
   def _build_matrix(self, forcing, y):
-    """Build constrained depletion matrix from forcing and state inputs.
+    """Assemble A in three stages: network -> constants -> linked = -primary."""
+    batch = y.shape[0]
+    A = y.new_zeros(batch, self.n_target, self.n_target)
 
-    Returns: (batch, n_target, n_target) matrix with negative diagonal,
-             positive off-diagonal entries, and zeros elsewhere.
-    """
-    net_input = torch.cat([forcing, y], dim=-1)          # (batch, n_input + n_target)
-    raw = self.net(net_input)                            # (batch, n_active)
-    batch = raw.shape[0]
+    # 1) Network entries (sign by diagonality)
+    if self.n_net > 0:
+      net_input = torch.cat([forcing, y], dim=-1)
+      net_raw = self.net(net_input)[:, :self.n_net]   # (batch, n_net)
+      net_vals = torch.where(
+        self.net_is_diag,
+        -F.softplus(net_raw),
+         F.softplus(net_raw),
+      )
+      A[:, self.net_rows, self.net_cols] = net_vals
 
-    # Apply sign constraints per entry
-    # Diagonal: -softplus (loss terms), Off-diagonal: +softplus (production)
-    constrained = torch.where(
-      self.active_is_diag,
-      -F.softplus(raw),
-       F.softplus(raw),
-    )
+    # 2) Constant entries (learnable scalars, broadcast over batch)
+    if self.n_const > 0:
+      const_vals = torch.where(
+        self.const_is_diag,
+        -F.softplus(self.const_raw),
+         F.softplus(self.const_raw),
+      )                                              # (n_const,)
+      A[:, self.const_rows, self.const_cols] = \
+        const_vals.unsqueeze(0).expand(batch, -1)
 
-    # Scatter active entries into the full matrix
-    A = raw.new_zeros(batch, self.n_target, self.n_target)
-    A[:, self.active_rows, self.active_cols] = constrained
+    # 3) Linked entries: equal-opposite in PHYSICAL space.
+    #    A_phys[linked] = -A_phys[primary]  =>
+    #    A_scaled[linked] = -A_scaled[primary] * (r[p_row] * r[l_col]) / (r[l_row] * r[p_col])
+    if self.n_linked > 0:
+        primary_vals = A[:, self.linked_primary_rows, self.linked_primary_cols]
+        ratio = (
+            self.ranges[self.linked_primary_rows] * self.ranges[self.linked_cols]
+        ) / (
+            self.ranges[self.linked_rows] * self.ranges[self.linked_primary_cols]
+        )
+        A[:, self.linked_rows, self.linked_cols] = -primary_vals * ratio
 
     return A
 
   def forward(self, t, y):
     self.nfe += 1
-    forcing = self._interpolate_forcing(t)       # (batch, n_input)
-    A = self._build_matrix(forcing, y)           # (batch, n_target, n_target)
-
-    # dy/dt = A @ y
-    dydt = torch.bmm(A, y.unsqueeze(-1)).squeeze(-1)   # (batch, n_target)
-    return dydt
+    forcing = self._interpolate_forcing(t)            # (batch, n_input)
+    A = self._build_matrix(forcing, y)                # (batch, n_target, n_target)
+    return torch.bmm(A, y.unsqueeze(-1)).squeeze(-1)  # (batch, n_target)
