@@ -250,11 +250,23 @@ class NODE_Model(L.LightningModule):
       all_inputs_scaled, all_trues_scaled, target_names, forcing_names
     )
 
-    # 4b. Depletion matrix visualization (matrix ODE only)
+    # 4. Jacobian sensitivity analysis
+    forcing_names = [
+        key for key, _ in sorted(datamodule.col_index_map.items(), key=lambda x: x[1])
+    ]
+    self._compute_jacobian_analysis(
+        all_inputs_scaled, all_trues_scaled, target_names, forcing_names
+    )
+
+    self._compute_stepwise_importance(
+        all_inputs_scaled, all_trues_scaled, target_names, forcing_names
+    )
+
+    # 4b. Depletion matrix visualisation (matrix ODE only)  ← bug fix: was calling wrong method
     if self.matrix_ode:
-      self._compute_depletion_matrix_analysis(
-          all_inputs_scaled, all_trues_scaled, target_names
-      )
+        self._compute_depletion_matrix_analysis(
+            all_inputs_scaled, all_trues_scaled, target_names
+        )
     
     # 5. Prediction comparison plots (TF vs AR)
     self._plot_prediction_comparisons(
@@ -467,7 +479,7 @@ class NODE_Model(L.LightningModule):
     t_span = self.t_span.to(device)
     
     # Sample a subset of runs and timesteps to keep computation tractable
-    max_runs = min(20, num_runs)
+    max_runs = num_runs
     # Sample evenly spaced timesteps (skip first and last)
     timestep_indices = np.linspace(1, steps - 2, min(20, steps - 2), dtype=int)
     
@@ -717,7 +729,7 @@ class NODE_Model(L.LightningModule):
 
     # Physical time span — time_array is in days (column "time_days" in HDF5)
     raw_t = dm.time_array[:dm.actual_steps]
-    T_total_days = raw_t[-1] - raw_t[0]
+    T_total_days = 1000
  
     # Build scale matrix: scale[i,j] = range_i / (range_j * T_total_days)
     # This converts A_scaled[i,j] -> A_phys[i,j] in units of 1/days
@@ -1016,3 +1028,311 @@ class NODE_Model(L.LightningModule):
     logger.info(f"Scheduler: ReduceLROnPlateau | Patience: {self.cfg.train.lr_scheduler_patience} | Factor: 0.5")
 
     return [optimizer], [{'scheduler': scheduler, 'monitor': 'val_loss'}]
+  
+  # ─── Occlusion Importance (forcing inputs) ───────────────────────────
+  # ─── Per-Step Teacher-Forced Importance ───────────────────────────────────────
+
+  def _compute_stepwise_importance(self, all_inputs_scaled, all_trues_scaled,
+                                    target_names, forcing_names,
+                                    n_permutations=5, seed=0, max_timesteps=50):
+      """
+      Per-step teacher-forced permutation importance.
+
+      At each sampled timestep t:
+        - Use the true y(t) as the ODE initial condition (teacher forcing)
+        - For each feature j, replace y(t)[:,j] or forcing(t)[:,j] with values
+          from a randomly chosen donor run
+        - Integrate ONE step forward → pred(t+1)
+        - ΔMAE = |pred_perturbed(t+1) - true(t+1)| - |pred_baseline(t+1) - true(t+1)|
+
+      Why this works for zero-start isotopes:
+        At t=0, U239=0 for every run so permuting it does nothing (ΔMAE≈0).
+        By t=5, U239 has built up to varying concentrations — permuting it
+        disrupts the model and registers non-zero importance.
+        The time-evolution plot shows exactly when each isotope starts mattering.
+
+      Outputs per target:
+        - Time-averaged importance table (mean ± SEM) → paper table
+        - Bar chart of time-averaged importance
+        - Line plot of importance evolution over the trajectory
+        - CSV and markdown printout for copy-paste
+      """
+      logger.info(f"\n{'='*20}")
+      logger.info(f"PER-STEP TEACHER-FORCED IMPORTANCE (K={n_permutations})")
+      logger.info(f"{'='*20}")
+
+      num_runs, steps, n_input = all_inputs_scaled.shape
+      n_state    = all_trues_scaled.shape[2]
+      n_features = n_input + n_state
+      rng        = np.random.default_rng(seed)
+
+      all_feature_names = list(forcing_names) + list(target_names)
+      feature_types     = ['Forcing'] * n_input + ['State'] * n_state
+
+      # Sample timesteps evenly — need t+1 to exist so stop at steps-2
+      timestep_indices = np.linspace(0, steps - 2, min(max_timesteps, steps - 1), dtype=int)
+      n_sampled        = len(timestep_indices)
+      t_fractions      = self.t_span.cpu().numpy()[timestep_indices]
+
+      logger.info(
+          f"  {num_runs} runs × {n_sampled} sampled steps × "
+          f"{n_features} features × {n_permutations} permutations"
+      )
+
+      # per_run_avg:  (num_runs, n_features, n_state) — time-averaged ΔMAE per run
+      # mean_by_time: (n_sampled, n_features, n_state) — mean ΔMAE at each timestep
+      per_run_avg  = np.zeros((num_runs, n_features, n_state))
+      mean_by_time = np.zeros((n_sampled, n_features, n_state))
+
+      for t_enum, t_idx in enumerate(timestep_indices):
+          if t_enum % 10 == 0:
+              logger.info(f"  Timestep {t_enum+1}/{n_sampled} (idx={t_idx})")
+
+          y_t   = all_trues_scaled[:, t_idx, :]       # (num_runs, n_state)
+          y_tp1 = all_trues_scaled[:, t_idx + 1, :]   # (num_runs, n_state)
+
+          # ── Baseline: true state + true forcing ──────────────────────
+          base_pred          = self._single_step_batch(y_t, t_idx, all_inputs_scaled)
+          base_pred_unscaled = self._unscale_targets(base_pred)
+          y_tp1_unscaled     = self._unscale_targets(y_tp1)
+          base_ae            = np.abs(base_pred_unscaled - y_tp1_unscaled)  # (num_runs, n_state)
+
+          # ── Permute each feature ──────────────────────────────────────
+          for j in range(n_features):
+              deltas_k = np.zeros((n_permutations, num_runs, n_state))
+
+              for k in range(n_permutations):
+                  perm = rng.permutation(num_runs)
+
+                  if j < n_input:
+                      # Forcing: swap column j at this specific timestep only.
+                      # ZOH interpolation uses forcing_profiles[:, t_idx, :] for
+                      # the entire interval [t_span[t_idx], t_span[t_idx+1]).
+                      perturbed_forcing = all_inputs_scaled.copy()
+                      perturbed_forcing[:, t_idx, j] = all_inputs_scaled[perm, t_idx, j]
+                      pert_pred = self._single_step_batch(y_t, t_idx, perturbed_forcing)
+                  else:
+                      # State: swap isotope (j - n_input) in y(t) across runs.
+                      # All other isotopes and all forcings stay as ground truth.
+                      j_s            = j - n_input
+                      perturbed_y_t  = y_t.copy()
+                      perturbed_y_t[:, j_s] = y_t[perm, j_s]
+                      pert_pred = self._single_step_batch(perturbed_y_t, t_idx, all_inputs_scaled)
+
+                  pert_ae          = np.abs(self._unscale_targets(pert_pred) - y_tp1_unscaled)
+                  deltas_k[k]      = pert_ae - base_ae   # (num_runs, n_state)
+
+              delta_at_step              = deltas_k.mean(axis=0)   # (num_runs, n_state)
+              per_run_avg[:, j, :]      += delta_at_step / n_sampled
+              mean_by_time[t_enum, j, :] = delta_at_step.mean(axis=0)
+
+      # ── Aggregate: mean ± SEM across runs ────────────────────────────
+      mean_delta = per_run_avg.mean(axis=0)                            # (n_features, n_state)
+      sem_delta  = per_run_avg.std(axis=0, ddof=1) / np.sqrt(num_runs)
+
+      # Per-run % normalisation → mean ± SEM of percentages
+      delta_clipped = np.clip(per_run_avg, 0.0, None)
+      totals        = delta_clipped.sum(axis=1, keepdims=True)         # (num_runs, 1, n_state)
+      pct_per_run   = np.where(totals > 0,
+                              100.0 * delta_clipped / np.maximum(totals, 1e-30),
+                              0.0)
+      mean_pct = pct_per_run.mean(axis=0)                              # (n_features, n_state)
+      sem_pct  = pct_per_run.std(axis=0, ddof=1) / np.sqrt(num_runs)
+
+      # ── Logger ───────────────────────────────────────────────────────
+      for k, tname in enumerate(target_names):
+          logger.info(f"\n  Per-step importance — target: {tname}")
+          logger.info(
+              f"    {'Feature':<28} {'Type':<10} "
+              f"{'ΔMAE (mean±SEM)':>28} {'Imp. [%]':>18}"
+          )
+          for j in np.argsort(mean_pct[:, k])[::-1]:
+              logger.info(
+                  f"    {all_feature_names[j]:<28} {feature_types[j]:<10} "
+                  f"{mean_delta[j,k]:>10.4e} ± {sem_delta[j,k]:.2e}   "
+                  f"{mean_pct[j,k]:>7.2f} ± {sem_pct[j,k]:.2f}"
+              )
+          for j in range(n_features):
+              safe = all_feature_names[j].replace(' ', '_')
+              self.log(f'{tname}/stepwise_pct/{safe}',  float(mean_pct[j, k]))
+              self.log(f'{tname}/stepwise_dMAE/{safe}', float(mean_delta[j, k]))
+
+      # ── Markdown printout ────────────────────────────────────────────
+      print("\n" + "=" * 70)
+      print("PER-STEP IMPORTANCE TABLES — paste everything between the markers")
+      print("=" * 70)
+      print("<<<BEGIN_STEPWISE_IMPORTANCE_TABLES>>>")
+      print(
+          f"\n_Per-step teacher-forced permutation importance — "
+          f"mean ± SEM across {num_runs} runs, "
+          f"{n_sampled} sampled timesteps, K={n_permutations}_\n"
+      )
+      for k, tname in enumerate(target_names):
+          print(f"#### Target: `{tname}`\n")
+          print("| Feature | Type | ΔMAE | MAE Imp. [%] |")
+          print("|---|---|---|---|")
+          for j in np.argsort(mean_pct[:, k])[::-1]:
+              print(
+                  f"| {all_feature_names[j]} | {feature_types[j]} | "
+                  f"{mean_delta[j,k]:.4e} ± {sem_delta[j,k]:.2e} | "
+                  f"{mean_pct[j,k]:.2f} ± {sem_pct[j,k]:.2f} |"
+              )
+          print()
+      print("<<<END_STEPWISE_IMPORTANCE_TABLES>>>")
+      print("=" * 70 + "\n")
+
+      # ── CSV ──────────────────────────────────────────────────────────
+      import csv
+      for k, tname in enumerate(target_names):
+          output_dir = os.path.join(self.result_dir, tname)
+          os.makedirs(output_dir, exist_ok=True)
+          csv_path = os.path.join(output_dir, 'stepwise_importance.csv')
+          with open(csv_path, 'w', newline='') as f:
+              writer = csv.writer(f)
+              writer.writerow(['Feature', 'Type', 'dMAE_mean', 'dMAE_SEM',
+                              'MAE_Imp_pct_mean', 'MAE_Imp_pct_SEM'])
+              for j in np.argsort(mean_pct[:, k])[::-1]:
+                  writer.writerow([
+                      all_feature_names[j], feature_types[j],
+                      f'{mean_delta[j,k]:.6e}', f'{sem_delta[j,k]:.6e}',
+                      f'{mean_pct[j,k]:.4f}',   f'{sem_pct[j,k]:.4f}',
+                  ])
+          logger.info(f"  ✓ Stepwise importance CSV: {csv_path}")
+
+      # ── Plots ────────────────────────────────────────────────────────
+      self._plot_stepwise_importance_bar(
+          mean_pct, sem_pct, all_feature_names, feature_types, target_names, num_runs
+      )
+      self._plot_stepwise_importance_over_time(
+          mean_by_time, t_fractions, all_feature_names, feature_types, target_names
+      )
+
+      return mean_delta, sem_delta, mean_pct, sem_pct, mean_by_time
+
+
+  def _single_step_batch(self, y_t_np, t_idx, forcing_profiles_np):
+      """
+      Integrate one teacher-forced ODE step for all runs in batches.
+
+      y_t_np:              (num_runs, n_state)        — current state (numpy)
+      t_idx:               int                        — index into t_span
+      forcing_profiles_np: (num_runs, steps, n_input) — full forcing profiles (numpy)
+
+      Returns: (num_runs, n_state) numpy — predicted state at t+1 (scaled)
+      """
+      num_runs  = y_t_np.shape[0]
+      n_state   = y_t_np.shape[1]
+      device    = self.device
+      t_span    = self.t_span.to(device)
+      t_short   = t_span[t_idx : t_idx + 2]
+
+      preds      = np.zeros((num_runs, n_state))
+      batch_size = 128   # larger than full-traj batch — only one ODE step each
+
+      with torch.no_grad():
+          for bs in range(0, num_runs, batch_size):
+              be      = min(bs + batch_size, num_runs)
+              y_batch = torch.tensor(y_t_np[bs:be], dtype=torch.float32, device=device)
+              f_batch = torch.tensor(forcing_profiles_np[bs:be], dtype=torch.float32, device=device)
+              self.func.set_forcing(t_span, f_batch)
+              pred        = self._odeint(y_batch, t_short)[-1]   # (batch, n_state)
+              preds[bs:be] = pred.cpu().numpy()
+
+      return preds
+
+
+  def _plot_stepwise_importance_bar(self, mean_pct, sem_pct, all_feature_names,
+                                    feature_types, target_names, num_runs):
+      """Time-averaged bar chart: % importance with SEM, sorted descending."""
+      import matplotlib.pyplot as plt
+      from matplotlib.patches import Patch
+
+      n_features  = len(all_feature_names)
+      base_colors = ['#2196F3' if ft == 'Forcing' else '#FF9800'
+                    for ft in feature_types]
+
+      for k, tname in enumerate(target_names):
+          order        = np.argsort(mean_pct[:, k])[::-1]
+          sorted_means = mean_pct[order, k]
+          sorted_sems  = sem_pct[order, k]
+          sorted_names = [all_feature_names[i] for i in order]
+          sorted_colors = [base_colors[i] for i in order]
+
+          fig, ax = plt.subplots(figsize=(max(8, n_features * 0.9), 5))
+          ax.bar(range(n_features), sorted_means, yerr=sorted_sems,
+                color=sorted_colors, capsize=4, edgecolor='gray', linewidth=0.5)
+
+          y_top = float((sorted_means + sorted_sems).max()) if n_features else 1.0
+          for i, (m, s) in enumerate(zip(sorted_means, sorted_sems)):
+              ax.text(i, m + s + y_top * 0.02,
+                      f'{m:.1f}±{s:.1f}', ha='center', va='bottom', fontsize=8)
+
+          ax.set_xticks(range(n_features))
+          ax.set_xticklabels(sorted_names, rotation=45, ha='right', fontsize=9)
+          ax.set_ylabel('MAE Importance [%]', fontsize=12)
+          ax.set_title(
+              f'Per-step teacher-forced importance — target: {tname}\n'
+              f'(time-averaged mean ± SEM, {num_runs} runs)',
+              fontsize=11,
+          )
+          ax.legend(handles=[
+              Patch(facecolor='#2196F3', label='Forcing input'),
+              Patch(facecolor='#FF9800', label='Isotope state'),
+          ], fontsize=9)
+          ax.grid(True, alpha=0.3, axis='y')
+          ax.set_ylim(0, y_top * 1.20 if y_top > 0 else 1.0)
+
+          output_dir = os.path.join(self.result_dir, tname)
+          os.makedirs(output_dir, exist_ok=True)
+          plt.tight_layout()
+          plt.savefig(os.path.join(output_dir, 'stepwise_importance_bar.png'),
+                      dpi=150, bbox_inches='tight')
+          plt.close()
+
+
+  def _plot_stepwise_importance_over_time(self, mean_by_time, t_fractions,
+                                          all_feature_names, feature_types, target_names):
+      """
+      Line plot: importance of each feature as a function of normalised time.
+      Two panels per target — forcings (left) and isotope states (right).
+      This is the key plot: isotopes that start at 0 should show rising
+      importance curves as concentrations build up during burnup.
+      """
+      import matplotlib.pyplot as plt
+
+      forcing_idx = [j for j, ft in enumerate(feature_types) if ft == 'Forcing']
+      state_idx   = [j for j, ft in enumerate(feature_types) if ft == 'State']
+
+      for k, tname in enumerate(target_names):
+          fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+          for j in forcing_idx:
+              ax1.plot(t_fractions, mean_by_time[:, j, k],
+                      label=all_feature_names[j], linewidth=1.8)
+          ax1.set_xlabel('Normalised time', fontsize=11)
+          ax1.set_ylabel('Mean ΔMAE per step', fontsize=11)
+          ax1.set_title('Forcing importance over time', fontsize=11)
+          ax1.legend(fontsize=9)
+          ax1.grid(True, alpha=0.3)
+
+          for j in state_idx:
+              ax2.plot(t_fractions, mean_by_time[:, j, k],
+                      label=all_feature_names[j], linewidth=1.8)
+          ax2.set_xlabel('Normalised time', fontsize=11)
+          ax2.set_ylabel('Mean ΔMAE per step', fontsize=11)
+          ax2.set_title('Isotope state importance over time', fontsize=11)
+          ax2.legend(fontsize=9)
+          ax2.grid(True, alpha=0.3)
+
+          fig.suptitle(
+              f'Per-step importance evolution — target: {tname}',
+              fontsize=12, fontweight='bold'
+          )
+          plt.tight_layout()
+
+          output_dir = os.path.join(self.result_dir, tname)
+          os.makedirs(output_dir, exist_ok=True)
+          plt.savefig(os.path.join(output_dir, 'stepwise_importance_over_time.png'),
+                      dpi=150, bbox_inches='tight')
+          plt.close()
+          logger.info(f"  ✓ Stepwise importance plots saved: {output_dir}")

@@ -511,8 +511,11 @@ def plot_error_growth_metric(avg_tf_error, avg_ar_error, std_tf_error, std_ar_er
           ax.set_ylabel(ylabel, fontsize=13, fontweight='bold')
           title_suffix = ''
       
-      ax.set_title(f'{metric_name} Growth Over Time: {target_name}{title_suffix}\n(Averaged over {num_runs} runs)', 
-                    fontsize=14, fontweight='bold', pad=15)
+      final_ar = float(avg_ar_error[-1])
+      ax.set_title(
+        f'{metric_name} Growth Over Time: {target_name}{title_suffix}\n'
+        f'(Averaged over {num_runs} runs — final AR {metric_name}: {final_ar:.4f})',
+        fontsize=14, fontweight='bold', pad=15)
       ax.legend(fontsize=10, loc='best', framealpha=0.9)
       ax.grid(True, alpha=0.3, linestyle='--')
       

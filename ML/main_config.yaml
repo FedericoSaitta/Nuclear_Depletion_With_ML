@@ -1,6 +1,6 @@
 dataset:
   path_to_data: data/casl_3305_runs_inter.h5          # training data (for scaler fitting)
-  path_to_inference_data: data/Daily_Results.csv
+  path_to_inference_data: ML/data/casl_3305_runs_inter.h5
   fraction_of_data: 0.1
 
   inputs:
@@ -18,10 +18,10 @@ dataset:
   train:
     batch_size: 64
   val:
-    batch_size: 300
+    batch_size: 128
 
 model:
-  name: MODEL_INFERENCE_TRUE
+  name: NODE_FIXED_IMPORTANCE
   matrix_ode: true
   layers: [128, 128]
   dropout_probability: 0.0
@@ -55,11 +55,11 @@ train:
 
   solver: dopri5
   rtol: 1e-6
-  atol: 1e-7
+  atol: 1e-8
   step_size: 0.01
 
 runtime:
-  mode: inference
+  mode: train_from_ckp
   model: NODE
   ckp_path: /mnt/iusers01/fse-ugpgt01/compsci01/t97807fs/scratch/Nuclear_Transport_With_ML/ML/results/matrix_ode_7x7_breeding_chain/best-matrix_ode_7x7_breeding_chain-epoch=2367.ckpt
   device: cuda
