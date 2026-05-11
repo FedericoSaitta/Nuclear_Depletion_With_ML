@@ -8,7 +8,7 @@ from sklearn.metrics import r2_score, mean_absolute_error
 
 from loguru import logger
 import lightning as L
-from torchdiffeq import odeint
+from torchdiffeq import odeint, odeint_adjoint
 
 from ML.utils import plot
 from ML.utils import metrics
@@ -39,6 +39,17 @@ class NODE_Model(L.LightningModule):
     # Optimizer Config
     self.rtol = getattr(config_object.train, 'rtol', 1e-5)
     self.atol = getattr(config_object.train, 'atol', 1e-7)
+    # Adjoint config
+    self.use_adjoint = getattr(config_object.train, 'use_adjoint', False)
+    self.adjoint_rtol = getattr(config_object.train, 'adjoint_rtol', None)
+    self.adjoint_atol = getattr(config_object.train, 'adjoint_atol', None)
+    self.adjoint_method = getattr(config_object.train, 'adjoint_method', None)
+
+    if self.use_adjoint:
+        logger.info(f"Using odeint_adjoint | adjoint_rtol={self.adjoint_rtol} | "
+                    f"adjoint_atol={self.adjoint_atol} | adjoint_method={self.adjoint_method}")
+    else:
+        logger.info("Using direct backprop through odeint")
 
     # Results directory
     self.result_dir = f'results/{config_object.model.name}/'
@@ -69,18 +80,28 @@ class NODE_Model(L.LightningModule):
           
 
   def _odeint(self, y0, t_span):
-      """Central odeint call — solver configured from yaml."""
+      """Central odeint call — solver and backward method configured from yaml."""
       options = {}
       if self.cfg.train.solver == 'rk4':
           step_size = getattr(self.cfg.train, 'step_size', None)
           if step_size:
               options['step_size'] = step_size
-      return odeint(
-          self.func, y0, t_span,
+
+      common_kwargs = dict(
           method=self.cfg.train.solver,
           rtol=self.rtol, atol=self.atol,
           options=options if options else None,
       )
+
+      if self.use_adjoint:
+          return odeint_adjoint(
+              self.func, y0, t_span,
+              adjoint_rtol=self.adjoint_rtol,
+              adjoint_atol=self.adjoint_atol,
+              adjoint_method=self.adjoint_method,
+              **common_kwargs,
+          )
+      return odeint(self.func, y0, t_span, **common_kwargs)
 
   def _forward_batch(self, batch):
     """
