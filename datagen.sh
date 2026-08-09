@@ -11,14 +11,17 @@
 #SBATCH --mail-user=abel.castanedarodriguez@student.manchester.ac.uk
 
 module purge
-module load python/3.13
-conda activate nuclear-ml
+# No `module load python` and no conda: uv provisions CPython 3.12 from
+# .python-version, and .venv-sim carries the locked dependency set.
+export PATH="$HOME/.local/bin:$PATH"
+export UV_PROJECT_ENVIRONMENT="$SLURM_SUBMIT_DIR/.venv-sim"
+cd "$SLURM_SUBMIT_DIR"
 
-# Small test run: 10 workers x 1 thread = 10 CPUs (matches SBATCH -c 10)
-# Low-fidelity settings just to check the pipeline works end-to-end
-# always better to use more cores than threads to match the requested sbatch cpus
+# HDF5 file locking breaks on most parallel filesystems; datagen.py:65 sets
+# this per-worker, but exporting here covers the OpenMC executable too.
+export HDF5_USE_FILE_LOCKING=FALSE
 
-python data_generation/quarter_datagen.py \
+uv run --extra sim --no-dev --locked python data_generation/quarter_datagen.py \
     -p data_generation/example_power_history.csv \
     -n 1 \
     -c 1 \

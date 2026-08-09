@@ -1,12 +1,139 @@
-[project]
-name = "Nuclear_Transport_With_ML"
-version = "0.1.0"
-description = "Nuclear Transport and ML package"
-authors = [{ name = "Abel Castaneda Rodriguez and Federico Saitta" }]
-requires-python = ">=3.9"
+# ============================================================================
+#  Nuclear_Transport_With_ML — single dependency source of truth.
+#
+#  The repo has two disjoint halves (verified: no shared imports):
+#     ML/**            → torch / lightning / torchdiffeq        [extra: ml]
+#     data_generation/ → openmc                                 [extra: sim]
+#     util/, tests/    → openmc
+#
+#  They are NEVER installed together (see [tool.uv].conflicts). OpenMC is not
+#  on PyPI, so it is not listed as a dependency anywhere — it is injected into
+#  the `sim` environment by scripts/install_openmc.sh. See OUTPUT.md §3.
+# ============================================================================
+
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
+[project]
+name = "nuclear-transport-with-ml"
+version = "0.1.0"
+description = "DNN and Neural-ODE surrogates for OpenMC depletion calculations"
+readme = "README.md"
+authors = [
+  { name = "Federico Saitta" },
+  { name = "Abel Castaneda Rodriguez" },
+]
+
+# 3.12 is the only version that satisfies BOTH halves:
+#   - OpenMC `develop` declares requires-python >= 3.12
+#   - PyTorch ships CUDA wheels for cp312 on linux-x86_64 AND win-amd64
+#     (cp314 is CPU-only today — that is why this machine currently cannot
+#      train on its RTX 4060; see OUTPUT.md §1.4)
+requires-python = ">=3.12,<3.13"
+
+# Shared by both halves. Nothing here pulls torch or openmc.
+dependencies = [
+  "numpy>=1.26,<3",
+  "pandas>=2.2",
+  "polars>=1.0",
+  "h5py>=3.11",
+  "matplotlib>=3.8",
+  "loguru>=0.7",
+  "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+# ---- ML half -------------------------------------------------------------
+# Everything ML/** imports. `lightning` bundles the `pytorch_lightning`
+# namespace too, which ML/utils/sql_lite_logger.py:3 relies on.
+ml = [
+  "torch>=2.6,<3",
+  "lightning>=2.4,<3",
+  "torchdiffeq>=0.2.4",
+  "scikit-learn>=1.5",
+  "seaborn>=0.13",
+  "omegaconf>=2.3",
+  "optuna>=3.6",
+]
+
+# ---- Simulation half -----------------------------------------------------
+# NOTE: `openmc` is deliberately ABSENT — it does not exist on PyPI.
+# What IS listed is exactly OpenMC's own Python dependency set, so that
+# `uv pip install --no-deps <openmc-src>` in install_openmc.sh has nothing
+# left to resolve and cannot drag an unlocked package into the environment.
+sim = [
+  "scipy>=1.13",
+  "lxml>=5.0",
+  "uncertainties>=3.2",
+  "endf>=0.1",
+  "ipython>=8.0",
+  "setuptools>=68",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "pytest-cov",
+  "ruff==0.6.*",
+]
+
+[project.scripts]
+nucml = "ML.main:main"
+
+# ---- packaging -----------------------------------------------------------
+# Explicit list, not `find`, because `results/`, `data/` and `playground/`
+# live inside ML/ and must not be packaged. Requires the __init__.py files
+# restored per OUTPUT.md §5.0.
 [tool.setuptools]
-packages = ["ML"]
+packages = ["ML", "ML.datamodule", "ML.models", "ML.utils"]
+
+[tool.setuptools.package-data]
+ML = ["*.yaml"]
+
+# ============================================================================
+#  uv configuration
+# ============================================================================
+[tool.uv]
+# Lock for exactly the two machines this project runs on. Keeps uv.lock small
+# and guarantees `uv sync` resolves identically on desktop and cluster.
+environments = [
+  "sys_platform == 'win32' and platform_machine == 'AMD64'",
+  "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+# `ml` and `sim` are mutually exclusive by design. Declaring the conflict
+# makes uv lock them as separate resolutions AND makes
+# `uv sync --extra ml --extra sim` a hard error instead of a silent mess.
+conflicts = [
+  [
+    { extra = "ml" },
+    { extra = "sim" },
+  ],
+]
+
+# ---- PyTorch wheel index -------------------------------------------------
+# torch on PyPI is the CPU build. Point `torch` at PyTorch's own index to get
+# CUDA wheels. `explicit = true` means ONLY packages named in [tool.uv.sources]
+# are fetched from here; everything else still comes from PyPI.
+#
+# CUDA 12.8 wheels require driver >= 528.33 (Windows) / >= 525.60 (Linux) via
+# CUDA minor-version compatibility. This laptop reports driver 566.14 → fine.
+# >>> VERIFY THE CLUSTER'S GPU-NODE DRIVER BEFORE FIRST SYNC (see §7.1). <<<
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu128", marker = "sys_platform == 'win32'" },
+  { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+]
+
+# ============================================================================
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "openmc: requires the OpenMC install and nuclear data (skipped in the ML env)",
+]

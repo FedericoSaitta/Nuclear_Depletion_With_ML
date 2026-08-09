@@ -14,8 +14,8 @@ EMAIL = 'federico.saitta@student.manchester.ac.uk'
 PARTITION = 'gpuL' # Options: 'gpuA', 'gpuA40GB', 'gpuL'
 WALLTIME = '0-1'   # 1 day (format: days-hours)
 JOB_NAME = 'gpu_job'
-CUDA_VERSION = '11.8.0'  # Update this to an available version
-PYTHON_SCRIPT = 'main.py'
+CUDA_VERSION = None   # torch wheels bundle their own CUDA runtime; no module needed
+PYTHON_SCRIPT = 'nucml'
 
 def create_slurm_script(output_file='submit_gpu_job.sh'):
   """Generate a Slurm job submission script."""
@@ -31,14 +31,11 @@ def create_slurm_script(output_file='submit_gpu_job.sh'):
 #SBATCH -o logs/job_%j.out                # Standard output log
 #SBATCH -e logs/job_%j.err                # Standard error log
 
-conda activate nuclear-ml
-
-# Launch nvidia-smi in background, logging every 10 seconds
-nvidia-smi --query-gpu=timestamp,utilization.gpu,utilization.memory,memory.used,memory.total \
-  --format=csv -l 10 > logs/gpu_usage.log &
+export PATH="$HOME/.local/bin:$PATH"
+cd "$SLURM_SUBMIT_DIR"
 
 # Run your Python script
-python {PYTHON_SCRIPT}
+uv run --extra ml --no-dev --locked {PYTHON_SCRIPT} --config ML/main_config.yaml
 
 kill %1
 """

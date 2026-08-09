@@ -23,3 +23,10 @@ ML/submit_gpu_job.sh
 *.ckpt
 *.err 
 *.html
+
+# uv environments
+/.venv/
+/.venv-sim/
+
+# OpenMC source + build tree (rebuilt by scripts/install_openmc.sh)
+/external/

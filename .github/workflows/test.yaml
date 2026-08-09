@@ -5,23 +5,35 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
 
 jobs:
-  test:
+  ml:
+    name: ML env (uv, no OpenMC)
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Set up Conda
-        uses: conda-incubator/setup-miniconda@v3
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
         with:
-          auto-update-conda: true
-          environment-file: environment.yml
-          activate-environment: nuclear-ml
+          enable-cache: true
+      # CPU torch in CI: the cu128 index would pull ~3 GB of NVIDIA wheels
+      # for no benefit on a GitHub runner.
+      - run: uv sync --extra ml --index-strategy unsafe-best-match
+        env:
+          UV_INDEX_PYTORCH_CU128: https://download.pytorch.org/whl/cpu
+      - run: uv run pytest -v          # conftest.py skips the OpenMC tests
+      - run: uv run ruff check .
 
-      - name: Run pytest
-        shell: bash -l {0}
-        run: |
-          pytest tests/test.py -v
+  simulation:
+    name: Simulation env (OpenMC source build)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: sudo apt-get update && sudo apt-get install -y g++ cmake libhdf5-dev
+      - run: UV_PROJECT_ENVIRONMENT=.venv-sim uv sync --extra sim
+      - run: ./scripts/install_openmc.sh
+      # tests/test.py needs the 7 GB nuclear-data library, which CI does not
+      # have — this job proves the *environment* builds, not the physics.
+      - run: UV_PROJECT_ENVIRONMENT=.venv-sim uv run python -c "import openmc.deplete; print(openmc.__version__)"

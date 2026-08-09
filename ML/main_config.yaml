@@ -48,7 +48,7 @@ train:
   learning_rate: 0.0
   weight_decay: 0.0
   lr_scheduler_patience: 50
-  num_epochs: 1
+  num_epochs: 1000
   early_stopping_patience: 100
   grad_clip: 0.0
   drop_last: false
@@ -59,7 +59,7 @@ train:
   step_size: 0.01
 
 runtime:
-  mode: train_from_ckp
+  mode: train
   model: NODE
   ckp_path: /mnt/iusers01/fse-ugpgt01/compsci01/t97807fs/scratch/Nuclear_Transport_With_ML/ML/results/matrix_ode_7x7_breeding_chain/best-matrix_ode_7x7_breeding_chain-epoch=2367.ckpt
   device: cuda
