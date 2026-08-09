@@ -75,9 +75,12 @@ def setup_paths(script_dir, worker_id, chain_filename, use_wmp=False):
       print(f"Worker {worker_id}** WARNING: WMP enabled but library not found at {wmp_path}")
   
   chain_file = os.path.join(script_dir, "../data", chain_filename)
-  chain = openmc.deplete.Chain.from_xml(chain_file)
-  
-  return results_dir, chain
+  # Parse once so a missing or malformed chain fails here rather than deep
+  # inside the first depletion step. CoupledOperator wants the *path*, not the
+  # parsed Chain, so that is what gets handed onward.
+  openmc.deplete.Chain.from_xml(chain_file)
+
+  return results_dir, chain_file
 
 
 def setup_reactor_model(config, results_dir):
@@ -114,12 +117,12 @@ def generate_random_conditions(config):
   }
 
 
-def run_depletion_step(model, chain, time_step, power_watts, prev_results_file=None):
+def run_depletion_step(model, chain_file, time_step, power_watts, prev_results_file=None):
     if prev_results_file and os.path.exists(prev_results_file):
         prev_results = openmc.deplete.Results(prev_results_file)
-        operator = openmc.deplete.CoupledOperator(model, chain, prev_results=prev_results)
+        operator = openmc.deplete.CoupledOperator(model, chain_file, prev_results=prev_results)
     else:
-        operator = openmc.deplete.CoupledOperator(model, chain)
+        operator = openmc.deplete.CoupledOperator(model, chain_file)
     
     integrator = openmc.deplete.PredictorIntegrator(
         operator, [time_step], [power_watts], timestep_units='s'
@@ -127,7 +130,7 @@ def run_depletion_step(model, chain, time_step, power_watts, prev_results_file=N
     integrator.integrate()
 
 
-def run_depletion_simulation(fuel, clad, water, materials, geometry, settings, chain, 
+def run_depletion_simulation(fuel, clad, water, materials, geometry, settings, chain_file,
                              conditions, fuel_mass_g, worker_id, results_dir):
   num_steps = len(conditions['time_steps'])
   
@@ -150,7 +153,7 @@ def run_depletion_simulation(fuel, clad, water, materials, geometry, settings, c
     power_watts = conditions['power'][i] * fuel_mass_g
     prev_results_file = "depletion_results.h5" if i > 0 else None
     
-    run_depletion_step(model, chain, conditions['time_steps'][i], power_watts, prev_results_file)
+    run_depletion_step(model, chain_file, conditions['time_steps'][i], power_watts, prev_results_file)
 
 
 def extract_results_data(results, conditions):
@@ -196,7 +199,7 @@ def generate_data(config):
   worker_id = config['worker_id']
   script_dir = os.path.dirname(os.path.abspath(__file__))
   
-  results_dir, chain = setup_paths(script_dir, worker_id, config['chain_file'], 
+  results_dir, chain_file = setup_paths(script_dir, worker_id, config['chain_file'],
                                     use_wmp=config.get('use_wmp', False))
 
   print(f"Using depletion file: {config['chain_file']}")
@@ -215,7 +218,7 @@ def generate_data(config):
   fuel_mass_g = config['fuel_density'] * fuel.volume
   conditions = generate_random_conditions(config)
   
-  run_depletion_simulation(fuel, clad, water, materials, geometry, settings, chain,
+  run_depletion_simulation(fuel, clad, water, materials, geometry, settings, chain_file,
                           conditions, fuel_mass_g, worker_id, results_dir)
   
   results = openmc.deplete.Results("depletion_results.h5")

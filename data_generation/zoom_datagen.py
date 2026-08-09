@@ -374,7 +374,7 @@ def compute_fission_power_fractions(tally_data):
 # ---------------------------------------------------------------------------
 
 def run_zoom_depletion(fuel, materials, geometry, settings, tallies,
-                       chain, powers, dt_seconds, fuel_mass_g,
+                       chain_file, powers, dt_seconds, fuel_mass_g,
                        results_dir, config):
     """Run the zoomed-in depletion with tally extraction."""
     num_steps = len(powers)
@@ -424,10 +424,10 @@ def run_zoom_depletion(fuel, materials, geometry, settings, tallies,
         prev_results_file = "depletion_results.h5" if i > 0 else None
         if prev_results_file and os.path.exists(prev_results_file):
             prev_results = openmc.deplete.Results(prev_results_file)
-            operator = openmc.deplete.CoupledOperator(model, chain,
+            operator = openmc.deplete.CoupledOperator(model, chain_file,
                                                        prev_results=prev_results)
         else:
-            operator = openmc.deplete.CoupledOperator(model, chain)
+            operator = openmc.deplete.CoupledOperator(model, chain_file)
 
         integrator = openmc.deplete.PredictorIntegrator(
             operator, [dt_seconds], [step_power_W], timestep_units='s'
@@ -585,7 +585,10 @@ if __name__ == "__main__":
     os.environ['OPENMC_CROSS_SECTIONS'] = str(openmc.config['cross_sections'])
 
     chain_file = os.path.join(script_dir, "../data", args.chain_file)
-    chain = openmc.deplete.Chain.from_xml(chain_file)
+    # Parse once so a missing or malformed chain fails here rather than deep
+    # inside the first depletion step. CoupledOperator wants the *path*, not
+    # the parsed Chain, so that is what gets handed onward.
+    openmc.deplete.Chain.from_xml(chain_file)
 
     # Export model files
     geometry.export_to_xml(path=results_dir)
@@ -602,7 +605,7 @@ if __name__ == "__main__":
     # --- 5. Run depletion ---
     step_data = run_zoom_depletion(
         fuel, materials, geometry, settings, tallies,
-        chain, powers, dt_seconds, fuel_mass_g,
+        chain_file, powers, dt_seconds, fuel_mass_g,
         results_dir, config
     )
 

@@ -206,9 +206,12 @@ def setup_paths(script_dir, worker_id, chain_filename):
     os.environ['OPENMC_CROSS_SECTIONS'] = str(openmc.config['cross_sections'])
 
     chain_file = os.path.join(script_dir, "../data", chain_filename)
-    chain = openmc.deplete.Chain.from_xml(chain_file)
+    # Parse once so a missing or malformed chain fails here rather than deep
+    # inside the first depletion step. CoupledOperator wants the *path*, not
+    # the parsed Chain, so that is what gets handed onward.
+    openmc.deplete.Chain.from_xml(chain_file)
 
-    return results_dir, chain
+    return results_dir, chain_file
 
 
 def setup_reactor_model(config, results_dir):
@@ -318,7 +321,7 @@ def _fission_power_fractions(tally):
 # Depletion driver with checkpointing and decay optimisation
 # ---------------------------------------------------------------------------
 def run_depletion_with_tallies(fuel, materials, geometry, settings, tallies,
-                               chain, powers, dt_seconds, fuel_mass_g,
+                               chain_file, powers, dt_seconds, fuel_mass_g,
                                worker_id, results_dir, config):
     """Single-integrate() depletion with per-step tally extraction.
 
@@ -330,7 +333,7 @@ def run_depletion_with_tallies(fuel, materials, geometry, settings, tallies,
 
     # --- Build one Model, one Operator, one Integrator, one integrate() ---
     model = openmc.model.Model(geometry, materials, settings, tallies)
-    operator = openmc.deplete.CoupledOperator(model, chain)
+    operator = openmc.deplete.CoupledOperator(model, chain_file)
 
     # Convert W/g -> W for each step. Zero stays zero.
     powers_W = [p * fuel_mass_g for p in powers]
@@ -461,7 +464,7 @@ def generate_data(config):
     worker_id  = config['worker_id']
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
-    results_dir, chain = setup_paths(script_dir, worker_id, config['chain_file'])
+    results_dir, chain_file = setup_paths(script_dir, worker_id, config['chain_file'])
 
     print(f"Worker {worker_id} | seed={config['seed']} | "
           f"steps={len(config['powers'])} | "
@@ -481,7 +484,7 @@ def generate_data(config):
 
     step_data = run_depletion_with_tallies(
         fuel, materials, geometry, settings, tallies,
-        chain, config['powers'], config['dt_seconds'], fuel_mass_g,
+        chain_file, config['powers'], config['dt_seconds'], fuel_mass_g,
         worker_id, results_dir, config
     )
 
