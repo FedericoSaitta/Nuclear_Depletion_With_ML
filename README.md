@@ -100,6 +100,29 @@ Pass `--extra sim` every time. `uv run` re-syncs the environment first, and
 without the flag it syncs to the *default* dependency set — quietly uninstalling
 scipy, lxml, endf and the rest of the sim extra.
 
+#### `uv sync` uninstalls OpenMC — `uv run` does not
+
+OpenMC is not in `uv.lock` (it is not on PyPI), so a plain `uv sync` treats it as
+extraneous and prunes it:
+
+```
+Uninstalled 1 package in 12ms
+ - openmc==0.15.2 (from file:///home/fedes/openmc-src)
+```
+
+`uv run --extra sim` does **not** do this, so the day-to-day datagen commands and
+the SLURM scripts are safe. The trap is re-running `uv sync` against an already
+built sim environment. Two ways out:
+
+```bash
+uv sync --extra sim --locked --inexact     # leave unmanaged packages alone
+uv sync --extra sim --locked && ./scripts/install_openmc.sh   # or reinstall after
+```
+
+`scripts/bootstrap.sh` and the CI `simulation` job already use the second form by
+construction — they sync first, then build. Reach for `--inexact` when syncing an
+environment that already has OpenMC in it.
+
 WSL persists across reboots, so the apt packages, `.venv-sim` and the OpenMC
 build all survive. Rebuild only when bumping `OPENMC_VERSION`; re-run `uv sync`
 only when `pyproject.toml` / `uv.lock` change (it is idempotent and cheap).
