@@ -71,14 +71,6 @@ class NODE_Model(L.LightningModule):
       self.n_input_features = dm.n_input_features
       self.n_target_features = dm.n_target_features
 
-      if self.matrix_ode:
-          n = self.n_target_features
-          phys_min = data_scaler.inverse_transformer(dm.target_scaler, np.zeros((1, n)))[0]
-          phys_max = data_scaler.inverse_transformer(dm.target_scaler, np.ones((1, n)))[0]
-          self.func.set_ranges(phys_max - phys_min)
-          logger.info(f"ODEFuncMatrix ranges set: {phys_max - phys_min}")
-          
-
   def _odeint(self, y0, t_span):
       """Central odeint call — solver and backward method configured from yaml."""
       options = {}

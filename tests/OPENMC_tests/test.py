@@ -113,5 +113,3 @@ def test_pin_model_with_simulation():
     assert os.path.exists(os.path.join(results_dir, 'geometry.xml'))
     assert os.path.exists(os.path.join(results_dir, 'settings.xml'))
     assert os.path.exists(os.path.join(results_dir, 'tallies.xml'))
-    
-    print("✓ Pin model constructed and exported successfully!")
