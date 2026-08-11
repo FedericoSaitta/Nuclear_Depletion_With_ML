@@ -1,7 +1,9 @@
 """Skip OpenMC-dependent tests when running in the ML environment.
 
-The repo has two environments (OUTPUT.md §4): .venv has no OpenMC by design.
-Collection must not fail there.
+The repo has two environments (see README, "Generate data with OpenMC"): the
+default `.venv` deliberately has no OpenMC, so collection must not fail there.
+`collect_ignore` keeps the import out of collection entirely; the `openmc`
+marker (declared in pyproject.toml) is what `pytest -m openmc` selects on.
 """
 
 import importlib.util
@@ -10,12 +12,7 @@ import pytest
 
 collect_ignore = []
 if importlib.util.find_spec("openmc") is None:
-    collect_ignore = [
-        "test.py",
-        "pinModel_Test.py",
-        "pinModelDepletion_Test.py",
-        "variableDepletion.py",
-    ]
+    collect_ignore = ["OPENMC_tests/test_openmc_install.py"]
 
 
 def pytest_collection_modifyitems(config, items):

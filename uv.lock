@@ -58,20 +58,6 @@ wheels = [
 ]
 
 [[package]]
-name = "alembic"
-version = "1.19.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "mako" },
-    { name = "sqlalchemy" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/16/2b/e4153978368de59918115c9e01d3ebf58a558a7285efa7e960c383c4b59a/alembic-1.19.1.tar.gz", hash = "sha256:e0fca0518118c78acc493e31bcb5402f190057aaf6df8b5b95ce94c4789cf648", size = 2070816, upload-time = "2026-08-08T16:32:01.565Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/20/89/e62cc37b69ad357cc8ecd6e7367f5245f523d3cbb338a66197212bdf6749/alembic-1.19.1-py3-none-any.whl", hash = "sha256:b39018cb3d9413a19cbd54cf3c02ad33998641f0538eb77413a488a21c3e14be", size = 265946, upload-time = "2026-08-08T16:32:03.153Z" },
-]
-
-[[package]]
 name = "antlr4-python3-runtime"
 version = "4.9.3"
 source = { registry = "https://pypi.org/simple" }
@@ -102,18 +88,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d8/53/6f443c9a4a8358a93a6792e2acffb9d9d5cb0a5cfd8802644b7b1c9a02e4/colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44", size = 27697, upload-time = "2022-10-25T02:36:22.414Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", size = 25335, upload-time = "2022-10-25T02:36:20.889Z" },
-]
-
-[[package]]
-name = "colorlog"
-version = "6.12.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/8c/55/ba79756cb90c8d69d599d57785398ac87bba7b19c80e87f4e8a562197c93/colorlog-6.12.0.tar.gz", hash = "sha256:2a7924c1dadf18b22a0eb8b06d1c7b01d5341707ec1641eb6fcc4fde0c3e8e5f", size = 18151, upload-time = "2026-07-23T13:40:40.71Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d4/19/0b6647bf5e331521e55d2b63bfbdc210bd9cd605189273f03614a05f702d/colorlog-6.12.0-py3-none-any.whl", hash = "sha256:30d392604e9110045a2c2aeefc27d7a017abbab63f3a8aee594eac0801df784e", size = 12239, upload-time = "2026-07-23T13:40:39.562Z" },
 ]
 
 [[package]]
@@ -286,17 +260,6 @@ http = [
 ]
 
 [[package]]
-name = "greenlet"
-version = "3.5.4"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/a3/74/b13368064b09053253555d3f2839cc2684d22d5aed0d2ccffbf7a6736558/greenlet-3.5.4.tar.gz", hash = "sha256:0232ae1de90a8e07867bb127d7a6ba2301e859145489f25cda8a6096dabe1d20", size = 206538, upload-time = "2026-07-22T12:47:14.468Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/50/6d/0b14bb9db2989f32cd9fe7f76afedea01ee8bee3f87c07e69f24adfe7e63/greenlet-3.5.4-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:f88193799d43dbf8c8a806d6405c9c52fe2af40bf75072a606357b33cc336c7f", size = 621541, upload-time = "2026-07-22T11:51:09.464Z" },
-    { url = "https://files.pythonhosted.org/packages/b9/96/4c9bf2e2c408dcc0556edce69efa9f802e82223573c53240136a086821f1/greenlet-3.5.4-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:42afdc1ab5f66da8c586c32af9224a74a706b4f0ea0dc3a4188a0860a09c65c9", size = 1645842, upload-time = "2026-07-22T11:51:12.295Z" },
-    { url = "https://files.pythonhosted.org/packages/b5/41/303ecb26a3a56122c0f4d4073ee078881847bd6b6f463ae0ec57ec20223b/greenlet-3.5.4-cp312-cp312-win_amd64.whl", hash = "sha256:60149df8f462d1b230038e6590c23c3b4768bb5d6c022b3b6e82532b34b0b8a3", size = 247169, upload-time = "2026-07-22T11:38:19.893Z" },
-]
-
-[[package]]
 name = "h5py"
 version = "3.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -466,18 +429,6 @@ wheels = [
 ]
 
 [[package]]
-name = "mako"
-version = "1.4.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "markupsafe" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/2a/12/b5fa2353e2754cd67fb9f83793fa48ff42c213a5da7e719869d2301f6ab8/mako-1.4.1.tar.gz", hash = "sha256:d7904710b662996425a21627710c4777c45053146942cf8a7aebf757c92b8c27", size = 410165, upload-time = "2026-08-05T06:10:56.611Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a5/54/12ed58d458474aaab5c3d180173e745a4fe131bb330370596876d19ff60f/mako-1.4.1-py3-none-any.whl", hash = "sha256:a359d9a94a541213958742b2698d0a7757bb83551767bc468a74b9905aba9617", size = 80010, upload-time = "2026-08-05T06:10:58.248Z" },
-]
-
-[[package]]
 name = "markupsafe"
 version = "3.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -570,25 +521,23 @@ dependencies = [
     { name = "loguru" },
     { name = "matplotlib" },
     { name = "numpy" },
-    { name = "pandas" },
     { name = "polars" },
-    { name = "tqdm" },
 ]
 
 [package.optional-dependencies]
 ml = [
     { name = "lightning" },
     { name = "omegaconf" },
-    { name = "optuna" },
     { name = "scikit-learn" },
-    { name = "seaborn" },
     { name = "torch" },
     { name = "torchdiffeq" },
+    { name = "tqdm" },
 ]
 sim = [
     { name = "endf" },
     { name = "ipython" },
     { name = "lxml" },
+    { name = "pandas" },
     { name = "scipy" },
     { name = "setuptools", version = "84.0.0", source = { registry = "https://pypi.org/simple" } },
     { name = "uncertainties" },
@@ -612,18 +561,16 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.8" },
     { name = "numpy", specifier = ">=1.26,<3" },
     { name = "omegaconf", marker = "extra == 'ml'", specifier = ">=2.3" },
-    { name = "optuna", marker = "extra == 'ml'", specifier = ">=3.6" },
-    { name = "pandas", specifier = ">=2.2" },
+    { name = "pandas", marker = "extra == 'sim'", specifier = ">=2.2" },
     { name = "polars", specifier = ">=1.0" },
     { name = "scikit-learn", marker = "extra == 'ml'", specifier = ">=1.5" },
     { name = "scipy", marker = "extra == 'sim'", specifier = ">=1.13" },
-    { name = "seaborn", marker = "extra == 'ml'", specifier = ">=0.13" },
     { name = "setuptools", marker = "extra == 'sim'", specifier = ">=68" },
     { name = "torch", marker = "sys_platform == 'linux' and extra == 'ml'", specifier = ">=2.6,<3", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'ml'", specifier = ">=2.6,<3" },
     { name = "torch", marker = "sys_platform == 'win32' and extra == 'ml'", specifier = ">=2.6,<3", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torchdiffeq", marker = "extra == 'ml'", specifier = ">=0.2.4" },
-    { name = "tqdm", specifier = ">=4.66" },
+    { name = "tqdm", marker = "extra == 'ml'", specifier = ">=4.66" },
     { name = "uncertainties", marker = "extra == 'sim'", specifier = ">=3.2" },
 ]
 provides-extras = ["ml", "sim"]
@@ -806,24 +753,6 @@ wheels = [
 ]
 
 [[package]]
-name = "optuna"
-version = "4.9.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "alembic" },
-    { name = "colorlog" },
-    { name = "numpy" },
-    { name = "packaging" },
-    { name = "pyyaml" },
-    { name = "sqlalchemy" },
-    { name = "tqdm" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/f4/aa/05f5e3f662cc96a4c478fc3446b8ed6359825a2b504ecb614a9ac84e4a4d/optuna-4.9.0.tar.gz", hash = "sha256:b322e5cbdf1655fb84c37646c4a7a1f391de1b47806bbe222e015825d0a82b87", size = 485834, upload-time = "2026-06-01T06:23:30.424Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ab/f3/e5fcd5d9b15771ed6dc10e3a7eeddc672e418f4f4c4653d216cc1d857e2d/optuna-4.9.0-py3-none-any.whl", hash = "sha256:f52f3be6148654850c92a5860d398fd88ec6b2c84ab68d9c3d07dcff02e7afee", size = 425553, upload-time = "2026-06-01T06:23:28.804Z" },
-]
-
-[[package]]
 name = "packaging"
 version = "26.3"
 source = { registry = "https://pypi.org/simple" }
@@ -839,7 +768,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
     { name = "python-dateutil" },
-    { name = "tzdata", marker = "sys_platform == 'win32' or (extra == 'extra-25-nuclear-transport-with-ml-ml' and extra == 'extra-25-nuclear-transport-with-ml-sim')" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/be/4f/5f3422a2afec5ffc46308b79e53291365a93748b498ac2e58bead0197916/pandas-3.0.5.tar.gz", hash = "sha256:dca3734d6ab7c906e6730f0788b0a1dbb9f2467731f9711f77995c8e9d62d712", size = 4658219, upload-time = "2026-07-22T22:19:28.819Z" }
 wheels = [
@@ -1099,20 +1028,6 @@ wheels = [
 ]
 
 [[package]]
-name = "seaborn"
-version = "0.13.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "matplotlib" },
-    { name = "numpy" },
-    { name = "pandas" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/86/59/a451d7420a77ab0b98f7affa3a1d78a313d2f7281a57afb1a34bae8ab412/seaborn-0.13.2.tar.gz", hash = "sha256:93e60a40988f4d65e9f4885df477e2fdaff6b73a9ded434c1ab356dd57eefff7", size = 1457696, upload-time = "2024-01-25T13:21:52.551Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/83/11/00d3c3dfc25ad54e731d91449895a79e4bf2384dc3ac01809010ba88f6d5/seaborn-0.13.2-py3-none-any.whl", hash = "sha256:636f8336facf092165e27924f223d3c62ca560b1f2bb5dff7ab7fad265361987", size = 294914, upload-time = "2024-01-25T13:21:49.598Z" },
-]
-
-[[package]]
 name = "setuptools"
 version = "81.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1145,22 +1060,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
-]
-
-[[package]]
-name = "sqlalchemy"
-version = "2.0.51"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "greenlet" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/02/f1/a7a892f18d4d224e6b26f706531eafccc41e37594d37d304786969ee13cb/sqlalchemy-2.0.51.tar.gz", hash = "sha256:804dccd8a4a6242c4e30ad961e540e18a588f6527202f2d6791b01845d59fdc9", size = 9912201, upload-time = "2026-06-15T15:41:20.012Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/2b/7c/7ab9f9aadc5944fdd06612484ed7918fe376ad871a5f50404dc1536e0194/sqlalchemy-2.0.51-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:1d21ce524ab86c23046e992a5b81cb54c21079c6df6e78b8fc77d77cac70a6b9", size = 3358470, upload-time = "2026-06-15T16:26:38.011Z" },
-    { url = "https://files.pythonhosted.org/packages/6f/3b/6c505903710d781b55bc3141ee34a062bf9745a6b5bc7333305b9ed63b33/sqlalchemy-2.0.51-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:1181256e0f16479691b5616d36375dc2620ad8332b25978763c3d206ad3f3f1d", size = 3321692, upload-time = "2026-06-15T16:26:39.747Z" },
-    { url = "https://files.pythonhosted.org/packages/25/dc/46a65916af68a06ef6b972c6050ba4c8f97070fe3fb33097d34229d9bef6/sqlalchemy-2.0.51-cp312-cp312-win_amd64.whl", hash = "sha256:2cf39aabdf48e87c1c2c2ed6d20d33ffa0733b3071ce9c5f66357947dd009080", size = 2146670, upload-time = "2026-06-15T16:23:11.048Z" },
-    { url = "https://files.pythonhosted.org/packages/e2/22/dbf013a12ec759e54a34a119e9e217435b3f71b2dd5c61a7ade0a25dae87/sqlalchemy-2.0.51-py3-none-any.whl", hash = "sha256:bb024d8b621d0be75f4f44ecc7c950450026e76d66dc8f791bb5331d7fed59d5", size = 1944334, upload-time = "2026-06-15T16:09:22.418Z" },
 ]
 
 [[package]]
@@ -1256,7 +1155,7 @@ name = "tqdm"
 version = "4.70.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-25-nuclear-transport-with-ml-ml' and extra == 'extra-25-nuclear-transport-with-ml-sim')" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/21/3b/6c24bec5be5e743ffd99576daa5cc077722fc7d5bbc00bd133fa0c698dc6/tqdm-4.70.0.tar.gz", hash = "sha256:55b0b0dbd97462d06ebee91e4dac24ed4d4702be82b24f07e6c1d27e08cea220", size = 795438, upload-time = "2026-07-27T11:33:15.271Z" }
 wheels = [

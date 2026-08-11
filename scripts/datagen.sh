@@ -7,8 +7,9 @@
 #SBATCH -J quarter_datagen
 #SBATCH -o datagen_%j.out
 #SBATCH -e datagen_%j.err
+# No --mail-user: SLURM mails the submitting user, which is the right person on
+# any cluster account. Override with `sbatch --mail-user=<addr>` if needed.
 #SBATCH --mail-type=ALL
-#SBATCH --mail-user=abel.castanedarodriguez@student.manchester.ac.uk
 
 module purge
 # No `module load python` and no conda: uv provisions CPython 3.12 from
@@ -22,7 +23,7 @@ cd "$SLURM_SUBMIT_DIR"
 export HDF5_USE_FILE_LOCKING=FALSE
 
 uv run --extra sim --no-dev --locked python data_generation/quarter_datagen.py \
-    -p data_generation/example_power_history.csv \
+    -p "${POWER_HISTORY:-data_generation/data_beavers.txt}" \
     -n 1 \
     -c 1 \
     -t 10 \

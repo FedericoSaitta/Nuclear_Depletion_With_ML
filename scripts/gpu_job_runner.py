@@ -1,33 +1,37 @@
+"""Write and (optionally) submit a SLURM GPU job that runs `nucml`.
+
+Every site-specific value is an environment variable with a default, so the
+script carries no one machine's account details:
+
+    SLURM_PARTITION=gpuA SLURM_WALLTIME=0-4 python scripts/gpu_job_runner.py
+"""
+
 import os
 import subprocess
 from pathlib import Path
 
-# Set the global variables needed for the job submission
-CPUS = 12
-GPUS = 1
-EMAIL = "federico.saitta@student.manchester.ac.uk"
-
-# federico.saitta@student.manchester.ac.uk
-# abel.castanedarodriguez@student.manchester.ac.uk
-
-# Additional configuration
-PARTITION = "gpuL"  # Options: 'gpuA', 'gpuA40GB', 'gpuL'
-WALLTIME = "0-1"  # 1 day (format: days-hours)
-JOB_NAME = "gpu_job"
-CUDA_VERSION = None  # torch wheels bundle their own CUDA runtime; no module needed
-PYTHON_SCRIPT = "nucml"
+CPUS = int(os.environ.get("SLURM_CPUS", 12))
+GPUS = int(os.environ.get("SLURM_GPUS", 1))
+PARTITION = os.environ.get("SLURM_PARTITION", "gpuL")  # e.g. gpuA, gpuA40GB, gpuL
+WALLTIME = os.environ.get("SLURM_WALLTIME", "0-1")  # days-hours
+JOB_NAME = os.environ.get("SLURM_JOB_NAME", "gpu_job")
+# Unset by default: SLURM then mails the submitting user, which is correct on
+# any account. Set SLURM_MAIL_USER to override.
+EMAIL = os.environ.get("SLURM_MAIL_USER")
+CONFIG = os.environ.get("NUCML_CONFIG", "configs/main_config.yaml")
 
 
 def create_slurm_script(output_file="submit_gpu_job.sh"):
     """Generate a Slurm job submission script."""
+
+    mail_user = f"\n#SBATCH --mail-user={EMAIL}" if EMAIL else ""
 
     slurm_script = f"""#!/bin/bash --login
 #SBATCH -p {PARTITION}                    # GPU partition
 #SBATCH --gres=gpu:{GPUS}                 # Request {GPUS} GPU(s)
 #SBATCH --ntasks-per-node={CPUS}          # Number of tasks per node
 #SBATCH -t {WALLTIME}                     # Wallclock time limit
-#SBATCH --mail-type=ALL                   # Email notifications
-#SBATCH --mail-user={EMAIL}
+#SBATCH --mail-type=ALL                   # Email notifications{mail_user}
 #SBATCH -J {JOB_NAME}                     # Job name
 #SBATCH -o logs/job_%j.out                # Standard output log
 #SBATCH -e logs/job_%j.err                # Standard error log
@@ -35,8 +39,8 @@ def create_slurm_script(output_file="submit_gpu_job.sh"):
 export PATH="$HOME/.local/bin:$PATH"
 cd "$SLURM_SUBMIT_DIR"
 
-# Run your Python script
-uv run --extra ml --no-dev --locked {PYTHON_SCRIPT} --config ML/main_config.yaml
+# torch wheels bundle their own CUDA runtime, so no `module load cuda` is needed.
+uv run --extra ml --no-dev --locked nucml --config {CONFIG}
 
 kill %1
 """
@@ -83,8 +87,8 @@ def main():
     print(f"  CPUs: {CPUS}")
     print(f"  GPUs: {GPUS}")
     print(f"  Partition: {PARTITION}")
-    print(f"  Email: {EMAIL}")
-    print(f"  Python script: {PYTHON_SCRIPT}")
+    print(f"  Email: {EMAIL or 'submitting user (SLURM default)'}")
+    print(f"  Config: {CONFIG}")
     print()
 
     # Create the Slurm script

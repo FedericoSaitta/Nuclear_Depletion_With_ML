@@ -4,11 +4,11 @@ import lightning as L
 from torch.utils.data import DataLoader, TensorDataset
 import torch
 import numpy as np
-import os
 
-import ML.datamodule.dataset_helper as data_help
-import ML.datamodule.data_scalers as data_scalers
-import ML.utils.plot as plot
+import nuclear_surrogates.datamodule.dataset_helper as data_help
+import nuclear_surrogates.datamodule.data_scalers as data_scalers
+import nuclear_surrogates.utils.plot as plot
+from nuclear_surrogates.utils.paths import result_dir
 
 
 class NODE_Datamodule(L.LightningDataModule):
@@ -41,8 +41,7 @@ class NODE_Datamodule(L.LightningDataModule):
         self.inputs = data_scalers.create_scaler_dict(cfg_object.dataset["inputs"])
         self.target = data_scalers.create_scaler_dict(cfg_object.dataset["targets"])
 
-        self.result_dir = f"results/{cfg_object.model.name}/"
-        os.makedirs(self.result_dir, exist_ok=True)
+        self.result_dir = result_dir(cfg_object)
 
         self._has_setup = False
 
@@ -174,13 +173,6 @@ class NODE_Datamodule(L.LightningDataModule):
 
             assert not np.isnan(inf_input_arr).any(), "NaNs in inference input data!"
             assert not np.isnan(inf_target_arr).any(), "NaNs in inference target data!"
-
-            inf_input_trajs = inf_input_arr.reshape(
-                inf_num_runs, inf_actual_steps, n_input_features
-            )
-            inf_target_trajs = inf_target_arr.reshape(
-                inf_num_runs, inf_actual_steps, n_target_features
-            )
 
             logger.info(
                 f"Inference data: {inf_num_runs} trajectories, {inf_actual_steps} steps"

@@ -4,7 +4,8 @@ import torch
 from loguru import logger
 from tqdm import tqdm
 
-import ML.datamodule.data_scalers as data_scaler
+import nuclear_surrogates.datamodule.data_scalers as data_scaler
+from nuclear_surrogates.datamodule.dataset_helper import ensure_2d
 
 
 # ── Metric helpers ───────────────────────────────────────────────────────────
@@ -60,22 +61,17 @@ def mare(y_true, y_pred):
 # ── Model inference helpers ──────────────────────────────────────────────────
 
 
-def _ensure_2d(arr):
-    """Reshape to (n, ...) if 1-D."""
-    return arr.reshape(-1, 1) if arr.ndim == 1 else arr
-
-
 def _collect_loader(loader):
     """Concatenate all batches from a DataLoader into numpy arrays."""
     xs, ys = zip(*[(x.numpy(), y.numpy()) for x, y in loader])
-    return np.concatenate(xs), _ensure_2d(np.concatenate(ys))
+    return np.concatenate(xs), ensure_2d(np.concatenate(ys))
 
 
 @torch.no_grad()
 def _predict_numpy(model, x_np, device):
     """Run model inference on a numpy array and return 2-D numpy output."""
     tensor = torch.FloatTensor(x_np).to(device)
-    return _ensure_2d(model(tensor).cpu().numpy())
+    return ensure_2d(model(tensor).cpu().numpy())
 
 
 def get_model_prediction(model, x_input, y_scaler):

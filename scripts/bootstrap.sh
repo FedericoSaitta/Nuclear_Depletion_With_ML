@@ -2,7 +2,7 @@
 # One-time setup on the cluster. Idempotent; safe to re-run.
 #
 # Deliberately does NOT use `module load python/...` or conda: uv provisions
-# CPython 3.12 itself from .python-version (OUTPUT.md §3.4). The only site
+# CPython 3.12 itself from .python-version. The only site
 # modules needed are the compilers/HDF5 for the OpenMC build.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -32,6 +32,6 @@ fi
 cat <<'EOF'
 
 Ready.
-  training : uv run nucml --config ML/main_config.yaml
+  training : uv run nucml --config configs/main_config.yaml
   datagen  : UV_PROJECT_ENVIRONMENT=.venv-sim uv run python data_generation/datagen.py -n 4 -c 16
 EOF

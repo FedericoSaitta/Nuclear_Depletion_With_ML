@@ -11,9 +11,9 @@ Features:
 Tally coverage
 --------------
 Capture (n,γ) tallies are scored for every isotope in the 7-isotope
-breeding chain (U238, U239, Np239, Pu239, Pu240, Pu241, Pu242) so that
-uncertainty_analysis.py can build the Bateman matrix directly from
-measured data. The list lives in quarter_sim.CAPTURE_NUCLIDES — any
+breeding chain (U238, U239, Np239, Pu239, Pu240, Pu241, Pu242) so that the
+Bateman matrix can be built directly from measured data. The consumer,
+uncertainty_analysis.py, is NOT in this repository — see AUDIT.md §C6. The list lives in quarter_sim.CAPTURE_NUCLIDES — any
 changes there are picked up automatically here (column names in the CSV
 follow the pattern {nuclide}_capture and {nuclide}_capture_std).
 

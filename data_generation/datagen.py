@@ -1,4 +1,3 @@
-import sys
 import argparse
 
 # Parse arguments FIRST, before any other imports
@@ -94,11 +93,6 @@ from reactor_sim import (
     create_settings,
     update_water_composition,
 )
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../util")))
-
-HOUR_IN_SECONDS = 3600
-DAY_IN_SECONDS = 24 * HOUR_IN_SECONDS
 
 
 def setup_paths(script_dir, worker_id, chain_filename, use_wmp=False):

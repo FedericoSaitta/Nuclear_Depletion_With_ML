@@ -1,20 +1,39 @@
 # ML/models/node_model.py
 import os
+import sys
 from omegaconf import OmegaConf
 import torch
 import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 
 from loguru import logger
 import lightning as L
 from torchdiffeq import odeint, odeint_adjoint
 
-from ML.utils import plot
-from ML.utils import metrics
-from ML.models.model_architectures import ODEFuncForced, ODEFuncMatrix
-from ML.models.model_helper import get_loss_fn
-import ML.datamodule.data_scalers as data_scaler
+from nuclear_surrogates.utils import plot
+from nuclear_surrogates.utils import metrics
+from nuclear_surrogates.models.model_architectures import ODEFuncForced, ODEFuncMatrix
+from nuclear_surrogates.models.model_helper import get_loss_fn
+import nuclear_surrogates.datamodule.data_scalers as data_scaler
+from nuclear_surrogates.utils.paths import result_dir
 
 # ─── Lightning Module ────────────────────────────────────────────────────────
+
+
+def _print_unicode_safe(line=""):
+    """print() that degrades instead of crashing on a non-UTF-8 stdout.
+
+    The markdown dump below contains Δ and ±. A Windows console/pipe running
+    cp1252 can encode ± but not Δ, so a plain print() raises UnicodeEncodeError
+    part-way through the table and aborts the whole test epoch.
+    """
+    try:
+        print(line)
+    except UnicodeEncodeError:
+        encoding = sys.stdout.encoding or "ascii"
+        print(line.encode(encoding, errors="replace").decode(encoding))
+
 
 
 class NODE_Model(L.LightningModule):
@@ -53,8 +72,7 @@ class NODE_Model(L.LightningModule):
             logger.info("Using direct backprop through odeint")
 
         # Results directory
-        self.result_dir = f"results/{config_object.model.name}/"
-        os.makedirs(self.result_dir, exist_ok=True)
+        self.result_dir = result_dir(config_object)
 
         # Collect losses for plotting
         self._train_losses = []
@@ -542,7 +560,6 @@ class NODE_Model(L.LightningModule):
         logger.info(f"{'='*20}")
 
         num_runs, steps, n_input = all_inputs_scaled.shape
-        n_target = all_trues_scaled.shape[2]
         device = self.device
         t_span = self.t_span.to(device)
 
@@ -708,7 +725,6 @@ class NODE_Model(L.LightningModule):
         self, matrix, col_names, row_names, title, xlabel, ylabel, save_path
     ):
         """Plot a heatmap of a Jacobian matrix."""
-        import matplotlib.pyplot as plt
 
         fig, ax = plt.subplots(
             figsize=(max(8, len(col_names) * 1.2), max(6, len(row_names) * 0.8))
@@ -755,7 +771,6 @@ class NODE_Model(L.LightningModule):
         save_path,
     ):
         """Bar chart showing sensitivity of one derivative to all state + forcing variables."""
-        import matplotlib.pyplot as plt
 
         n_target = len(target_names)
         n_forcing = len(forcing_names)
@@ -771,7 +786,7 @@ class NODE_Model(L.LightningModule):
         sorted_colors = [colors[i] for i in sorted_idx]
 
         fig, ax = plt.subplots(figsize=(max(8, len(all_names) * 0.6), 5))
-        bars = ax.bar(
+        ax.bar(
             range(len(sorted_sens)),
             sorted_sens,
             yerr=sorted_stds,
@@ -787,7 +802,6 @@ class NODE_Model(L.LightningModule):
         ax.set_title(title)
 
         # Legend
-        from matplotlib.patches import Patch
 
         legend_elements = [
             Patch(facecolor="#2196F3", label="State (∂f/∂y)"),
@@ -810,7 +824,6 @@ class NODE_Model(L.LightningModule):
         save_path,
     ):
         """Line plot showing how sensitivities evolve over the trajectory."""
-        import matplotlib.pyplot as plt
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
@@ -868,8 +881,11 @@ class NODE_Model(L.LightningModule):
         phys_max = data_scaler.inverse_transformer(dm.target_scaler, ones)[0]
         ranges = phys_max - phys_min
 
-        # Physical time span — time_array is in days (column "time_days" in HDF5)
-        raw_t = dm.time_array[: dm.actual_steps]
+        # Physical time span, in days (the HDF5 carries it as column "time_days").
+        # NOTE: hardcoded, and the training data actually spans 990 days
+        # (dm.time_array[:dm.actual_steps]), so every coefficient below is ~1% low.
+        # Left as-is deliberately: changing it moves the published depletion-matrix
+        # figure. See AUDIT.md Pass 2 §B1.
         T_total_days = 1000
 
         # Build scale matrix: scale[i,j] = range_i / (range_j * T_total_days)
@@ -888,7 +904,6 @@ class NODE_Model(L.LightningModule):
         self, all_inputs_scaled, all_trues_scaled, target_names
     ):
         """Extract and visualise the learned depletion matrix A(t) over time."""
-        import matplotlib.pyplot as plt
 
         logger.info(f"\n{'='*20}")
         logger.info("DEPLETION MATRIX ANALYSIS")
@@ -1037,48 +1052,6 @@ class NODE_Model(L.LightningModule):
         plt.close()
 
         logger.info(f"  Depletion matrix plots saved to: {self.result_dir}")
-
-    # ─── Batch Forward (for other analyses) ──────────────────────────────
-
-    def _batch_forward_numpy(self, inputs_scaled, trues_scaled):
-        """
-        Run NODE forward pass on numpy arrays in batches.
-        Returns: (num_runs, steps, n_target) numpy array of scaled predictions.
-        """
-        num_runs = inputs_scaled.shape[0]
-        n_target = trues_scaled.shape[2]
-        steps = inputs_scaled.shape[1]
-        all_preds = np.zeros((num_runs, steps, n_target))
-
-        device = self.device
-        t_span = self.t_span.to(device)
-        batch_size = 64
-
-        with torch.no_grad():
-            for batch_start in range(0, num_runs, batch_size):
-                batch_end = min(batch_start + batch_size, num_runs)
-
-                inputs_batch = torch.tensor(
-                    inputs_scaled[batch_start:batch_end],
-                    dtype=torch.float32,
-                    device=device,
-                )
-                trues_batch = torch.tensor(
-                    trues_scaled[batch_start:batch_end],
-                    dtype=torch.float32,
-                    device=device,
-                )
-
-                forcing_profiles = inputs_batch  # (batch, steps, n_input)
-                y0 = trues_batch[:, 0, :]
-
-                self.func.set_forcing(t_span, forcing_profiles)
-
-                pred = self._odeint(y0, t_span).permute(1, 0, 2)
-
-                all_preds[batch_start:batch_end] = pred.cpu().numpy()
-
-        return all_preds
 
     # ─── Prediction Comparisons ──────────────────────────────────────────
 
@@ -1370,28 +1343,28 @@ class NODE_Model(L.LightningModule):
                 self.log(f"{tname}/stepwise_dMAE/{safe}", float(mean_delta[j, k]))
 
         # ── Markdown printout ────────────────────────────────────────────
-        print("\n" + "=" * 70)
-        print("PER-STEP IMPORTANCE TABLES — paste everything between the markers")
-        print("=" * 70)
-        print("<<<BEGIN_STEPWISE_IMPORTANCE_TABLES>>>")
-        print(
+        _print_unicode_safe("\n" + "=" * 70)
+        _print_unicode_safe("PER-STEP IMPORTANCE TABLES — paste everything between the markers")
+        _print_unicode_safe("=" * 70)
+        _print_unicode_safe("<<<BEGIN_STEPWISE_IMPORTANCE_TABLES>>>")
+        _print_unicode_safe(
             f"\n_Per-step teacher-forced permutation importance — "
             f"mean ± SEM across {num_runs} runs, "
             f"{n_sampled} sampled timesteps, K={n_permutations}_\n"
         )
         for k, tname in enumerate(target_names):
-            print(f"#### Target: `{tname}`\n")
-            print("| Feature | Type | ΔMAE | MAE Imp. [%] |")
-            print("|---|---|---|---|")
+            _print_unicode_safe(f"#### Target: `{tname}`\n")
+            _print_unicode_safe("| Feature | Type | ΔMAE | MAE Imp. [%] |")
+            _print_unicode_safe("|---|---|---|---|")
             for j in np.argsort(mean_pct[:, k])[::-1]:
-                print(
+                _print_unicode_safe(
                     f"| {all_feature_names[j]} | {feature_types[j]} | "
                     f"{mean_delta[j,k]:.4e} ± {sem_delta[j,k]:.2e} | "
                     f"{mean_pct[j,k]:.2f} ± {sem_pct[j,k]:.2f} |"
                 )
-            print()
-        print("<<<END_STEPWISE_IMPORTANCE_TABLES>>>")
-        print("=" * 70 + "\n")
+            _print_unicode_safe()
+        _print_unicode_safe("<<<END_STEPWISE_IMPORTANCE_TABLES>>>")
+        _print_unicode_safe("=" * 70 + "\n")
 
         # ── CSV ──────────────────────────────────────────────────────────
         import csv
@@ -1479,8 +1452,6 @@ class NODE_Model(L.LightningModule):
         num_runs,
     ):
         """Time-averaged bar chart: % importance with SEM, sorted descending."""
-        import matplotlib.pyplot as plt
-        from matplotlib.patches import Patch
 
         n_features = len(all_feature_names)
         base_colors = [
@@ -1553,7 +1524,6 @@ class NODE_Model(L.LightningModule):
         This is the key plot: isotopes that start at 0 should show rising
         importance curves as concentrations build up during burnup.
         """
-        import matplotlib.pyplot as plt
 
         forcing_idx = [j for j, ft in enumerate(feature_types) if ft == "Forcing"]
         state_idx = [j for j, ft in enumerate(feature_types) if ft == "State"]

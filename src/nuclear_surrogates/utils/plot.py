@@ -5,77 +5,6 @@ import matplotlib.pyplot as plt
 from loguru import logger
 
 
-def plot_correlation_matrix(
-    X, Y, col_index_map, target_name="Target", save_dir=None, name="correlation_matrix"
-):
-    # Ensure Y is 1D
-    if Y.ndim > 1 and Y.shape[1] == 1:
-        Y = Y.flatten()
-
-    # Get sorted feature names
-    feature_list = sorted(col_index_map.items(), key=lambda x: x[1])
-    feature_names = [name for name, _ in feature_list]
-
-    # Combine X and Y into single array
-    data_combined = np.column_stack([X, Y])
-    all_names = feature_names + [f"{target_name}(t+1)"]
-
-    # Calculate correlation matrix
-    corr_matrix = np.corrcoef(data_combined.T)
-
-    # Create figure
-    fig, ax = plt.subplots(figsize=(12, 10))
-
-    # Create heatmap
-    im = ax.imshow(corr_matrix, cmap="RdBu_r", aspect="auto", vmin=-1, vmax=1)
-
-    # Set ticks and labels
-    ax.set_xticks(range(len(all_names)))
-    ax.set_yticks(range(len(all_names)))
-    ax.set_xticklabels(all_names, rotation=45, ha="right", fontsize=9)
-    ax.set_yticklabels(all_names, fontsize=9)
-
-    # Add colorbar
-    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label("Correlation Coefficient", rotation=270, labelpad=20, fontsize=11)
-
-    # Add correlation values to cells
-    for i in range(len(all_names)):
-        for j in range(len(all_names)):
-            corr_val = corr_matrix[i, j]
-            # Choose text color based on background
-            text_color = "white" if abs(corr_val) > 0.5 else "black"
-            # Only show values for off-diagonal or if significant
-            if i != j or abs(corr_val) > 0.01:
-                ax.text(
-                    j,
-                    i,
-                    f"{corr_val:.2f}",
-                    ha="center",
-                    va="center",
-                    color=text_color,
-                    fontsize=7,
-                )
-
-    # Highlight the target row and column
-    target_idx = len(all_names) - 1
-
-    ax.set_title(
-        f"Correlation Matrix: All Features and {target_name}(t+1)",
-        fontsize=14,
-        fontweight="bold",
-        pad=20,
-    )
-
-    plt.tight_layout()
-
-    # Save plot
-    filepath = os.path.join(save_dir, f"{name}.png")
-    plt.savefig(filepath, dpi=300, bbox_inches="tight")
-    plt.close()
-    logger.info(f"Correlation matrix saved to: {filepath}")
-
-
 def plot_data_distributions(X, col_index_map, save_dir=None, name="Raw_Data"):
     # Get all feature names sorted by index
     feature_list = sorted(col_index_map.items(), key=lambda x: x[1])
@@ -120,7 +49,6 @@ def plot_data_distributions(X, col_index_map, save_dir=None, name="Raw_Data"):
 
         # Add statistics
         mean_val = np.mean(data)
-        std_val = np.std(data)
         ax.axvline(
             mean_val,
             color="red",

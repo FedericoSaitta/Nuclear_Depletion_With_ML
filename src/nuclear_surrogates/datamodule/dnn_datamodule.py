@@ -1,12 +1,12 @@
 from loguru import logger
 import lightning as L
 from torch.utils.data import DataLoader
-import os
 
 # Local Imports
-import ML.datamodule.dataset_helper as data_help
-import ML.utils.plot as plot
-import ML.datamodule.data_scalers as data_scalers
+import nuclear_surrogates.datamodule.dataset_helper as data_help
+import nuclear_surrogates.utils.plot as plot
+import nuclear_surrogates.datamodule.data_scalers as data_scalers
+from nuclear_surrogates.utils.paths import result_dir
 
 
 class DNN_Datamodule(L.LightningDataModule):
@@ -28,8 +28,7 @@ class DNN_Datamodule(L.LightningDataModule):
         self.train_drop_last = cfg_object.train.drop_last
 
         # === Result output directory === #
-        self.result_dir = f"results/{cfg_object.model.name}/"
-        os.makedirs(self.result_dir, exist_ok=True)
+        self.result_dir = result_dir(cfg_object)
 
         # Private variable to ensure set up is not done twice when calling training and test scripts back to back
         self._has_setup = False

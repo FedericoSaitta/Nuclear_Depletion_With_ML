@@ -226,7 +226,8 @@ def timeseries_train_val_test_split(
 # ── Scaling & tensor conversion ──────────────────────────────────────────────
 
 
-def _ensure_2d(arr):
+def ensure_2d(arr):
+    """Reshape to (n, 1) if 1-D, otherwise pass through."""
     return arr.reshape(-1, 1) if arr.ndim == 1 else arr
 
 
@@ -237,7 +238,7 @@ def scale_datasets(
     X_val = input_scaler.transform(X_val)
     X_test = input_scaler.transform(X_test)
 
-    y_train, y_val, y_test = _ensure_2d(y_train), _ensure_2d(y_val), _ensure_2d(y_test)
+    y_train, y_val, y_test = ensure_2d(y_train), ensure_2d(y_val), ensure_2d(y_test)
     y_train = target_scaler.fit_transform(y_train)
     y_val = target_scaler.transform(y_val)
     y_test = target_scaler.transform(y_test)

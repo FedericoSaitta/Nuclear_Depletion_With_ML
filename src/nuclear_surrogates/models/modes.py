@@ -1,23 +1,22 @@
-import os
-
 import lightning as L
 import torch
 import torch.multiprocessing as mp
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from loguru import logger
 
-from ML.utils.sql_lite_logger import SQLiteLogger
+from nuclear_surrogates.utils.paths import result_dir
+from nuclear_surrogates.utils.sql_lite_logger import SQLiteLogger
 
 
 # ── Shared helpers ───────────────────────────────────────────────────────────
 
 
-def _build_callbacks(cfg, result_dir):
+def _build_callbacks(cfg, result_dir_path):
     model_name = cfg.model.name
     callbacks = []
 
     checkpoint_cb = ModelCheckpoint(
-        dirpath=result_dir,
+        dirpath=result_dir_path,
         filename=f"best-{model_name}-{{epoch:02d}}",
         monitor="val_loss",
         mode="min",
@@ -54,12 +53,6 @@ def _build_trainer(cfg, callbacks, pl_logger, **extra_kwargs):
         gradient_clip_algorithm="norm",
         **extra_kwargs,
     )
-
-
-def _result_dir(model_name):
-    path = f"results/{model_name}/"
-    os.makedirs(path, exist_ok=True)
-    return path
 
 
 # ── Checkpoint utilities ─────────────────────────────────────────────────────
@@ -106,8 +99,8 @@ def load_checkpoint_into_model(model, ckpt_path):
 
 def train_and_test(datamodule, model_class, cfg):
     """Instantiate a model, train it, and test using the best checkpoint."""
-    result_dir = _result_dir(cfg.model.name)
-    callbacks, checkpoint_cb = _build_callbacks(cfg, result_dir)
+    result_dir_path = result_dir(cfg)
+    callbacks, checkpoint_cb = _build_callbacks(cfg, result_dir_path)
 
     pl_logger = SQLiteLogger(
         db_path=cfg.runtime.model_database,
@@ -136,8 +129,8 @@ def train_and_test(datamodule, model_class, cfg):
 
 def train_from_checkpoint_and_test(datamodule, model_class, cfg):
     """Resume training from a checkpoint, then test using the best checkpoint."""
-    result_dir = _result_dir(cfg.model.name)
-    callbacks, checkpoint_cb = _build_callbacks(cfg, result_dir)
+    result_dir_path = result_dir(cfg)
+    callbacks, checkpoint_cb = _build_callbacks(cfg, result_dir_path)
 
     pl_logger = SQLiteLogger(
         db_path=cfg.runtime.model_database,
@@ -167,7 +160,7 @@ def inference(datamodule, model_class, cfg):
     logger.info(f"Inference mode — loading checkpoint: {cfg.runtime.ckp_path}")
 
     model = model_class(cfg)
-    model = load_checkpoint_into_model(model, cfg.runtime.ckp_path, save_fixed=False)
+    model = load_checkpoint_into_model(model, cfg.runtime.ckp_path)
 
     datamodule.inference_mode = True
 

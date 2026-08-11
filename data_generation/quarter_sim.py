@@ -6,8 +6,9 @@ No boron — water is pure H2O with S(α,β) thermal scattering.
 
 Tally coverage for the 7-isotope uncertainty analysis
 -----------------------------------------------------
-The depletion uncertainty analysis (see uncertainty_analysis.py)
-reconstructs the 7x7 Bateman matrix for the chain:
+The depletion uncertainty analysis (uncertainty_analysis.py — NOT in this
+repository; it lives on the cluster, see AUDIT.md §C6) reconstructs the
+7x7 Bateman matrix for the chain:
 
     U238 --(n,γ)--> U239 --(β⁻)--> Np239 --(β⁻)--> Pu239
                                                      |(n,γ)
@@ -44,7 +45,7 @@ FISSION_Q_VALUES = {
 FISSION_NUCLIDES = list(FISSION_Q_VALUES.keys())
 
 # Capture tallies for every isotope in the 7-isotope chain.
-# This lets uncertainty_analysis.py build the Bateman matrix entirely from
+# This lets the (cluster-side) uncertainty analysis build the Bateman matrix from
 # measured data — no need to assume α = σ_c/σ_f ratios for the Pu isotopes.
 # Note: U239 and Np239 are short-lived (minutes/days) but valid nuclides
 # for (n,γ) tallies provided the cross-section library includes them

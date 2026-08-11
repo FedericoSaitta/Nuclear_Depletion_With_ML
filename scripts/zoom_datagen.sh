@@ -6,8 +6,9 @@
 #SBATCH -J zoom_datagen
 #SBATCH -o zoom_datagen_%j.out
 #SBATCH -e zoom_datagen_%j.err
+# No --mail-user: SLURM mails the submitting user, which is the right person on
+# any cluster account. Override with `sbatch --mail-user=<addr>` if needed.
 #SBATCH --mail-type=ALL
-#SBATCH --mail-user=abel.castanedarodriguez@student.manchester.ac.uk
 
 module purge
 # No `module load python` and no conda: uv provisions CPython 3.12 from
@@ -20,8 +21,13 @@ cd "$SLURM_SUBMIT_DIR"
 # this per-worker, but exporting here covers the OpenMC executable too.
 export HDF5_USE_FILE_LOCKING=FALSE
 
+# The daily run to zoom into is worker- and machine-specific (the directory name
+# carries a random worker hash), so it has to be supplied at submission time:
+#   DAILY_RESULTS=data_generation/results/worker_1_<hash>/depletion_results.h5 sbatch scripts/zoom_datagen.sh
+: "${DAILY_RESULTS:?set DAILY_RESULTS=<path to a daily depletion_results.h5>}"
+
 uv run --extra sim --no-dev --locked python data_generation/zoom_datagen.py \
-    --daily-results data_generation/results/worker_1_9f530216/depletion_results.h5 \
+    --daily-results "$DAILY_RESULTS" \
     --start-day 140 \
     --end-day 170 \
     -p data_generation/data_beavers.txt \

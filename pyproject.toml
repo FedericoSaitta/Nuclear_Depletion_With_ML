@@ -2,13 +2,12 @@
 #  Nuclear_Transport_With_ML — single dependency source of truth.
 #
 #  The repo has two disjoint halves (verified: no shared imports):
-#     ML/**            → torch / lightning / torchdiffeq        [extra: ml]
-#     data_generation/ → openmc                                 [extra: sim]
-#     util/, tests/    → openmc
+#     src/nuclear_surrogates/ → torch / lightning / torchdiffeq  [extra: ml]
+#     data_generation/, util/ → openmc                          [extra: sim]
 #
 #  They are NEVER installed together (see [tool.uv].conflicts). OpenMC is not
 #  on PyPI, so it is not listed as a dependency anywhere — it is injected into
-#  the `sim` environment by scripts/install_openmc.sh. See OUTPUT.md §3.
+#  the `sim` environment by scripts/install_openmc.sh (see the README).
 # ============================================================================
 
 [build-system]
@@ -28,33 +27,28 @@ authors = [
 # 3.12 is the only version that satisfies BOTH halves:
 #   - OpenMC `develop` declares requires-python >= 3.12
 #   - PyTorch ships CUDA wheels for cp312 on linux-x86_64 AND win-amd64
-#     (cp314 is CPU-only today — that is why this machine currently cannot
-#      train on its RTX 4060; see OUTPUT.md §1.4)
+#     (cp314 is CPU-only today, so a 3.14 environment cannot use the GPU)
 requires-python = ">=3.12,<3.13"
 
-# Shared by both halves. Nothing here pulls torch or openmc.
+# Shared by both halves — verified by import, not by habit.
 dependencies = [
   "numpy>=1.26,<3",
-  "pandas>=2.2",
   "polars>=1.0",
   "h5py>=3.11",
   "matplotlib>=3.8",
   "loguru>=0.7",
-  "tqdm>=4.66",
 ]
 
 [project.optional-dependencies]
 # ---- ML half -------------------------------------------------------------
-# Everything ML/** imports. `lightning` bundles the `pytorch_lightning`
-# namespace too, which ML/utils/sql_lite_logger.py:3 relies on.
+# Everything the ML package imports.
 ml = [
   "torch>=2.6,<3",
   "lightning>=2.4,<3",
   "torchdiffeq>=0.2.4",
   "scikit-learn>=1.5",
-  "seaborn>=0.13",
   "omegaconf>=2.3",
-  "optuna>=3.6",
+  "tqdm>=4.66",
 ]
 
 # ---- Simulation half -----------------------------------------------------
@@ -69,6 +63,9 @@ sim = [
   "endf>=0.1",
   "ipython>=8.0",
   "setuptools>=68",
+  # Not an OpenMC dependency: data_generation/** and util/** import it directly.
+  # The ML half does not, so it stays out of the shared set.
+  "pandas>=2.2",
 ]
 
 [dependency-groups]
@@ -79,17 +76,14 @@ dev = [
 ]
 
 [project.scripts]
-nucml = "ML.main:main"
+nucml = "nuclear_surrogates.main:main"
 
 # ---- packaging -----------------------------------------------------------
-# Explicit list, not `find`, because `results/`, `data/` and `playground/`
-# live inside ML/ and must not be packaged. Requires the __init__.py files
-# restored per OUTPUT.md §5.0.
-[tool.setuptools]
-packages = ["ML", "ML.datamodule", "ML.models", "ML.utils"]
-
-[tool.setuptools.package-data]
-ML = ["*.yaml"]
+# src layout: everything under src/ is library code and nothing else is, so
+# `find` needs no exclusion list. Configs, notebooks, datasets and results all
+# live outside src/ and are therefore never packaged.
+[tool.setuptools.packages.find]
+where = ["src"]
 
 # ============================================================================
 #  uv configuration
@@ -119,7 +113,7 @@ conflicts = [
 #
 # CUDA 12.8 wheels require driver >= 528.33 (Windows) / >= 525.60 (Linux) via
 # CUDA minor-version compatibility. This laptop reports driver 566.14 → fine.
-# >>> VERIFY THE CLUSTER'S GPU-NODE DRIVER BEFORE FIRST SYNC (see §7.1). <<<
+# >>> VERIFY THE CLUSTER'S GPU-NODE DRIVER BEFORE FIRST SYNC. <<<
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
@@ -130,6 +124,20 @@ torch = [
   { index = "pytorch-cu128", marker = "sys_platform == 'win32'" },
   { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
 ]
+
+# ============================================================================
+[tool.ruff]
+target-version = "py312"
+extend-exclude = ["notebooks"]   # learning-journey scripts, not library code
+
+[tool.ruff.lint.per-file-ignores]
+# E402 (import not at top of file) is load-bearing in the datagen entry points:
+# they must parse argv and set OMP_NUM_THREADS *before* `import openmc`, which
+# reads the variable at import time. Restructuring them would change how the
+# simulations are threaded, so the rule is scoped out instead.
+"data_generation/datagen.py" = ["E402"]
+"data_generation/quarter_datagen.py" = ["E402"]
+"data_generation/zoom_datagen.py" = ["E402"]
 
 # ============================================================================
 [tool.pytest.ini_options]

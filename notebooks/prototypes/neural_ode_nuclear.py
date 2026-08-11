@@ -6,8 +6,8 @@ from torchdiffeq import odeint
 import matplotlib.pyplot as plt
 from loguru import logger
 
-import ML.datamodule.dataset_helper as data_help
-import ML.datamodule.data_scalers as data_scalers
+import nuclear_surrogates.datamodule.dataset_helper as data_help
+import nuclear_surrogates.datamodule.data_scalers as data_scalers
 
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 

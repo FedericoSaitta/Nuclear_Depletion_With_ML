@@ -1,15 +1,21 @@
 """Golden regression tests: refactors must not move published numbers.
-Skips cleanly when the (large, git-lfs) fixtures are absent, so CI stays green
-on machines without them."""
+
+Skips cleanly when the fixtures or the full training dataset are absent, so CI
+stays green on machines without them.
+"""
 
 import json
 import os
+
 import numpy as np
 import pytest
 import torch
 
-FIX = os.path.abspath(os.path.join(os.path.dirname(__file__), "fixtures"))
-ML_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ML"))
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+FIX = os.path.join(REPO, "tests", "fixtures")
+CONFIG = os.path.join(REPO, "configs", "main_config.yaml")
+CKPT = os.path.join(FIX, "best-matrix_ode_7x7_breeding_chain-epoch=2367.ckpt")
+
 need = [
     "mini_casl_10runs.h5",
     "golden_node_preds.npy",
@@ -20,7 +26,7 @@ need = [
 ]
 # The datamodule fits its scalers on the full training file before it ever looks
 # at the inference file, so the goldens are only reproducible where that file is.
-TRAIN_H5 = os.path.join(ML_DIR, "data", "casl_3305_runs_inter.h5")
+TRAIN_H5 = os.path.join(REPO, "datasets", "casl_3305_runs_inter.h5")
 pytestmark = pytest.mark.skipif(
     not (
         all(os.path.exists(os.path.join(FIX, f)) for f in need)
@@ -32,33 +38,25 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def node_setup():
-    from omegaconf import OmegaConf
     import lightning as L
-    import ML.datamodule.neural_ode_datamodule as node_dm
-    from ML.models.neural_ode import NODE_Model
-    from ML.models.modes import load_checkpoint_into_model
+    from omegaconf import OmegaConf
 
-    cfg = OmegaConf.load(os.path.join(ML_DIR, "main_config.yaml"))
+    import nuclear_surrogates.datamodule.neural_ode_datamodule as node_dm
+    from nuclear_surrogates.models.modes import load_checkpoint_into_model
+    from nuclear_surrogates.models.neural_ode import NODE_Model
+    from nuclear_surrogates.utils.paths import resolve_config_paths
+
+    cfg = OmegaConf.load(CONFIG)
+    resolve_config_paths(cfg, CONFIG)
     cfg.runtime.update(mode="inference", device="cpu", num_workers=0)
     cfg.dataset.path_to_data = TRAIN_H5
     cfg.dataset.path_to_inference_data = os.path.join(FIX, "mini_casl_10runs.h5")
 
-    # main_config.yaml paths and the datamodule's results/ dir are relative to ML/,
-    # which is where make_golden.py was run from. Match it so nothing leaks into cwd.
-    prev_cwd = os.getcwd()
-    os.chdir(ML_DIR)
-    try:
-        dm = node_dm.NODE_Datamodule(cfg)
-        dm.inference_mode = True
-        model = load_checkpoint_into_model(
-            NODE_Model(cfg),
-            os.path.join(FIX, "best-matrix_ode_7x7_breeding_chain-epoch=2367.ckpt"),
-            save_fixed=False,
-        )
-        trainer = L.Trainer(accelerator="cpu", logger=False, enable_checkpointing=False)
-        preds = trainer.predict(model, datamodule=dm)
-    finally:
-        os.chdir(prev_cwd)
+    dm = node_dm.NODE_Datamodule(cfg)
+    dm.inference_mode = True
+    model = load_checkpoint_into_model(NODE_Model(cfg), CKPT)
+    trainer = L.Trainer(accelerator="cpu", logger=False, enable_checkpointing=False)
+    preds = trainer.predict(model, datamodule=dm)
     return model, torch.cat([p["pred"] for p in preds]).numpy()
 
 
@@ -71,10 +69,11 @@ def test_node_trajectories_unchanged(node_setup):
 def test_node_metrics_unchanged(node_setup):
     """Recompute the paper metrics from fresh predictions vs frozen ground truth
     and compare against the golden metric values."""
-    from ML.utils import metrics
+    from nuclear_surrogates.utils import metrics
 
     _, pred = node_setup
-    golden = json.load(open(os.path.join(FIX, "golden_node_metrics.json")))
+    with open(os.path.join(FIX, "golden_node_metrics.json")) as f:
+        golden = json.load(f)
     truth = np.load(os.path.join(FIX, "golden_node_trues.npy"))
     flat_p, flat_t = pred.reshape(-1, 7), truth.reshape(-1, 7)
     np.testing.assert_allclose(metrics.mae(flat_t, flat_p), golden["mae"], rtol=1e-4)

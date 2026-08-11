@@ -11,13 +11,38 @@ not need to install or `module load` anything.
 git clone https://github.com/FedericoSaitta/Nuclear_Transport_With_ML.git
 cd Nuclear_Transport_With_ML
 uv sync --extra ml
-uv run nucml --config ML/main_config.yaml
+uv run nucml --config configs/main_config.yaml
 ```
 
 Override any config key from the command line:
 
 ```bash
-uv run nucml --config ML/main_config.yaml runtime.model=DNN train.num_epochs=5
+uv run nucml --config configs/main_config.yaml runtime.model=DNN train.num_epochs=5
+```
+
+Training reads the HDF5 named by `dataset.path_to_data`, which is not in the
+repository — put it in `datasets/` (see [Downloading data](#downloading-data)).
+
+### Repository layout
+
+```
+configs/          run configs. Every path inside one is relative to the config
+                  file itself, so a run is independent of the working directory
+src/nuclear_surrogates/
+    main.py       the `nucml` entry point: merge config + CLI overrides, dispatch
+    datamodule/   HDF5 -> scaled tensors; DNN pair-wise and NODE trajectory splits
+    models/       DNN, Neural ODE (incl. the constrained depletion matrix), modes
+    utils/        metrics, plotting, path resolution, SQLite experiment logger
+data_generation/  OpenMC depletion pipelines (separate environment; no ML imports)
+util/             one-off data and depletion-chain tools
+scripts/          bootstrap, OpenMC build, SLURM job scripts
+tests/            golden regression tests + fixtures; OpenMC install smoke tests
+notebooks/        exploration and learning-journey scripts, not library code
+docs/             configuration reference
+
+datasets/         training HDF5 files          (untracked)
+data/             OpenMC nuclear data, 7 GB    (untracked)
+results/          <model_name>/ per run: figures, checkpoints  (untracked)
 ```
 
 ### Generate data with OpenMC (Linux / WSL2 / macOS)
@@ -41,7 +66,7 @@ two halves split across the two OSes, sharing one checkout:
 
 | | runs where | environment |
 |---|---|---|
-| Training (`ML/**`) | Windows, on the GPU | `.venv` |
+| Training (`src/nuclear_surrogates/**`) | Windows, on the GPU | `.venv` |
 | Datagen (`data_generation/**`) | WSL2 Ubuntu | `.venv-sim` |
 
 WSL sees the repo at `/mnt/c/...`, so datagen output and `data/` are shared with
@@ -139,25 +164,37 @@ Nuclear data (7 GB cross sections + 30 MB depletion chains) is a separate downlo
 ### Tests
 
 ```bash
-uv run pytest              # ML env: OpenMC tests skip automatically
-UV_PROJECT_ENVIRONMENT=.venv-sim uv run pytest -m openmc
+uv run --extra ml pytest                                  # ML env: OpenMC tests are not collected
+UV_PROJECT_ENVIRONMENT=.venv-sim uv run --extra sim pytest -m openmc
 ```
 
+Pass the extra: a bare `uv run pytest` syncs the *default* dependency set, which has
+no torch, and collection fails on the first import.
 
 
-## Downloading Data
-To download the cross section data (7 Gb) and Depletion chains (30 Mb) can be done here: https://openmc.org/official-data-libraries/.
-The cross section data contains an .xml file along with three folders: Neutron, Photon and wmp. The depletion data is a single .xlm file.
 
-## 6. Everyday commands
+## Downloading data
+
+Two different things live in two different places, and only the first is needed to
+train:
+
+- **Training datasets** (`datasets/*.h5`) — the output of the OpenMC pipeline,
+  produced by `data_generation/` and combined with `util/combine_data.py` +
+  `util/csv_to_hdf5.py`. Not redistributed with the repo.
+- **Nuclear data** (`data/`) — cross sections (7 GB) and depletion chains (30 MB)
+  from <https://openmc.org/official-data-libraries/>, needed only for data
+  generation. The cross-section download is an `.xml` file plus three folders
+  (`neutron/`, `photon/`, `wmp/`); each depletion chain is a single `.xml`.
+
+## Everyday commands
 
 | Task | Command |
 |---|---|
 | Set up ML env | `uv sync --extra ml` |
 | Set up sim env | `UV_PROJECT_ENVIRONMENT=.venv-sim uv sync --extra sim` then `./scripts/install_openmc.sh` |
 | Set up sim env on Windows | inside `wsl`, see [On a Windows laptop](#on-a-windows-laptop-use-wsl2) |
-| Train | `uv run nucml --config ML/main_config.yaml` |
-| Train with overrides | `uv run nucml --config ML/main_config.yaml train.num_epochs=5 runtime.device=cpu` |
+| Train | `uv run nucml --config configs/main_config.yaml` |
+| Train with overrides | `uv run nucml --config configs/main_config.yaml train.num_epochs=5 runtime.device=cpu` |
 | Run datagen | `UV_PROJECT_ENVIRONMENT=.venv-sim uv run python data_generation/datagen.py -n 4 -c 16` |
 | Add an ML dependency | `uv add --optional ml <pkg>` (updates `pyproject.toml` **and** `uv.lock`) |
 | Add a sim dependency | `uv add --optional sim <pkg>` |

@@ -1,6 +1,6 @@
 import torch.nn as nn
 import torch.nn.functional as F
-from ML.models.model_helper import get_activation
+from nuclear_surrogates.models.model_helper import get_activation
 import torch
 
 
@@ -49,25 +49,18 @@ class Deep_Neural_Network(nn.Module):
 # ─── ODE Function ────────────────────────────────────────────────────────────
 
 
-class ODEFuncForced(nn.Module):
-    def __init__(self, cfg):
+class ForcedODEFunc(nn.Module):
+    """Base for ODE right-hand sides driven by an external forcing profile.
+
+    Holds the forcing grid and the zero-order-hold lookup shared by every
+    concrete right-hand side; subclasses only implement `forward`.
+    """
+
+    def __init__(self):
         super().__init__()
         self.nfe = 0
         self.t_points = None
         self.forcing_profiles = None
-
-        n_input = len(cfg.dataset.inputs)
-        n_target = len(cfg.dataset.targets)
-
-        self.net = Deep_Neural_Network(
-            n_inputs=n_input + n_target,
-            n_outputs=n_target,
-            hidden_layers=cfg.model.layers,
-            dropout_prob=cfg.model.dropout_probability,
-            activation=cfg.model.activation,
-            output_activation=cfg.model.output_activation,
-            residual=cfg.model.residual_connections,
-        )
 
     def set_forcing(self, t_points, forcing_profiles):
         self.t_points = t_points
@@ -87,6 +80,26 @@ class ODEFuncForced(nn.Module):
 
         return self.forcing_profiles[:, idx, :]  # (batch, n_input)
 
+
+class ODEFuncForced(ForcedODEFunc):
+    """Black-box right-hand side: dy/dt = net(forcing(t), y)."""
+
+    def __init__(self, cfg):
+        super().__init__()
+
+        n_input = len(cfg.dataset.inputs)
+        n_target = len(cfg.dataset.targets)
+
+        self.net = Deep_Neural_Network(
+            n_inputs=n_input + n_target,
+            n_outputs=n_target,
+            hidden_layers=cfg.model.layers,
+            dropout_prob=cfg.model.dropout_probability,
+            activation=cfg.model.activation,
+            output_activation=cfg.model.output_activation,
+            residual=cfg.model.residual_connections,
+        )
+
     def forward(self, t, y):
         self.nfe += 1
         forcing = self._interpolate_forcing(t)  # (batch, n_input)
@@ -97,7 +110,7 @@ class ODEFuncForced(nn.Module):
 # ─── Matrix ODE Function ─────────────────────────────────────────────────────
 
 
-class ODEFuncMatrix(nn.Module):
+class ODEFuncMatrix(ForcedODEFunc):
     """ODE function with a constrained depletion matrix A(t).
 
     dy/dt = A(forcing(t), y(t)) @ y(t)
@@ -113,9 +126,6 @@ class ODEFuncMatrix(nn.Module):
 
     def __init__(self, cfg):
         super().__init__()
-        self.nfe = 0
-        self.t_points = None
-        self.forcing_profiles = None
 
         n_input = len(cfg.dataset.inputs)
         self.n_target = len(cfg.dataset.targets)
@@ -145,17 +155,6 @@ class ODEFuncMatrix(nn.Module):
             output_activation="none",  # We apply our own constraints
             residual=cfg.model.residual_connections,
         )
-
-    def set_forcing(self, t_points, forcing_profiles):
-        self.t_points = t_points
-        self.forcing_profiles = forcing_profiles  # (batch, steps, n_input)
-
-    def _interpolate_forcing(self, t):
-        """Piecewise-constant (zero-order hold) forcing interpolation."""
-        t_clamped = t.clamp(self.t_points[0], self.t_points[-1])
-        idx = torch.searchsorted(self.t_points, t_clamped.unsqueeze(0)).squeeze() - 1
-        idx = idx.clamp(0, len(self.t_points) - 2)
-        return self.forcing_profiles[:, idx, :]  # (batch, n_input)
 
     def _build_matrix(self, forcing, y):
         """Build the constrained depletion matrix from forcing and state inputs.

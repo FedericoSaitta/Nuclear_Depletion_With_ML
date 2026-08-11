@@ -1,7 +1,18 @@
-import openmc
-import openmc.deplete
+"""Smoke tests for the OpenMC install itself — no nuclear data required.
+
+Only collected in the simulation environment: `tests/conftest.py` ignores this
+file when `openmc` is not importable, and the `openmc` marker lets the ML
+environment select against it (`pytest -m "not openmc"`).
+"""
+
 import os
 import tempfile
+
+import openmc
+import openmc.deplete
+import pytest
+
+pytestmark = pytest.mark.openmc
 
 
 def test_openmc_import():

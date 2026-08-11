@@ -10,7 +10,8 @@ The training and testing of the model is controlled by a .yaml file which the us
 
 ### `dataset`
 - **`path_to_data`**: `string`
-  - Path to the directory containing CSV data files
+  - Path to the training HDF5 file. Relative values are resolved against the
+    **config file's own directory**, never the working directory.
   
 - **`fraction_of_data`**: `float` (0.0 to 1.0)
   - Fraction of the dataset to use for training/validation
@@ -116,18 +117,30 @@ The training and testing of the model is controlled by a .yaml file which the us
   - **Options**:
     - `"train"`: Train from scratch
     - `"train_from_ckp"`: Resume training from checkpoint
+    - `"inference"`: Load a checkpoint and test on `dataset.path_to_inference_data`
 
 - **`ckp_path`**: `string`
-  - Path to checkpoint file for resuming training
-  - Only used when `mode = "train_from_ckp"`
+  - Path to the checkpoint to load. Resolved against the config file's directory.
+  - Used by `mode = "train_from_ckp"` and `mode = "inference"`
+
+- **`output_dir`**: `string`
+  - Root for run outputs; each run writes to `<output_dir>/<model.name>/`.
+  - Resolved against the config file's directory, so the output location does not
+    depend on where the command was launched from.
+
+- **`model_database`**: `string`
+  - SQLite file the experiment logger appends a row to. Resolved like the paths above.
 
 - **`device`**: `string`
   - Computation device
   - **Options**: `"cuda"` (GPU), `"cpu"`
 
 - **`seed`**: `integer`
-  - Random seed for reproducibility
-  - Set to same value for deterministic splitting of the data, notably PyTorch weights are not seeded so slightly different results can occur
+  - **Currently read by no code.** Nothing calls `seed_everything`, `torch.manual_seed`
+    or `np.random.seed`, so the NODE's train/val/test split, the DNN's train shuffle and
+    the weight initialisation are all unseeded and differ from run to run.
+  - The key is kept so it can be wired up later; until then, do not rely on it for
+    reproducibility. See `AUDIT.md` §C1.
 
 - **`drop_last`**: `boolean`
   - **Options**:

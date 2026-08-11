@@ -1,5 +1,5 @@
-# One-time setup on the desktop. ML environment only — see OUTPUT.md §5.4 for
-# why OpenMC on Windows should go through WSL2.
+# One-time setup on the desktop. ML environment only — see the README section
+# "On a Windows laptop" for why OpenMC on Windows goes through WSL2.
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
 
@@ -18,4 +18,4 @@ print(f'cuda       {torch.cuda.is_available()}  {torch.cuda.get_device_name(0) i
 "@
 
 Write-Host ""
-Write-Host "Ready.  Train with:  uv run nucml --config ML/main_config.yaml"
+Write-Host "Ready.  Train with:  uv run nucml --config configs/main_config.yaml"

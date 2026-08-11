@@ -8,15 +8,12 @@ from pathlib import Path
 import torch
 from omegaconf import OmegaConf
 
-import ML.datamodule.dnn_datamodule as dnn_datamodule
-import ML.datamodule.neural_ode_datamodule as node_datamodule
-import ML.models.modes as modes
-from ML.models.dnn_model import DNN_Model
-from ML.models.neural_ode import NODE_Model
-
-# main_config.yaml sits next to this file, so it is found whether you run
-# `nucml`, `python -m ML.main`, or `python ML/main.py` — from any directory.
-DEFAULT_CONFIG = Path(__file__).with_name("main_config.yaml")
+import nuclear_surrogates.datamodule.dnn_datamodule as dnn_datamodule
+import nuclear_surrogates.datamodule.neural_ode_datamodule as node_datamodule
+import nuclear_surrogates.models.modes as modes
+from nuclear_surrogates.models.dnn_model import DNN_Model
+from nuclear_surrogates.models.neural_ode import NODE_Model
+from nuclear_surrogates.utils.paths import resolve_config_paths
 
 MODELS = {
     "DNN": (DNN_Model, dnn_datamodule.DNN_Datamodule),
@@ -28,17 +25,6 @@ MODES = {
     "inference": modes.inference,
 }
 
-# Dataset paths in the YAML are written relative to the config file, not to CWD.
-_PATH_KEYS = ("path_to_data", "path_to_inference_data")
-
-
-def _resolve_dataset_paths(cfg, config_path: Path) -> None:
-    """Rewrite dataset paths to absolute, anchored at the config's directory."""
-    for key in _PATH_KEYS:
-        value = cfg.dataset.get(key)
-        if value:
-            cfg.dataset[key] = str((config_path.parent / value).resolve())
-
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
@@ -47,8 +33,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--config",
         type=Path,
-        default=DEFAULT_CONFIG,
-        help=f"path to the run config (default: {DEFAULT_CONFIG})",
+        required=True,
+        help="path to the run config, e.g. configs/main_config.yaml",
     )
     parser.add_argument(
         "overrides",
@@ -61,7 +47,9 @@ def main(argv: list[str] | None = None) -> None:
         OmegaConf.load(args.config),
         OmegaConf.from_dotlist(args.overrides),
     )
-    _resolve_dataset_paths(cfg, args.config.resolve())
+    # Paths in the YAML are relative to the config file, so the run is
+    # independent of the directory it was launched from.
+    resolve_config_paths(cfg, args.config)
 
     torch.set_float32_matmul_precision("high")  # allow tensor cores
 

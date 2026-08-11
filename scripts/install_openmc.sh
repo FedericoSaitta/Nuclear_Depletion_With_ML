@@ -3,7 +3,7 @@
 # Build OpenMC's C++ core and install its Python API into the *simulation*
 # uv environment (.venv-sim).
 #
-# OpenMC is not on PyPI (OUTPUT.md §3.1), so it cannot live in uv.lock. It is
+# OpenMC is not on PyPI, so it cannot live in uv.lock. It is
 # treated as a system dependency, like CUDA: pinned by git tag here, installed
 # with --no-deps so that every one of its Python requirements still comes from
 # the locked `sim` extra.

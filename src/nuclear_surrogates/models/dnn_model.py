@@ -8,11 +8,12 @@ from loguru import logger
 import lightning as L
 from sklearn.metrics import r2_score, mean_absolute_error
 
-from ML.utils import plot
-from ML.utils import metrics
-import ML.datamodule.data_scalers as data_scaler
-from ML.models.model_architectures import Deep_Neural_Network
-from ML.models.model_helper import get_loss_fn
+from nuclear_surrogates.utils import plot
+from nuclear_surrogates.utils import metrics
+import nuclear_surrogates.datamodule.data_scalers as data_scaler
+from nuclear_surrogates.utils.paths import result_dir
+from nuclear_surrogates.models.model_architectures import Deep_Neural_Network
+from nuclear_surrogates.models.model_helper import get_loss_fn
 
 
 class DNN_Model(L.LightningModule):
@@ -46,7 +47,7 @@ class DNN_Model(L.LightningModule):
         self._init_tracking_variables()
 
         # Results
-        self.result_dir = "results/" + config_object.model.name + "/"
+        self.result_dir = result_dir(config_object)
 
         # Creating the model
         self.model = Deep_Neural_Network(
