@@ -7,22 +7,23 @@ CMakeFiles/
 cmake_install.cmake
 Makefile
 .vscode
-*.h5
 *.xml
 *.png
 *.out
 *.pyc
 *.log
 *.csv
-*.json
 *.db
 *.egg-info
 *.vs
 run_datagen.sh
 ML/submit_gpu_job.sh
-*.ckpt
 *.err 
 *.html
+
+# data and results
+*data/
+*results/
 
 # uv environments
 /.venv/
