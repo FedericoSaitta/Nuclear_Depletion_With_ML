@@ -10,220 +10,249 @@ from torch.utils.data import TensorDataset
 
 # ── I/O helpers ──────────────────────────────────────────────────────────────
 
+
 def _decode(value):
-  """Decode bytes to str, pass-through if already a string."""
-  return value.decode("utf-8") if isinstance(value, bytes) else str(value)
+    """Decode bytes to str, pass-through if already a string."""
+    return value.decode("utf-8") if isinstance(value, bytes) else str(value)
 
 
 def read_h5_file(file_path):
-  with h5py.File(file_path, "r") as f:
-    all_columns = [_decode(c) for c in f["all_columns"][:]]
-    data_dict = {}
+    with h5py.File(file_path, "r") as f:
+        all_columns = [_decode(c) for c in f["all_columns"][:]]
+        data_dict = {}
 
-    if "numeric_data" in f:
-      numeric_cols = [_decode(c) for c in f["numeric_columns"][:]]
-      numeric_data = f["numeric_data"][:]
-      for i, col in enumerate(numeric_cols):
-        data_dict[col] = numeric_data[:, i]
+        if "numeric_data" in f:
+            numeric_cols = [_decode(c) for c in f["numeric_columns"][:]]
+            numeric_data = f["numeric_data"][:]
+            for i, col in enumerate(numeric_cols):
+                data_dict[col] = numeric_data[:, i]
 
-    if "string_columns" in f:
-      for col in [_decode(c) for c in f["string_columns"][:]]:
-        raw = f[f"string_{col}"][:]
-        data_dict[col] = (
-          [_decode(s) for s in raw]
-          if raw.dtype.kind in ("S", "O")
-          else raw
-        )
+        if "string_columns" in f:
+            for col in [_decode(c) for c in f["string_columns"][:]]:
+                raw = f[f"string_{col}"][:]
+                data_dict[col] = (
+                    [_decode(s) for s in raw] if raw.dtype.kind in ("S", "O") else raw
+                )
 
-    return pl.DataFrame(data_dict).select(all_columns)
+        return pl.DataFrame(data_dict).select(all_columns)
 
 
 def read_data(file_path, fraction_of_data, drop_run_label=True):
-  logger.info(f"Reading data from: {file_path}")
+    logger.info(f"Reading data from: {file_path}")
 
-  if file_path.endswith(".csv"): df = pl.read_csv(file_path)
-  elif file_path.endswith(".h5"): df = read_h5_file(file_path)
-  else: raise ValueError(f"Unsupported file format: {file_path}")
+    if file_path.endswith(".csv"):
+        df = pl.read_csv(file_path)
+    elif file_path.endswith(".h5"):
+        df = read_h5_file(file_path)
+    else:
+        raise ValueError(f"Unsupported file format: {file_path}")
 
-  df = remove_empty_columns(df)
+    df = remove_empty_columns(df)
 
-  if drop_run_label and "run_label" in df.columns:
-    df = df.drop("run_label")
+    if drop_run_label and "run_label" in df.columns:
+        df = df.drop("run_label")
 
-  check_duplicates(df)
+    check_duplicates(df)
 
-  run_length = detect_run_length(df)
-  logger.info(f"Detected run length: {run_length}")
+    run_length = detect_run_length(df)
+    logger.info(f"Detected run length: {run_length}")
 
-  if fraction_of_data < 1.0:
-    total_runs = df.shape[0] // run_length
-    runs_kept = int(fraction_of_data * total_runs)
-    df = df.slice(0, runs_kept * run_length)
-    logger.info(f"Keeping {fraction_of_data * 100:.0f}% of data ({runs_kept} runs)")
+    if fraction_of_data < 1.0:
+        total_runs = df.shape[0] // run_length
+        runs_kept = int(fraction_of_data * total_runs)
+        df = df.slice(0, runs_kept * run_length)
+        logger.info(f"Keeping {fraction_of_data * 100:.0f}% of data ({runs_kept} runs)")
 
-  time_array = df["time_days"].to_numpy()
-  return df, run_length, time_array
+    time_array = df["time_days"].to_numpy()
+    return df, run_length, time_array
 
 
 # ── DataFrame inspection / cleaning ──────────────────────────────────────────
 
+
 def check_duplicates(df):
-  has_dupes = df.is_duplicated().any()
-  if has_dupes:
-    logger.warning("DataFrame contains duplicate rows.")
-  else:
-    logger.info("No duplicate rows found.")
-  return has_dupes
+    has_dupes = df.is_duplicated().any()
+    if has_dupes:
+        logger.warning("DataFrame contains duplicate rows.")
+    else:
+        logger.info("No duplicate rows found.")
+    return has_dupes
 
 
 def remove_empty_columns(df):
-  """Drop columns where every value is 0 or null."""
-  empty = [
-    col for col in df.columns
-    if ((df[col] == 0) | df[col].is_null()).all()
-  ]
-  if empty:
-    logger.warning(f"Removed empty columns: {empty}")
-    return df.drop(empty)
+    """Drop columns where every value is 0 or null."""
+    empty = [col for col in df.columns if ((df[col] == 0) | df[col].is_null()).all()]
+    if empty:
+        logger.warning(f"Removed empty columns: {empty}")
+        return df.drop(empty)
 
-  logger.info("No empty columns to remove.")
-  return df
+    logger.info("No empty columns to remove.")
+    return df
 
 
 def detect_run_length(df, time_col="time_days"):
-  """Return the number of timesteps in the first run (detected via time resets)."""
-  time = df[time_col].to_numpy()
-  resets = np.where(np.diff(time) <= 0)[0]
-  return int(resets[0] + 1) if len(resets) > 0 else len(df)
+    """Return the number of timesteps in the first run (detected via time resets)."""
+    time = df[time_col].to_numpy()
+    resets = np.where(np.diff(time) <= 0)[0]
+    return int(resets[0] + 1) if len(resets) > 0 else len(df)
 
 
 def print_dataset_stats(df):
-  logger.info("=== Dataset Statistics ===")
-  logger.info(f"Rows (timesteps): {df.shape[0]}  |  Columns: {df.shape[1]}")
+    logger.info("=== Dataset Statistics ===")
+    logger.info(f"Rows (timesteps): {df.shape[0]}  |  Columns: {df.shape[1]}")
 
-  numeric_dtypes = {pl.Float32, pl.Float64, pl.Int32, pl.Int64, pl.UInt32, pl.UInt64}
-  numeric_cols = [c for c in df.columns if df[c].dtype in numeric_dtypes]
-  isotope_re = re.compile(r"^[A-Za-z]+\d+(_.*)?$")
-  isotope_cols = [c for c in numeric_cols if isotope_re.match(c)]
+    numeric_dtypes = {pl.Float32, pl.Float64, pl.Int32, pl.Int64, pl.UInt32, pl.UInt64}
+    numeric_cols = [c for c in df.columns if df[c].dtype in numeric_dtypes]
+    isotope_re = re.compile(r"^[A-Za-z]+\d+(_.*)?$")
+    isotope_cols = [c for c in numeric_cols if isotope_re.match(c)]
 
-  first_row = df.row(0, named=True)
-  nonzero = [c for c in isotope_cols if first_row[c] != 0]
+    first_row = df.row(0, named=True)
+    nonzero = [c for c in isotope_cols if first_row[c] != 0]
 
-  logger.info(f"Element columns: {len(isotope_cols)}  |  State columns: {len(df.columns) - len(isotope_cols)}")
-  logger.info(f"Isotopes with non-zero concentration at t=0: {nonzero}")
+    logger.info(
+        f"Element columns: {len(isotope_cols)}  |  State columns: {len(df.columns) - len(isotope_cols)}"
+    )
+    logger.info(f"Isotopes with non-zero concentration at t=0: {nonzero}")
 
 
 # ── Column selection / splitting ─────────────────────────────────────────────
 
+
 def filter_columns(df, columns):
-  return df.select(columns)
+    return df.select(columns)
 
 
 def split_df(df, keys):
-  """Select *keys* that exist in *df*, return numpy array + column index map."""
-  cols = [c for c in df.columns if c in keys]
-  subset = df.select(cols)
-  col_map = {col: idx for idx, col in enumerate(subset.columns)}
-  return subset.to_numpy(), col_map
+    """Select *keys* that exist in *df*, return numpy array + column index map."""
+    cols = [c for c in df.columns if c in keys]
+    subset = df.select(cols)
+    col_map = {col: idx for idx, col in enumerate(subset.columns)}
+    return subset.to_numpy(), col_map
 
 
 # ── Time-series target creation ──────────────────────────────────────────────
 
+
 def _find_run_end_indices(time_values):
-  """Return indices of the last timestep in each run."""
-  resets = np.where(np.diff(time_values) <= 0)[0]
-  return np.append(resets, len(time_values) - 1)
+    """Return indices of the last timestep in each run."""
+    resets = np.where(np.diff(time_values) <= 0)[0]
+    return np.append(resets, len(time_values) - 1)
 
 
-def create_timeseries_targets(input_data, target_data, time_values, input_col_map, target_elements, delta_conc):
-  for el in target_elements:
-    if el not in input_col_map:
-      logger.warning(f"Target feature '{el}' not found in inputs")
+def create_timeseries_targets(
+    input_data, target_data, time_values, input_col_map, target_elements, delta_conc
+):
+    for el in target_elements:
+        if el not in input_col_map:
+            logger.warning(f"Target feature '{el}' not found in inputs")
 
-  logger.info(f"Input column map: {input_col_map}")
+    logger.info(f"Input column map: {input_col_map}")
 
-  run_ends = _find_run_end_indices(time_values)
+    run_ends = _find_run_end_indices(time_values)
 
-  # Every index except run-ending rows is valid (we need t+1 to exist within the same run)
-  valid = np.ones(len(input_data), dtype=bool)
-  valid[run_ends] = False
-  idx = np.where(valid)[0]
+    # Every index except run-ending rows is valid (we need t+1 to exist within the same run)
+    valid = np.ones(len(input_data), dtype=bool)
+    valid[run_ends] = False
+    idx = np.where(valid)[0]
 
-  X = input_data[idx]
-  y = (target_data[idx + 1] - target_data[idx]) if delta_conc else target_data[idx + 1]
+    X = input_data[idx]
+    y = (
+        (target_data[idx + 1] - target_data[idx])
+        if delta_conc
+        else target_data[idx + 1]
+    )
 
-  logger.info(f"Runs: {len(run_ends)}  |  Samples: {len(X)}")
-  logger.info(f"Input shape: {X.shape}  |  Target shape: {y.shape}")
-  return X, y
+    logger.info(f"Runs: {len(run_ends)}  |  Samples: {len(X)}")
+    logger.info(f"Input shape: {X.shape}  |  Target shape: {y.shape}")
+    return X, y
 
 
 # ── Train / val / test splitting ─────────────────────────────────────────────
 
+
 def timeseries_train_val_test_split(
-  X, Y, train_frac=0.8, val_frac=0.1, test_frac=0.1,
-  steps_per_run=100, shuffle_within_train=True,
+    X,
+    Y,
+    train_frac=0.8,
+    val_frac=0.1,
+    test_frac=0.1,
+    steps_per_run=100,
+    shuffle_within_train=True,
 ):
-  if not np.isclose(train_frac + val_frac + test_frac, 1.0):
-    raise ValueError(f"Fractions must sum to 1.0, got {train_frac + val_frac + test_frac}")
+    if not np.isclose(train_frac + val_frac + test_frac, 1.0):
+        raise ValueError(
+            f"Fractions must sum to 1.0, got {train_frac + val_frac + test_frac}"
+        )
 
-  total_runs = len(X) // steps_per_run
-  remainder = len(X) % steps_per_run
-  if remainder:
-    logger.warning(f"Discarding last {remainder} samples (not a full run)")
-    X, Y = X[: total_runs * steps_per_run], Y[: total_runs * steps_per_run]
+    total_runs = len(X) // steps_per_run
+    remainder = len(X) % steps_per_run
+    if remainder:
+        logger.warning(f"Discarding last {remainder} samples (not a full run)")
+        X, Y = X[: total_runs * steps_per_run], Y[: total_runs * steps_per_run]
 
-  n_train = int(total_runs * train_frac)
-  n_val = int(total_runs * val_frac)
-  n_test = total_runs - n_train - n_val
+    n_train = int(total_runs * train_frac)
+    n_val = int(total_runs * val_frac)
+    n_test = total_runs - n_train - n_val
 
-  logger.info(f"Runs — train: {n_train}, val: {n_val}, test: {n_test}  (steps/run: {steps_per_run})")
+    logger.info(
+        f"Runs — train: {n_train}, val: {n_val}, test: {n_test}  (steps/run: {steps_per_run})"
+    )
 
-  # Sequential split by run boundaries
-  t1 = n_train * steps_per_run
-  t2 = t1 + n_val * steps_per_run
+    # Sequential split by run boundaries
+    t1 = n_train * steps_per_run
+    t2 = t1 + n_val * steps_per_run
 
-  X_train, y_train = X[:t1], Y[:t1]
-  X_val, y_val = X[t1:t2], Y[t1:t2]
-  X_test, y_test = X[t2:], Y[t2:]
+    X_train, y_train = X[:t1], Y[:t1]
+    X_val, y_val = X[t1:t2], Y[t1:t2]
+    X_test, y_test = X[t2:], Y[t2:]
 
-  # Shuffle entire runs (not individual timesteps) within training set
-  if shuffle_within_train and n_train > 1:
-    order = np.random.permutation(n_train)
-    X_train = np.concatenate([X_train[i * steps_per_run : (i + 1) * steps_per_run] for i in order])
-    y_train = np.concatenate([y_train[i * steps_per_run : (i + 1) * steps_per_run] for i in order])
-    logger.info("Shuffled training runs (timestep order within runs preserved)")
+    # Shuffle entire runs (not individual timesteps) within training set
+    if shuffle_within_train and n_train > 1:
+        order = np.random.permutation(n_train)
+        X_train = np.concatenate(
+            [X_train[i * steps_per_run : (i + 1) * steps_per_run] for i in order]
+        )
+        y_train = np.concatenate(
+            [y_train[i * steps_per_run : (i + 1) * steps_per_run] for i in order]
+        )
+        logger.info("Shuffled training runs (timestep order within runs preserved)")
 
-  logger.info(f"Split sizes — train: {len(X_train)}, val: {len(X_val)}, test: {len(X_test)}")
-  return X_train, X_val, X_test, y_train, y_val, y_test
+    logger.info(
+        f"Split sizes — train: {len(X_train)}, val: {len(X_val)}, test: {len(X_test)}"
+    )
+    return X_train, X_val, X_test, y_train, y_val, y_test
 
 
 # ── Scaling & tensor conversion ──────────────────────────────────────────────
 
+
 def _ensure_2d(arr):
-  return arr.reshape(-1, 1) if arr.ndim == 1 else arr
+    return arr.reshape(-1, 1) if arr.ndim == 1 else arr
 
 
-def scale_datasets(X_train, X_val, X_test, y_train, y_val, y_test, input_scaler, target_scaler):
-  X_train = input_scaler.fit_transform(X_train)
-  X_val = input_scaler.transform(X_val)
-  X_test = input_scaler.transform(X_test)
+def scale_datasets(
+    X_train, X_val, X_test, y_train, y_val, y_test, input_scaler, target_scaler
+):
+    X_train = input_scaler.fit_transform(X_train)
+    X_val = input_scaler.transform(X_val)
+    X_test = input_scaler.transform(X_test)
 
-  y_train, y_val, y_test = _ensure_2d(y_train), _ensure_2d(y_val), _ensure_2d(y_test)
-  y_train = target_scaler.fit_transform(y_train)
-  y_val = target_scaler.transform(y_val)
-  y_test = target_scaler.transform(y_test)
+    y_train, y_val, y_test = _ensure_2d(y_train), _ensure_2d(y_val), _ensure_2d(y_test)
+    y_train = target_scaler.fit_transform(y_train)
+    y_val = target_scaler.transform(y_val)
+    y_test = target_scaler.transform(y_test)
 
-  return X_train, X_val, X_test, y_train, y_val, y_test
+    return X_train, X_val, X_test, y_train, y_val, y_test
 
 
 def _to_tensor(arr, replace_nan=None):
-  t = torch.tensor(arr, dtype=torch.float32)
-  return torch.nan_to_num(t, nan=replace_nan) if replace_nan is not None else t
+    t = torch.tensor(arr, dtype=torch.float32)
+    return torch.nan_to_num(t, nan=replace_nan) if replace_nan is not None else t
 
 
 def create_tensor_datasets(X_train, X_val, X_test, y_train, y_val, y_test):
-  return (
-    TensorDataset(_to_tensor(X_train, replace_nan=-1), _to_tensor(y_train)),
-    TensorDataset(_to_tensor(X_val, replace_nan=-1), _to_tensor(y_val)),
-    TensorDataset(_to_tensor(X_test, replace_nan=-1), _to_tensor(y_test)),
-  )
+    return (
+        TensorDataset(_to_tensor(X_train, replace_nan=-1), _to_tensor(y_train)),
+        TensorDataset(_to_tensor(X_val, replace_nan=-1), _to_tensor(y_val)),
+        TensorDataset(_to_tensor(X_test, replace_nan=-1), _to_tensor(y_test)),
+    )

@@ -1,4 +1,5 @@
 """Entry point: train / resume / evaluate the depletion surrogates."""
+
 from __future__ import annotations
 
 import argparse
@@ -43,10 +44,17 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description="Train/evaluate DNN and Neural-ODE depletion surrogates"
     )
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
-                        help=f"path to the run config (default: {DEFAULT_CONFIG})")
-    parser.add_argument("overrides", nargs="*",
-                        help="OmegaConf dotlist overrides, e.g. train.num_epochs=5")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG,
+        help=f"path to the run config (default: {DEFAULT_CONFIG})",
+    )
+    parser.add_argument(
+        "overrides",
+        nargs="*",
+        help="OmegaConf dotlist overrides, e.g. train.num_epochs=5",
+    )
     args = parser.parse_args(argv)
 
     cfg = OmegaConf.merge(
@@ -55,7 +63,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     _resolve_dataset_paths(cfg, args.config.resolve())
 
-    torch.set_float32_matmul_precision("high")   # allow tensor cores
+    torch.set_float32_matmul_precision("high")  # allow tensor cores
 
     model_cls, datamodule_cls = MODELS[cfg.runtime.model]
     MODES[cfg.runtime.mode](datamodule_cls(cfg), model_cls, cfg)

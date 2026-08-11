@@ -18,10 +18,11 @@ for nuc in chain.nuclides:
 
     # Iterate over decay modes
     for decay in nuc.decay_modes:
-
         decay_type, daughter, branching_ratio = decay
         print(f"  Decays to {daughter} via {decay_type}, BR={branching_ratio}")
 
     # Check fission yields
     if nuc.yield_data is not None:
-        print(f"  Fission yield data available for {len(nuc.yield_data)} reactions/energies")
+        print(
+            f"  Fission yield data available for {len(nuc.yield_data)} reactions/energies"
+        )

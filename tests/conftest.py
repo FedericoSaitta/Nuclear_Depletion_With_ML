@@ -3,14 +3,19 @@
 The repo has two environments (OUTPUT.md §4): .venv has no OpenMC by design.
 Collection must not fail there.
 """
+
 import importlib.util
 
 import pytest
 
 collect_ignore = []
 if importlib.util.find_spec("openmc") is None:
-    collect_ignore = ["test.py", "pinModel_Test.py",
-                      "pinModelDepletion_Test.py", "variableDepletion.py"]
+    collect_ignore = [
+        "test.py",
+        "pinModel_Test.py",
+        "pinModelDepletion_Test.py",
+        "variableDepletion.py",
+    ]
 
 
 def pytest_collection_modifyitems(config, items):
