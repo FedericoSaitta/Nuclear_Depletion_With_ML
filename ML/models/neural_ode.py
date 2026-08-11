@@ -270,14 +270,6 @@ class NODE_Model(L.LightningModule):
       all_inputs_scaled, all_trues_scaled, target_names, forcing_names
     )
 
-    # 4. Jacobian sensitivity analysis
-    forcing_names = [
-        key for key, _ in sorted(datamodule.col_index_map.items(), key=lambda x: x[1])
-    ]
-    self._compute_jacobian_analysis(
-        all_inputs_scaled, all_trues_scaled, target_names, forcing_names
-    )
-
     self._compute_stepwise_importance(
         all_inputs_scaled, all_trues_scaled, target_names, forcing_names
     )
