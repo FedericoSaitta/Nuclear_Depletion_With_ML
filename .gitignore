@@ -34,6 +34,10 @@ util/results/
 /data/
 /datasets/
 /results/
+# Model bundles are build output: `nucml-package` regenerates one from a
+# checkpoint + its config. Publish a specific bundle deliberately (Zenodo,
+# a release) rather than tracking the whole directory.
+/bundles/
 *.h5
 *.hdf5
 

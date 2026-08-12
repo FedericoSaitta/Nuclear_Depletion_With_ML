@@ -101,7 +101,14 @@ def calculate_feature_importance(
     n_repeats=10,
     metric={"name": "r2", "direction": "increasing"},
     output_idx=None,
+    seed=0,
 ):
+    """Permutation feature importance.
+
+    *seed* fixes the permutations so the importance figures are reproducible
+    across re-runs; previously they changed on every invocation.
+    """
+    rng = np.random.default_rng(seed)
     X_test, y_test = _collect_loader(test_loader)
 
     if output_idx is not None:
@@ -139,7 +146,7 @@ def calculate_feature_importance(
     for feat in range(n_features):
         for rep in range(n_repeats):
             X_perm = X_test.copy()
-            np.random.shuffle(X_perm[:, feat])
+            rng.shuffle(X_perm[:, feat])
 
             perm_preds = _predict_numpy(model, X_perm, device)
             if output_idx is not None:
@@ -166,6 +173,11 @@ def model_autoregress(
     target_col_indices,
     delta_conc,
 ):
+    # Work on a copy: the rollout feeds predictions back into the next
+    # timestep's inputs, and the caller reuses this same array afterwards for
+    # the comparison and error-growth figures (AUDIT Pass 2 §A8).
+    X_data = np.array(X_data, copy=True)
+
     total_samples = len(X_data)
     n_runs = total_samples // steps_per_run
 

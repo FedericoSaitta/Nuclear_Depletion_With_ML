@@ -6,6 +6,7 @@ import numpy as np
 # === External libraries ===
 from loguru import logger
 import lightning as L
+from omegaconf import OmegaConf
 from sklearn.metrics import r2_score, mean_absolute_error
 
 from nuclear_surrogates.utils import plot
@@ -20,6 +21,13 @@ class DNN_Model(L.LightningModule):
     def __init__(self, config_object):
         super().__init__()
         self.cfg = config_object
+
+        # Embed the config in the checkpoint, as NODE_Model already does, so a
+        # DNN .ckpt is self-describing instead of needing its original YAML
+        # (AUDIT.md §5.6 — the paper DNN's config was lost this way).
+        self.save_hyperparameters(
+            {"config": OmegaConf.to_container(config_object, resolve=True)}
+        )
 
         # Model architecture
         self.n_inputs = len(config_object.dataset.inputs)

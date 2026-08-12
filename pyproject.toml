@@ -73,10 +73,16 @@ dev = [
   "pytest>=8",
   "pytest-cov",
   "ruff==0.6.*",
+  # tests/test_configs.py parses the YAML directly rather than through
+  # OmegaConf, so the config checks do not depend on the loader under test.
+  "pyyaml>=6",
 ]
 
 [project.scripts]
 nucml = "nuclear_surrogates.main:main"
+# Backfills a bundle (weights + fitted scalers + provenance) for a checkpoint
+# that predates the bundle format.
+nucml-package = "nuclear_surrogates.packaging:main"
 
 # ---- packaging -----------------------------------------------------------
 # src layout: everything under src/ is library code and nothing else is, so
@@ -144,4 +150,9 @@ extend-exclude = ["notebooks"]   # learning-journey scripts, not library code
 testpaths = ["tests"]
 markers = [
   "openmc: requires the OpenMC install and nuclear data (skipped in the ML env)",
+  "golden: pins published numbers against committed fixtures",
+  # Pinned training numbers are only reproducible on a fixed runner image and
+  # library set, so CI runs them in their own Linux-only job.
+  "golden_train: pins a training loss trajectory; regenerate deliberately",
+  "slow: takes more than a few seconds",
 ]

@@ -11,6 +11,7 @@ from loguru import logger
 import lightning as L
 from torchdiffeq import odeint, odeint_adjoint
 
+from nuclear_surrogates import evaluation
 from nuclear_surrogates.utils import plot
 from nuclear_surrogates.utils import metrics
 from nuclear_surrogates.models.model_architectures import ODEFuncForced, ODEFuncMatrix
@@ -33,7 +34,6 @@ def _print_unicode_safe(line=""):
     except UnicodeEncodeError:
         encoding = sys.stdout.encoding or "ascii"
         print(line.encode(encoding, errors="replace").decode(encoding))
-
 
 
 class NODE_Model(L.LightningModule):
@@ -462,15 +462,13 @@ class NODE_Model(L.LightningModule):
         logger.info("MARE: Teacher-Forcing vs Autoregressive")
         logger.info(f"{'='*20}")
 
-        for idx, target_name in enumerate(target_names):
-            # Flatten across runs and timesteps
-            ar_gt = trues_unscaled[:, :, idx].flatten()
-            ar_pred = ar_preds_unscaled[:, :, idx].flatten()
-            tf_gt = trues_unscaled[:, :, idx].flatten()
-            tf_pred = tf_preds_unscaled[:, :, idx].flatten()
+        comparison = evaluation.mare_comparison(
+            trues_unscaled, ar_preds_unscaled, tf_preds_unscaled
+        )
 
-            mare_ar = metrics.mare(ar_gt, ar_pred)
-            mare_tf = metrics.mare(tf_gt, tf_pred)
+        for idx, target_name in enumerate(target_names):
+            mare_tf = comparison[idx]["mare_tf"]
+            mare_ar = comparison[idx]["mare_ar"]
 
             self.log(f"{target_name}/MARE_TeacherForcing", float(mare_tf))
             self.log(f"{target_name}/MARE_Autoregressive", float(mare_ar))
@@ -1095,75 +1093,39 @@ class NODE_Model(L.LightningModule):
         num_runs = trues_unscaled.shape[0]
         logger.info(f"Analyzing error growth across {num_runs} runs")
 
+        curves = evaluation.error_growth_curves(
+            trues_unscaled, ar_preds_unscaled, tf_preds_unscaled
+        )
+
         for idx, target_name in enumerate(target_names):
             logger.info(f"\nAnalyzing error growth for: {target_name}")
-
-            # Extract per-target data: (num_runs, steps)
-            gt = trues_unscaled[:, :, idx]
-            ar = ar_preds_unscaled[:, :, idx]
-            tf = tf_preds_unscaled[:, :, idx]
-
-            # MAE per run per timestep
-            tf_mae_errors = np.abs(tf - gt)  # (num_runs, steps)
-            ar_mae_errors = np.abs(ar - gt)
-
-            # MALE per run per timestep
-            epsilon = 1e-20
-            tf_male_errors = np.abs(
-                np.log10(np.abs(tf) + epsilon) - np.log10(np.abs(gt) + epsilon)
-            )
-            ar_male_errors = np.abs(
-                np.log10(np.abs(ar) + epsilon) - np.log10(np.abs(gt) + epsilon)
-            )
-
-            # Statistics across runs for each timestep
-            avg_tf_mae = np.mean(tf_mae_errors, axis=0)
-            avg_ar_mae = np.mean(ar_mae_errors, axis=0)
-            std_tf_mae = np.std(tf_mae_errors, axis=0)
-            std_ar_mae = np.std(ar_mae_errors, axis=0)
-
-            avg_tf_male = np.mean(tf_male_errors, axis=0)
-            avg_ar_male = np.mean(ar_male_errors, axis=0)
-            std_tf_male = np.std(tf_male_errors, axis=0)
-            std_ar_male = np.std(ar_male_errors, axis=0)
+            c = curves[idx]
 
             # Log final MALE values
-            self.log(f"{target_name}/Final MALE (AR)", float(avg_ar_male[-1]))
-            self.log(f"{target_name}/Final MALE (TF)", float(avg_tf_male[-1]))
+            self.log(f"{target_name}/Final MALE (AR)", float(c["avg_ar_male"][-1]))
+            self.log(f"{target_name}/Final MALE (TF)", float(c["avg_tf_male"][-1]))
 
             output_dir = os.path.join(self.result_dir, target_name)
 
-            # Plot MAE over time
-            plot.plot_error_growth_metric(
-                avg_tf_mae,
-                avg_ar_mae,
-                std_tf_mae,
-                std_ar_mae,
-                target_name,
-                output_dir,
-                num_runs,
-                metric_name="MAE",
-                ylabel="Mean Absolute Error",
-                skip_first_n=0,
-                tf_errors_all=tf_mae_errors,
-                ar_errors_all=ar_mae_errors,
-            )
-
-            # Plot MALE over time
-            plot.plot_error_growth_metric(
-                avg_tf_male,
-                avg_ar_male,
-                std_tf_male,
-                std_ar_male,
-                target_name,
-                output_dir,
-                num_runs,
-                metric_name="MALE",
-                ylabel="Mean Absolute Log Error",
-                skip_first_n=0,
-                tf_errors_all=tf_male_errors,
-                ar_errors_all=ar_male_errors,
-            )
+            for metric_name, ylabel in (
+                ("MAE", "Mean Absolute Error"),
+                ("MALE", "Mean Absolute Log Error"),
+            ):
+                key = metric_name.lower()
+                plot.plot_error_growth_metric(
+                    c[f"avg_tf_{key}"],
+                    c[f"avg_ar_{key}"],
+                    c[f"std_tf_{key}"],
+                    c[f"std_ar_{key}"],
+                    target_name,
+                    output_dir,
+                    num_runs,
+                    metric_name=metric_name,
+                    ylabel=ylabel,
+                    skip_first_n=0,
+                    tf_errors_all=c[f"tf_{key}_errors"],
+                    ar_errors_all=c[f"ar_{key}_errors"],
+                )
 
             logger.info(f"  ✓ Error growth plots saved to: {output_dir}")
 
@@ -1344,7 +1306,9 @@ class NODE_Model(L.LightningModule):
 
         # ── Markdown printout ────────────────────────────────────────────
         _print_unicode_safe("\n" + "=" * 70)
-        _print_unicode_safe("PER-STEP IMPORTANCE TABLES — paste everything between the markers")
+        _print_unicode_safe(
+            "PER-STEP IMPORTANCE TABLES — paste everything between the markers"
+        )
         _print_unicode_safe("=" * 70)
         _print_unicode_safe("<<<BEGIN_STEPWISE_IMPORTANCE_TABLES>>>")
         _print_unicode_safe(

@@ -1,7 +1,14 @@
 """Golden regression tests: refactors must not move published numbers.
 
-Skips cleanly when the fixtures or the full training dataset are absent, so CI
-stays green on machines without them.
+These run anywhere, including CI. They need only the committed fixtures — the
+frozen checkpoint, the 10-run mini dataset, and the fitted scalers distilled out
+of the training file by `make_golden.py`. Nothing here opens the 542 MB training
+dataset; that dependency is what used to make this whole module skip.
+
+Tolerances (rationale in AUDIT.md §D): CPU float32 dopri5 trajectories get
+atol=1e-6/rtol=1e-5 — enough headroom to survive operation reordering from a
+refactor, tight enough to catch a real change. Scalar metrics get rtol=1e-4.
+Loosen these only deliberately, never to make a red test green.
 """
 
 import json
@@ -9,55 +16,20 @@ import os
 
 import numpy as np
 import pytest
-import torch
 
-REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-FIX = os.path.join(REPO, "tests", "fixtures")
-CONFIG = os.path.join(REPO, "configs", "main_config.yaml")
-CKPT = os.path.join(FIX, "best-matrix_ode_7x7_breeding_chain-epoch=2367.ckpt")
+from golden_setup import FIX, build_inference_cfg, fixtures_present, matrix_probes
+from golden_setup import run_inference as _run_inference
 
-need = [
-    "mini_casl_10runs.h5",
-    "golden_node_preds.npy",
-    "golden_node_trues.npy",
-    "golden_node_metrics.json",
-    "golden_matrix_A.npy",
-    "best-matrix_ode_7x7_breeding_chain-epoch=2367.ckpt",
+pytestmark = [
+    pytest.mark.golden,
+    pytest.mark.skipif(not fixtures_present(), reason="golden fixtures are missing"),
 ]
-# The datamodule fits its scalers on the full training file before it ever looks
-# at the inference file, so the goldens are only reproducible where that file is.
-TRAIN_H5 = os.path.join(REPO, "datasets", "casl_3305_runs_inter.h5")
-pytestmark = pytest.mark.skipif(
-    not (
-        all(os.path.exists(os.path.join(FIX, f)) for f in need)
-        and os.path.exists(TRAIN_H5)
-    ),
-    reason="golden fixtures or the full training dataset are not present",
-)
 
 
 @pytest.fixture(scope="module")
-def node_setup():
-    import lightning as L
-    from omegaconf import OmegaConf
-
-    import nuclear_surrogates.datamodule.neural_ode_datamodule as node_dm
-    from nuclear_surrogates.models.modes import load_checkpoint_into_model
-    from nuclear_surrogates.models.neural_ode import NODE_Model
-    from nuclear_surrogates.utils.paths import resolve_config_paths
-
-    cfg = OmegaConf.load(CONFIG)
-    resolve_config_paths(cfg, CONFIG)
-    cfg.runtime.update(mode="inference", device="cpu", num_workers=0)
-    cfg.dataset.path_to_data = TRAIN_H5
-    cfg.dataset.path_to_inference_data = os.path.join(FIX, "mini_casl_10runs.h5")
-
-    dm = node_dm.NODE_Datamodule(cfg)
-    dm.inference_mode = True
-    model = load_checkpoint_into_model(NODE_Model(cfg), CKPT)
-    trainer = L.Trainer(accelerator="cpu", logger=False, enable_checkpointing=False)
-    preds = trainer.predict(model, datamodule=dm)
-    return model, torch.cat([p["pred"] for p in preds]).numpy()
+def node_setup(frozen_node_run):
+    model, _, preds, _ = frozen_node_run
+    return model, preds
 
 
 def test_node_trajectories_unchanged(node_setup):
@@ -87,10 +59,34 @@ def test_node_metrics_unchanged(node_setup):
 
 def test_depletion_matrix_unchanged(node_setup):
     model, _ = node_setup
-    torch.manual_seed(0)
-    y_probe = torch.rand(3, 7)
-    f_probe = torch.rand(3, 1)
-    A = model.func._build_matrix(f_probe, y_probe).detach().numpy()
     np.testing.assert_allclose(
-        A, np.load(os.path.join(FIX, "golden_matrix_A.npy")), rtol=1e-5, atol=1e-7
+        matrix_probes(model),
+        np.load(os.path.join(FIX, "golden_matrix_A.npy")),
+        rtol=1e-5,
+        atol=1e-7,
     )
+
+
+def test_inference_does_not_read_the_training_dataset(monkeypatch, tmp_path):
+    """The bundle decoupling, asserted rather than assumed.
+
+    This is the property that keeps the suite alive in CI: if someone
+    reintroduces a read of `path_to_data` in inference mode, every other test
+    here would still pass on a developer machine and silently start skipping
+    everywhere else. So fail loudly instead.
+    """
+    import nuclear_surrogates.datamodule.dataset_helper as data_help
+
+    cfg = build_inference_cfg(output_dir=tmp_path)
+    opened = []
+    real_read_data = data_help.read_data
+
+    def spy(file_path, *args, **kwargs):
+        opened.append(file_path)
+        return real_read_data(file_path, *args, **kwargs)
+
+    monkeypatch.setattr(data_help, "read_data", spy)
+    _run_inference(cfg)
+
+    assert len(opened) == 1, f"expected only the inference file, opened {opened}"
+    assert os.path.basename(opened[0]) == "mini_casl_10runs.h5"

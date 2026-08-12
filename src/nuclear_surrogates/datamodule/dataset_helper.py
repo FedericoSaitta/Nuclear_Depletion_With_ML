@@ -1,5 +1,8 @@
 # Reshape and mold the csv/h5 dataset to be more approachable for ML
+import json
+import os
 import re
+
 import h5py
 import numpy as np
 import polars as pl
@@ -178,7 +181,20 @@ def timeseries_train_val_test_split(
     test_frac=0.1,
     steps_per_run=100,
     shuffle_within_train=True,
+    rng=None,
 ):
+    """Split by whole runs, sequentially in time, and shuffle the training runs.
+
+    *rng* is a ``numpy.random.Generator`` controlling the training-run shuffle.
+    Pass a seeded one for a reproducible run order; ``None`` draws from OS
+    entropy, which is what this function did before the seed was wired up.
+
+    Returns the six arrays plus a ``split_info`` dict recording which run
+    indices landed in which split, so a run's partition can be audited later.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
     if not np.isclose(train_frac + val_frac + test_frac, 1.0):
         raise ValueError(
             f"Fractions must sum to 1.0, got {train_frac + val_frac + test_frac}"
@@ -207,8 +223,9 @@ def timeseries_train_val_test_split(
     X_test, y_test = X[t2:], Y[t2:]
 
     # Shuffle entire runs (not individual timesteps) within training set
+    order = None
     if shuffle_within_train and n_train > 1:
-        order = np.random.permutation(n_train)
+        order = rng.permutation(n_train)
         X_train = np.concatenate(
             [X_train[i * steps_per_run : (i + 1) * steps_per_run] for i in order]
         )
@@ -220,7 +237,33 @@ def timeseries_train_val_test_split(
     logger.info(
         f"Split sizes — train: {len(X_train)}, val: {len(X_val)}, test: {len(X_test)}"
     )
-    return X_train, X_val, X_test, y_train, y_val, y_test
+
+    split_info = {
+        "strategy": "sequential_by_run",
+        "n_runs": total_runs,
+        "steps_per_run": steps_per_run,
+        "train": list(range(n_train)),
+        "val": list(range(n_train, n_train + n_val)),
+        "test": list(range(n_train + n_val, total_runs)),
+        "train_shuffle_order": None if order is None else order.tolist(),
+    }
+    return X_train, X_val, X_test, y_train, y_val, y_test, split_info
+
+
+# ── Split provenance ─────────────────────────────────────────────────────────
+
+
+def write_split_indices(result_dir_path, split_info, seed):
+    """Record which runs went to train/val/test, next to the run's outputs.
+
+    Without this the partition of a finished run is unrecoverable, which is what
+    made the published NODE test metrics unverifiable (AUDIT Pass 2 §A1).
+    """
+    path = os.path.join(result_dir_path, "split_indices.json")
+    with open(path, "w") as f:
+        json.dump({"seed": seed, **split_info}, f, indent=2)
+    logger.info(f"Wrote split indices to {path}")
+    return path
 
 
 # ── Scaling & tensor conversion ──────────────────────────────────────────────
@@ -229,21 +272,6 @@ def timeseries_train_val_test_split(
 def ensure_2d(arr):
     """Reshape to (n, 1) if 1-D, otherwise pass through."""
     return arr.reshape(-1, 1) if arr.ndim == 1 else arr
-
-
-def scale_datasets(
-    X_train, X_val, X_test, y_train, y_val, y_test, input_scaler, target_scaler
-):
-    X_train = input_scaler.fit_transform(X_train)
-    X_val = input_scaler.transform(X_val)
-    X_test = input_scaler.transform(X_test)
-
-    y_train, y_val, y_test = ensure_2d(y_train), ensure_2d(y_val), ensure_2d(y_test)
-    y_train = target_scaler.fit_transform(y_train)
-    y_val = target_scaler.transform(y_val)
-    y_test = target_scaler.transform(y_test)
-
-    return X_train, X_val, X_test, y_train, y_val, y_test
 
 
 def _to_tensor(arr, replace_nan=None):

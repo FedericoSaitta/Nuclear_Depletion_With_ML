@@ -136,11 +136,23 @@ The training and testing of the model is controlled by a .yaml file which the us
   - **Options**: `"cuda"` (GPU), `"cpu"`
 
 - **`seed`**: `integer`
-  - **Currently read by no code.** Nothing calls `seed_everything`, `torch.manual_seed`
-    or `np.random.seed`, so the NODE's train/val/test split, the DNN's train shuffle and
-    the weight initialisation are all unseeded and differ from run to run.
-  - The key is kept so it can be wired up later; until then, do not rely on it for
-    reproducibility. See `AUDIT.md` §C1.
+  - Seeds the whole run. `main.py` calls `L.seed_everything(seed, workers=True)` before
+    anything is constructed, which covers weight initialisation and the DataLoader
+    shuffle order.
+  - The two run-splitting permutations take an explicit
+    `np.random.default_rng(seed)` rather than the global RNG
+    (`neural_ode_datamodule.py`, `dataset_helper.timeseries_train_val_test_split`), so a
+    datamodule built outside `main()` — as the tests and `nucml-package` do — splits
+    identically.
+  - Every run writes its partition to
+    `<output_dir>/<model.name>/split_indices.json`, so which runs were held out is
+    recoverable after the fact.
+  - Permutation feature importance (`metrics.calculate_feature_importance`) takes a
+    `seed` argument, default `0`.
+  - **Caveat:** this gives run-to-run reproducibility on a fixed machine and library
+    set. Bitwise equality across GPUs additionally needs
+    `torch.use_deterministic_algorithms(True)` and TF32 disabled — `main.py` sets
+    `torch.set_float32_matmul_precision("high")`, which permits TF32 matmuls.
 
 - **`drop_last`**: `boolean`
   - **Options**:

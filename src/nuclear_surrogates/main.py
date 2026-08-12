@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import lightning as L
 import torch
+from loguru import logger
 from omegaconf import OmegaConf
 
 import nuclear_surrogates.datamodule.dnn_datamodule as dnn_datamodule
@@ -50,6 +52,16 @@ def main(argv: list[str] | None = None) -> None:
     # Paths in the YAML are relative to the config file, so the run is
     # independent of the directory it was launched from.
     resolve_config_paths(cfg, args.config)
+
+    # Seed before anything constructs a model or a datamodule: this covers torch
+    # weight init and the DataLoader shuffle. The two run-splitting permutations
+    # take an explicit generator instead (see the datamodules), so that a
+    # datamodule built outside this entry point is deterministic too.
+    seed = cfg.runtime.get("seed")
+    if seed is None:
+        seed = 42
+        logger.warning("runtime.seed is absent from the config — defaulting to 42")
+    L.seed_everything(seed, workers=True)
 
     torch.set_float32_matmul_precision("high")  # allow tensor cores
 

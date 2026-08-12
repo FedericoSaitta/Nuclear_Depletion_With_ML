@@ -22,7 +22,7 @@ dataset:
     batch_size: 128
 
 model:
-  name: NODE_FIXED_IMPORTANCE
+  name: BEST_7x7_MATRIX_NODE
   matrix_ode: true
   layers: [128, 128]
   dropout_probability: 0.0
@@ -66,9 +66,7 @@ runtime:
   # dataset paths above, so a relative value is taken from this file's directory.
   ckp_path: ""
   device: cuda
-  # Seeds weight init, the DataLoader shuffle and the train/val/test split.
-  # The chosen split is written to <output_dir>/<model.name>/split_indices.json.
-  seed: 42
+  seed: 42          # NOT read by any code — see docs/config_reference.md
   num_workers: 12
 
   # Both resolved relative to this file, so output lands in the same place no

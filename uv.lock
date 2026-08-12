@@ -547,6 +547,7 @@ sim = [
 dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
+    { name = "pyyaml" },
     { name = "ruff" },
 ]
 
@@ -579,6 +580,7 @@ provides-extras = ["ml", "sim"]
 dev = [
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-cov" },
+    { name = "pyyaml", specifier = ">=6" },
     { name = "ruff", specifier = "==0.6.*" },
 ]
 

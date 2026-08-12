@@ -1,9 +1,12 @@
+import os
+
 import lightning as L
 import torch
 import torch.multiprocessing as mp
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from loguru import logger
 
+from nuclear_surrogates.bundle import write_bundle
 from nuclear_surrogates.utils.paths import result_dir
 from nuclear_surrogates.utils.sql_lite_logger import SQLiteLogger
 
@@ -123,8 +126,33 @@ def train_and_test(datamodule, model_class, cfg):
     best_path = checkpoint_cb.best_model_path
     logger.info(f"Best model saved at: {best_path}")
 
+    _write_run_bundle(datamodule, cfg, result_dir_path, best_path, val_metrics)
+
     trainer.test(model=model, datamodule=datamodule, ckpt_path=best_path)
     return val_metrics
+
+
+def _write_run_bundle(datamodule, cfg, result_dir_path, ckpt_path, metrics=None):
+    """Package weights + fitted scalers + provenance beside the run's outputs.
+
+    Best-effort: a bundle failure must not throw away a finished training run.
+    """
+    preprocessor = getattr(datamodule, "preprocessor", None)
+    if preprocessor is None:
+        logger.warning("Datamodule exposes no preprocessor — skipping bundle")
+        return None
+    try:
+        return write_bundle(
+            out_dir=os.path.join(result_dir_path, "bundle"),
+            cfg=cfg,
+            preprocessor=preprocessor,
+            ckpt_path=ckpt_path,
+            split_info=getattr(datamodule, "split_info", None),
+            metrics=metrics,
+        )
+    except Exception as exc:  # noqa: BLE001 - never lose a trained model to this
+        logger.error(f"Failed to write model bundle: {exc}")
+        return None
 
 
 def train_from_checkpoint_and_test(datamodule, model_class, cfg):
@@ -151,6 +179,8 @@ def train_from_checkpoint_and_test(datamodule, model_class, cfg):
 
     best_path = checkpoint_cb.best_model_path
     logger.info(f"Best model saved at: {best_path}")
+
+    _write_run_bundle(datamodule, cfg, result_dir_path, best_path)
 
     trainer.test(model=model, datamodule=datamodule, ckpt_path=best_path)
 
