@@ -54,9 +54,9 @@ def main(argv: list[str] | None = None) -> None:
     resolve_config_paths(cfg, args.config)
 
     # Seed before anything constructs a model or a datamodule: this covers torch
-    # weight init and the DataLoader shuffle. The two run-splitting permutations
-    # take an explicit generator instead (see the datamodules), so that a
-    # datamodule built outside this entry point is deterministic too.
+    # weight init and the DataLoader shuffle. The run-splitting permutations take
+    # an explicit generator instead, so a datamodule built outside this entry
+    # point is deterministic too.
     seed = cfg.runtime.get("seed")
     if seed is None:
         seed = 42

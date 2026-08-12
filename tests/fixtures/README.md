@@ -37,13 +37,13 @@ fit on `path_to_data` under the config's `fraction_of_data`, which is what
 inference mode did before bundles existed. That keeps the golden values
 byte-identical across the change. It is *not* the "correct" train-split
 preprocessor — the epoch-2367 model's original split was an unseeded permutation
-and is unrecoverable (`AUDIT.md` §A1). These fixtures are regression anchors,
+and is unrecoverable. These fixtures are regression anchors,
 not a reproduction of the original training run.
 
 Note `preprocessor.json` records `t_days: 1000.0` alongside
 `t_days_data_span: 990.0`. The data really spans 990 days; 1000 is the constant
 the published runs used. Both travel so the discrepancy is visible — correcting
-what consumes it is `AUDIT.md` §B1 and has not been done.
+what consumes it is `AUDIT.md` P1 and has not been done.
 
 ## Regenerating
 
@@ -79,5 +79,5 @@ consciously and record it. Never loosen one silently to clear a red build.
 - The scaled→physical depletion-matrix conversion (`_get_unscaling_matrix`).
   `golden_matrix_A.npy` pins the matrix the network builds, not the unit
   conversion applied before it is plotted — and that conversion has known issues
-  (`AUDIT.md` §B1–B2).
+  (`AUDIT.md` P1-P2).
 - Jacobian sensitivity and stepwise importance.

@@ -1,32 +1,32 @@
-# ML/models/node_model.py
+import csv
 import os
 import sys
-from omegaconf import OmegaConf
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
 
-from loguru import logger
 import lightning as L
+import numpy as np
+import torch
+from loguru import logger
+from omegaconf import OmegaConf
 from torchdiffeq import odeint, odeint_adjoint
 
 from nuclear_surrogates import evaluation
-from nuclear_surrogates.utils import plot
-from nuclear_surrogates.utils import metrics
 from nuclear_surrogates.models.model_architectures import ODEFuncForced, ODEFuncMatrix
 from nuclear_surrogates.models.model_helper import get_loss_fn
-import nuclear_surrogates.datamodule.data_scalers as data_scaler
+from nuclear_surrogates.utils import metrics, plot
 from nuclear_surrogates.utils.paths import result_dir
 
-# ─── Lightning Module ────────────────────────────────────────────────────────
+# Batch sizes for the analysis passes. The single-step ones can be larger
+# because they integrate one interval rather than a whole trajectory.
+TRAJECTORY_BATCH = 64
+JACOBIAN_BATCH = 32
+SINGLE_STEP_BATCH = 128
 
 
 def _print_unicode_safe(line=""):
     """print() that degrades instead of crashing on a non-UTF-8 stdout.
 
-    The markdown dump below contains Δ and ±. A Windows console/pipe running
-    cp1252 can encode ± but not Δ, so a plain print() raises UnicodeEncodeError
+    The markdown dump below contains Δ and ±. A Windows console running cp1252
+    can encode ± but not Δ, so a plain print() raises UnicodeEncodeError
     part-way through the table and aborts the whole test epoch.
     """
     try:
@@ -37,27 +37,25 @@ def _print_unicode_safe(line=""):
 
 
 class NODE_Model(L.LightningModule):
+    """Trajectory surrogate: integrate dy/dt = f(forcing(t), y) over a whole run."""
+
     def __init__(self, config_object):
         super().__init__()
         self.save_hyperparameters(OmegaConf.to_container(config_object, resolve=True))
         self.cfg = config_object
 
-        # Model — choose between standard ODE and matrix-based ODE
         self.matrix_ode = getattr(config_object.model, "matrix_ode", False)
         if self.matrix_ode:
             self.func = ODEFuncMatrix(config_object)
             logger.info("Using matrix-based NODE: dy/dt = A(forcing, y) @ y")
         else:
-            logger.info("Using standard NODE: dy/dt = y")
             self.func = ODEFuncForced(config_object)
+            logger.info("Using standard NODE: dy/dt = net(forcing, y)")
 
-        # Training Config
         self.loss_fn = get_loss_fn(config_object.train.loss)
 
-        # Optimizer Config
         self.rtol = getattr(config_object.train, "rtol", 1e-5)
         self.atol = getattr(config_object.train, "atol", 1e-7)
-        # Adjoint config
         self.use_adjoint = getattr(config_object.train, "use_adjoint", False)
         self.adjoint_rtol = getattr(config_object.train, "adjoint_rtol", None)
         self.adjoint_atol = getattr(config_object.train, "adjoint_atol", None)
@@ -71,15 +69,12 @@ class NODE_Model(L.LightningModule):
         else:
             logger.info("Using direct backprop through odeint")
 
-        # Results directory
         self.result_dir = result_dir(config_object)
 
-        # Collect losses for plotting
         self._train_losses = []
         self._val_losses = []
         self._train_nfes = []
 
-        # Collect data for test-level metrics
         self._test_preds = []
         self._test_trues = []
         self._test_input_trajs = []
@@ -90,20 +85,22 @@ class NODE_Model(L.LightningModule):
         self.n_input_features = dm.n_input_features
         self.n_target_features = dm.n_target_features
 
+    # ── Forward ──────────────────────────────────────────────────────────────
+
     def _odeint(self, y0, t_span):
-        """Central odeint call — solver and backward method configured from yaml."""
+        """Central odeint call — solver and backward method come from the yaml."""
         options = {}
         if self.cfg.train.solver == "rk4":
             step_size = getattr(self.cfg.train, "step_size", None)
             if step_size:
                 options["step_size"] = step_size
 
-        common_kwargs = dict(
-            method=self.cfg.train.solver,
-            rtol=self.rtol,
-            atol=self.atol,
-            options=options if options else None,
-        )
+        common_kwargs = {
+            "method": self.cfg.train.solver,
+            "rtol": self.rtol,
+            "atol": self.atol,
+            "options": options or None,
+        }
 
         if self.use_adjoint:
             return odeint_adjoint(
@@ -118,55 +115,41 @@ class NODE_Model(L.LightningModule):
         return odeint(self.func, y0, t_span, **common_kwargs)
 
     def _forward_batch(self, batch):
-        """
-        Shared forward pass for train/val/test.
+        """Integrate a batch of trajectories from their t=0 state.
 
-        Trajectory layout: [forcing_features..., target_features...]
-        batch[0] is (batch_size, steps, n_input_features + n_target_features)
+        Trajectories are laid out as [forcing features..., target features...],
+        so `batch[0]` is (batch, steps, n_input + n_target). The integrator feeds
+        the full state vector back into the network at every solver step, which
+        is what couples all isotopes to each other.
 
-        The ODE integrator feeds the FULL state vector y (all isotopes) back
-        into the network at every solver step. This means all isotopes
-        inform all future predictions — the coupling is automatic.
-
-        Returns: target_pred (batch_size, steps, n_target), target_true (batch_size, steps, n_target)
+        Returns (target_pred, target_true), both (batch, steps, n_target).
         """
         trajectories = batch[0]
-
         n_in = self.n_input_features
 
         forcing_profiles = trajectories[:, :, :n_in]
         target_true = trajectories[:, :, n_in:]
-        y0 = target_true[:, 0, :]  # All isotope concentrations at t=0
+        y0 = target_true[:, 0, :]
 
         t_span = self.t_span.to(trajectories.device)
         self.func.set_forcing(t_span, forcing_profiles)
 
-        # odeint integrates the full state vector [isotope_1, isotope_2, ...]
-        # so at each internal solver step, the network receives ALL current
-        # isotope predictions to compute ALL derivatives.
-        target_pred = self._odeint(y0, t_span)
-        target_pred = target_pred.permute(1, 0, 2)
-
+        target_pred = self._odeint(y0, t_span).permute(1, 0, 2)
         return target_pred, target_true
 
-    # ─── Unscaling helpers ─────────────────────────────────────────────
-
     def _unscale_targets(self, scaled_2d):
-        """Unscale target values. Input shape: (N, n_target)."""
-        target_scaler = self.trainer.datamodule.target_scaler
-        return data_scaler.inverse_transformer(target_scaler, scaled_2d)
+        """(N, n_target) model units -> atom/b-cm."""
+        return self.trainer.datamodule.target_scaler.inverse_transform(scaled_2d)
 
     def _unscale_inputs(self, scaled_2d):
-        """Unscale input values. Input shape: (N, n_input)."""
-        input_scaler = self.trainer.datamodule.input_scaler
-        return data_scaler.inverse_transformer(input_scaler, scaled_2d)
+        """(N, n_input) model units -> physical units."""
+        return self.trainer.datamodule.input_scaler.inverse_transform(scaled_2d)
 
-    # ── Training ─────────────────────────────────────────────────────────
+    # ── Training ─────────────────────────────────────────────────────────────
 
     def training_step(self, batch, batch_idx):
         self.func.nfe = 0
         target_pred, target_true = self._forward_batch(batch)
-
         loss = self.loss_fn(target_pred, target_true)
 
         self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
@@ -174,14 +157,11 @@ class NODE_Model(L.LightningModule):
         return loss
 
     def on_train_epoch_end(self):
-        epoch_loss = self.trainer.callback_metrics["train_loss"].item()
-        self._train_losses.append(epoch_loss)
-
-        epoch_nfe = self.trainer.callback_metrics["nfe"].item()
-        self._train_nfes.append(epoch_nfe)
-
-        lr = self.optimizers().param_groups[0]["lr"]
-        self.log("lr", lr, on_epoch=True, prog_bar=True)
+        self._train_losses.append(self.trainer.callback_metrics["train_loss"].item())
+        self._train_nfes.append(self.trainer.callback_metrics["nfe"].item())
+        self.log(
+            "lr", self.optimizers().param_groups[0]["lr"], on_epoch=True, prog_bar=True
+        )
 
     def on_train_end(self):
         plot.plot_losses(
@@ -189,7 +169,7 @@ class NODE_Model(L.LightningModule):
         )
         logger.info("Training complete.")
 
-    # ── Validation ───────────────────────────────────────────────────────
+    # ── Validation ───────────────────────────────────────────────────────────
 
     def validation_step(self, batch, batch_idx):
         target_pred, target_true = self._forward_batch(batch)
@@ -198,73 +178,115 @@ class NODE_Model(L.LightningModule):
         return loss
 
     def on_validation_epoch_end(self):
-        epoch_loss = self.trainer.callback_metrics["val_loss"].item()
-        self._val_losses.append(epoch_loss)
+        self._val_losses.append(self.trainer.callback_metrics["val_loss"].item())
 
-    # ── Test ─────────────────────────────────────────────────────────────
+    # ── Test ─────────────────────────────────────────────────────────────────
 
     def test_step(self, batch, batch_idx):
         target_pred, target_true = self._forward_batch(batch)
-        trajectories = batch[0]
-        n_in = self.n_input_features
-
         loss = self.loss_fn(target_pred, target_true)
         self.log("test_loss", loss, on_step=False, on_epoch=True)
 
         self._test_preds.append(target_pred.cpu().numpy())
         self._test_trues.append(target_true.cpu().numpy())
-        self._test_input_trajs.append(trajectories[:, :, :n_in].cpu().numpy())
-
+        self._test_input_trajs.append(
+            batch[0][:, :, : self.n_input_features].cpu().numpy()
+        )
         return loss
 
     def on_test_epoch_end(self):
         datamodule = self.trainer.datamodule
 
-        all_preds_scaled = np.concatenate(
-            self._test_preds, axis=0
-        )  # (num_runs, steps, n_target)
-        all_trues_scaled = np.concatenate(
-            self._test_trues, axis=0
-        )  # (num_runs, steps, n_target)
-        all_inputs_scaled = np.concatenate(
-            self._test_input_trajs, axis=0
-        )  # (num_runs, steps, n_input)
+        # All three are (num_runs, steps, features), still in model units.
+        all_preds_scaled = np.concatenate(self._test_preds, axis=0)
+        all_trues_scaled = np.concatenate(self._test_trues, axis=0)
+        all_inputs_scaled = np.concatenate(self._test_input_trajs, axis=0)
 
         num_runs, steps, n_target = all_preds_scaled.shape
         n_input = all_inputs_scaled.shape[2]
 
-        # ── Unscale using separate scalers ──
-        ar_preds_unscaled = self._unscale_targets(
-            all_preds_scaled.reshape(-1, n_target)
-        ).reshape(num_runs, steps, n_target)
-        trues_unscaled = self._unscale_targets(
-            all_trues_scaled.reshape(-1, n_target)
-        ).reshape(num_runs, steps, n_target)
-        inputs_unscaled = self._unscale_inputs(
-            all_inputs_scaled.reshape(-1, n_input)
-        ).reshape(num_runs, steps, n_input)
+        def unscale(array, unscaler, n_features):
+            return unscaler(array.reshape(-1, n_features)).reshape(
+                num_runs, steps, n_features
+            )
 
-        # ── Teacher-forced predictions (single-step NODE) ──
+        ar_preds_unscaled = unscale(all_preds_scaled, self._unscale_targets, n_target)
+        trues_unscaled = unscale(all_trues_scaled, self._unscale_targets, n_target)
+        inputs_unscaled = unscale(all_inputs_scaled, self._unscale_inputs, n_input)
+
         logger.info("Computing teacher-forced (single-step) predictions...")
-        tf_preds_scaled = self._teacher_forced_predictions(
-            all_inputs_scaled, all_trues_scaled
+        tf_preds_unscaled = unscale(
+            self._teacher_forced_predictions(all_inputs_scaled, all_trues_scaled),
+            self._unscale_targets,
+            n_target,
         )
-        tf_preds_unscaled = self._unscale_targets(
-            tf_preds_scaled.reshape(-1, n_target)
-        ).reshape(num_runs, steps, n_target)
 
         target_names = list(datamodule.target.keys())
+        forcing_names = [
+            key
+            for key, _ in sorted(datamodule.col_index_map.items(), key=lambda x: x[1])
+        ]
         logger.info(
             f"Test set: {num_runs} trajectories, {steps} steps, {n_target} targets"
         )
 
-        # 1. Overall metrics + per-target plots
-        flat_ar_preds = ar_preds_unscaled.reshape(-1, n_target)
-        flat_trues = trues_unscaled.reshape(-1, n_target)
+        per_target_metrics = self._report_pointwise_metrics(
+            trues_unscaled, ar_preds_unscaled, target_names, steps
+        )
 
-        mae_per_output = metrics.mae(flat_trues, flat_ar_preds)
-        rmse_per_output = metrics.rmse(flat_trues, flat_ar_preds)
-        r2_per_output = metrics.r2(flat_trues, flat_ar_preds)
+        evaluation.report_mare_comparison(
+            trues_unscaled,
+            ar_preds_unscaled,
+            tf_preds_unscaled,
+            target_names,
+            self.log,
+            per_target_metrics,
+        )
+
+        self._compute_jacobian_analysis(
+            all_inputs_scaled, all_trues_scaled, target_names, forcing_names
+        )
+        self._compute_stepwise_importance(
+            all_inputs_scaled, all_trues_scaled, target_names, forcing_names
+        )
+        if self.matrix_ode:
+            self._compute_depletion_matrix_analysis(
+                all_inputs_scaled, all_trues_scaled, target_names
+            )
+
+        evaluation.report_prediction_comparisons(
+            trues_unscaled,
+            ar_preds_unscaled,
+            tf_preds_unscaled,
+            target_names,
+            self.result_dir,
+        )
+        evaluation.report_error_growth(
+            trues_unscaled,
+            ar_preds_unscaled,
+            tf_preds_unscaled,
+            target_names,
+            self.result_dir,
+            self.log,
+        )
+        self._plot_trajectories(
+            trues_unscaled, ar_preds_unscaled, inputs_unscaled, target_names
+        )
+        self._log_to_database(per_target_metrics)
+
+        self._test_preds.clear()
+        self._test_trues.clear()
+        self._test_input_trajs.clear()
+
+    def _report_pointwise_metrics(self, trues, ar_preds, target_names, steps):
+        """Per-target MAE/RMSE/R² over all timesteps, plus the scatter figures."""
+        n_target = len(target_names)
+        flat_trues = trues.reshape(-1, n_target)
+        flat_preds = ar_preds.reshape(-1, n_target)
+
+        mae_per_output = metrics.mae(flat_trues, flat_preds)
+        rmse_per_output = metrics.rmse(flat_trues, flat_preds)
+        r2_per_output = metrics.r2(flat_trues, flat_preds)
 
         self.log("Mean Absolute Error (avg)", float(mae_per_output.mean()))
         self.log("Root Mean Squared Error (avg)", float(rmse_per_output.mean()))
@@ -275,25 +297,21 @@ class NODE_Model(L.LightningModule):
         logger.info(f"  RMSE (avg): {rmse_per_output.mean():.6f}")
         logger.info(f"  MAE (avg):  {mae_per_output.mean():.6f}")
 
-        # 2. Per-target: predictions vs actuals + residuals
         per_target_metrics = []
         for idx, target_name in enumerate(target_names):
             output_dir = os.path.join(self.result_dir, target_name)
             os.makedirs(output_dir, exist_ok=True)
 
-            y_true_flat = flat_trues[:, idx]
-            y_pred_flat = flat_ar_preds[:, idx]
-
             plot.plot_predictions_vs_actuals(
-                y_true_flat,
-                y_pred_flat,
+                flat_trues[:, idx],
+                flat_preds[:, idx],
                 mae_per_output[idx],
                 rmse_per_output[idx],
                 r2_per_output[idx],
                 output_dir,
             )
             plot.plot_residuals_combined(
-                y_true_flat, y_pred_flat, output_dir, steps_per_run=steps
+                flat_trues[:, idx], flat_preds[:, idx], output_dir, steps_per_run=steps
             )
 
             per_target_metrics.append(
@@ -304,187 +322,93 @@ class NODE_Model(L.LightningModule):
                     "r2": float(r2_per_output[idx]),
                 }
             )
+        return per_target_metrics
 
-        # 3. MARE comparison (Teacher-Forcing vs Autoregressive)
-        self._compute_mare_comparison(
-            trues_unscaled,
-            ar_preds_unscaled,
-            tf_preds_unscaled,
-            target_names,
-            per_target_metrics,
-        )
-
-        # 4. Jacobian sensitivity analysis (replaces permutation feature importance)
-        forcing_names = [
-            key
-            for key, _ in sorted(datamodule.col_index_map.items(), key=lambda x: x[1])
-        ]
-        self._compute_jacobian_analysis(
-            all_inputs_scaled, all_trues_scaled, target_names, forcing_names
-        )
-
-        self._compute_stepwise_importance(
-            all_inputs_scaled, all_trues_scaled, target_names, forcing_names
-        )
-
-        # 4b. Depletion matrix visualisation (matrix ODE only)  ← bug fix: was calling wrong method
-        if self.matrix_ode:
-            self._compute_depletion_matrix_analysis(
-                all_inputs_scaled, all_trues_scaled, target_names
-            )
-
-        # 5. Prediction comparison plots (TF vs AR)
-        self._plot_prediction_comparisons(
-            trues_unscaled, ar_preds_unscaled, tf_preds_unscaled, target_names
-        )
-
-        # 6. Error growth (MAE, MALE)
-        self._plot_error_growth(
-            trues_unscaled, ar_preds_unscaled, tf_preds_unscaled, target_names
-        )
-
-        # 7. Trajectory-specific plots — loop over ALL targets
+    def _plot_trajectories(self, trues, ar_preds, inputs, target_names, num_to_plot=5):
+        """A few individual trajectories per target, plus an all-runs overlay."""
         t_np = self.t_span.cpu().numpy()
-        num_to_plot = min(5, num_runs)
+        num_runs = trues.shape[0]
+
         for target_idx, target_name in enumerate(target_names):
             target_dir = os.path.join(self.result_dir, target_name)
             os.makedirs(target_dir, exist_ok=True)
 
-            for i in range(num_to_plot):
+            for i in range(min(num_to_plot, num_runs)):
                 plot.plot_node_trajectory(
                     t_np,
-                    ar_preds_unscaled[i, :, target_idx],
-                    trues_unscaled[i, :, target_idx],
-                    inputs_unscaled[i, :, 0],  # Power (first input) as reference
-                    title=f"{target_name} — Test Trajectory {i+1}",
-                    save_path=os.path.join(target_dir, f"test_traj_{i+1}.png"),
+                    ar_preds[i, :, target_idx],
+                    trues[i, :, target_idx],
+                    inputs[i, :, 0],  # power, the first forcing input
+                    title=f"{target_name} — Test Trajectory {i + 1}",
+                    save_path=os.path.join(target_dir, f"test_traj_{i + 1}.png"),
                 )
 
             plot.plot_node_trajectory_summary(
                 t_np,
-                ar_preds_unscaled[:, :, target_idx],
-                trues_unscaled[:, :, target_idx],
+                ar_preds[:, :, target_idx],
+                trues[:, :, target_idx],
                 title=f"{target_name} — All Test Trajectories ({num_runs} runs)",
                 save_path=os.path.join(target_dir, "test_all_trajectories.png"),
             )
 
-        # 8. Log to database
-        if hasattr(self.trainer, "logger") and hasattr(
-            self.trainer.logger, "update_final_results"
-        ):
-            test_metrics = {
-                "mae_avg": float(mae_per_output.mean()),
-                "rmse_avg": float(rmse_per_output.mean()),
-                "r2_avg": float(r2_per_output.mean()),
-                "per_target": per_target_metrics,
-            }
-            self.trainer.logger.update_final_results(
-                train_losses=self._train_losses,
-                val_losses=self._val_losses,
-                val_r2_scores=[],
-                val_mae_scores=[],
-                test_metrics=test_metrics,
-            )
+    def _log_to_database(self, per_target_metrics):
+        if not hasattr(self.trainer.logger, "update_final_results"):
+            return
 
-        # Cleanup
-        self._test_preds.clear()
-        self._test_trues.clear()
-        self._test_input_trajs.clear()
+        averages = {
+            f"{key}_avg": float(np.mean([m[key] for m in per_target_metrics]))
+            for key in ("mae", "rmse", "r2")
+        }
+        self.trainer.logger.update_final_results(
+            train_losses=self._train_losses,
+            val_losses=self._val_losses,
+            val_r2_scores=[],
+            val_mae_scores=[],
+            test_metrics={**averages, "per_target": per_target_metrics},
+        )
 
-    # ─── Teacher-Forced Predictions ──────────────────────────────────────
+    # ── Teacher-forced predictions ───────────────────────────────────────────
 
     def _teacher_forced_predictions(self, all_inputs_scaled, all_trues_scaled):
-        """
-        Single-step NODE predictions: at each timestep t, use ground truth y(t)
-        as initial condition and integrate one dt forward to predict y(t+1).
-        This is analogous to the DNN's teacher-forcing mode.
+        """Single-step predictions: integrate one dt from the true y(t).
 
-        y(t) is the FULL state vector (all isotopes), so the network uses
-        ground truth for ALL isotopes at each step.
+        The DNN's teacher-forcing analogue. y(t) is the full state vector, so
+        every isotope is fed ground truth at every step. The first timestep has
+        no predecessor and is copied from the truth.
 
-        Returns: (num_runs, steps, n_target) array of scaled predictions.
+        Returns (num_runs, steps, n_target), in model units.
         """
-        num_runs, steps, n_target = all_trues_scaled.shape
+        num_runs, steps, _ = all_trues_scaled.shape
         tf_preds = np.zeros_like(all_trues_scaled)
-
-        # First timestep: prediction = ground truth (no prior step to predict from)
         tf_preds[:, 0, :] = all_trues_scaled[:, 0, :]
 
         device = self.device
         t_span = self.t_span.to(device)
 
-        # Process in batches to avoid OOM
-        batch_size = 64
-
-        for batch_start in range(0, num_runs, batch_size):
-            batch_end = min(batch_start + batch_size, num_runs)
+        for start in range(0, num_runs, TRAJECTORY_BATCH):
+            end = min(start + TRAJECTORY_BATCH, num_runs)
 
             inputs_batch = torch.tensor(
-                all_inputs_scaled[batch_start:batch_end],
-                dtype=torch.float32,
-                device=device,
+                all_inputs_scaled[start:end], dtype=torch.float32, device=device
             )
             trues_batch = torch.tensor(
-                all_trues_scaled[batch_start:batch_end],
-                dtype=torch.float32,
-                device=device,
+                all_trues_scaled[start:end], dtype=torch.float32, device=device
             )
+            self.func.set_forcing(t_span, inputs_batch)
 
-            forcing_profiles = inputs_batch  # (batch, steps, n_input)
-            self.func.set_forcing(t_span, forcing_profiles)
-
-            # Single-step integration for each timestep
             for t in range(steps - 1):
-                y_t = trues_batch[:, t, :]  # Ground truth ALL isotopes at t
-                t_short = t_span[t : t + 2]  # Integrate from t to t+1
-
                 with torch.no_grad():
-                    pred_t1 = self._odeint(y_t, t_short)[
-                        -1
-                    ]  # Take last timepoint = t+1
-
-                tf_preds[batch_start:batch_end, t + 1, :] = pred_t1.cpu().numpy()
+                    pred = self._odeint(trues_batch[:, t, :], t_span[t : t + 2])[-1]
+                tf_preds[start:end, t + 1, :] = pred.cpu().numpy()
 
         return tf_preds
 
-    # ─── MARE Comparison ─────────────────────────────────────────────────
+    # ── Jacobian sensitivity ─────────────────────────────────────────────────
 
-    def _compute_mare_comparison(
-        self,
-        trues_unscaled,
-        ar_preds_unscaled,
-        tf_preds_unscaled,
-        target_names,
-        per_target_metrics=None,
-    ):
-        """Compare MARE between teacher-forcing and autoregressive (same as DNN)."""
-        logger.info(f"\n{'='*20}")
-        logger.info("MARE: Teacher-Forcing vs Autoregressive")
-        logger.info(f"{'='*20}")
-
-        comparison = evaluation.mare_comparison(
-            trues_unscaled, ar_preds_unscaled, tf_preds_unscaled
-        )
-
-        for idx, target_name in enumerate(target_names):
-            mare_tf = comparison[idx]["mare_tf"]
-            mare_ar = comparison[idx]["mare_ar"]
-
-            self.log(f"{target_name}/MARE_TeacherForcing", float(mare_tf))
-            self.log(f"{target_name}/MARE_Autoregressive", float(mare_ar))
-
-            logger.info(
-                f"  {target_name}: MARE(TF)={mare_tf:.6f}, MARE(AR)={mare_ar:.6f}"
-            )
-
-            if per_target_metrics is not None:
-                per_target_metrics[idx]["mare_tf"] = float(mare_tf)
-                per_target_metrics[idx]["mare_ar"] = float(mare_ar)
-
-    # ─── Jacobian Sensitivity Analysis ───────────────────────────────────
     def compute_state_jacobian(self, t_eval, y_eval, forcing_eval, t_idx):
+        """∂f/∂y at one timestep, for every trajectory in the batch."""
         with torch.inference_mode(False):
-            # Clone all tensors to escape inference-mode tracking
+            # Cloning escapes inference-mode tracking, which forbids autograd.
             t_eval = t_eval.clone()
             forcing_eval = forcing_eval.clone()
             y_eval = y_eval.clone().requires_grad_(True)
@@ -493,49 +417,36 @@ class NODE_Model(L.LightningModule):
             self.func.train()
             self.func.set_forcing(t_eval, forcing_eval)
 
-            dydt = self.func(t_eval[t_idx], y_eval)  # correct time
-
-            jacobians = []
-            for i in range(dydt.shape[-1]):
-                grad = torch.autograd.grad(
-                    dydt[:, i].sum(), y_eval, retain_graph=True, create_graph=False
-                )[0]
-                jacobians.append(grad)
+            dydt = self.func(t_eval[t_idx], y_eval)
+            jacobians = [
+                torch.autograd.grad(dydt[:, i].sum(), y_eval, retain_graph=True)[0]
+                for i in range(dydt.shape[-1])
+            ]
 
             self.func.train(was_training)
             return torch.stack(jacobians, dim=1)
 
     def compute_forcing_jacobian(self, t_eval, y_eval, forcing_eval, t_idx):
+        """∂f/∂u at one timestep, attributed to the forcing interval actually read."""
         with torch.inference_mode(False):
-            forcing_eval = forcing_eval.clone().requires_grad_(True)
-            # Clone all tensors to escape inference-mode tracking
             t_eval = t_eval.clone()
             y_eval = y_eval.clone().detach()
+            forcing_eval = forcing_eval.clone().requires_grad_(True)
 
             was_training = self.func.training
             self.func.train()
             self.func.set_forcing(t_eval, forcing_eval)
 
             dydt = self.func(t_eval[t_idx], y_eval)
-
-            # Find which forcing index the interpolation actually used
             with torch.no_grad():
-                t_clamped = t_eval[t_idx].clamp(t_eval[0], t_eval[-1])
-                interp_idx = (
-                    torch.searchsorted(t_eval, t_clamped.unsqueeze(0)).squeeze() - 1
-                ).clamp(0, len(t_eval) - 2)
+                interp_idx = self.func.forcing_index(t_eval[t_idx])
 
-            jacobians = []
-            for i in range(dydt.shape[-1]):
-                grad = torch.autograd.grad(
-                    dydt[:, i].sum(),
-                    forcing_eval,
-                    retain_graph=True,
-                    create_graph=False,
-                )[0]
-                jacobians.append(
-                    grad[:, interp_idx, :]
-                )  # ← match the interpolation index
+            jacobians = [
+                torch.autograd.grad(dydt[:, i].sum(), forcing_eval, retain_graph=True)[
+                    0
+                ][:, interp_idx, :]
+                for i in range(dydt.shape[-1])
+            ]
 
             self.func.train(was_training)
             return torch.stack(jacobians, dim=1)
@@ -543,106 +454,82 @@ class NODE_Model(L.LightningModule):
     def _compute_jacobian_analysis(
         self, all_inputs_scaled, all_trues_scaled, target_names, forcing_names
     ):
-        """
-        Evaluate state and forcing Jacobians across all test trajectories and
-        timesteps to build a unified sensitivity picture.
+        """State and forcing Jacobians across the test set.
 
-        Produces:
-          - Mean |∂f/∂y| heatmap: which state variables drive which derivatives
-          - Mean |∂f/∂u| heatmap: which forcing inputs drive which derivatives
-          - Combined sensitivity bar chart per target
-          - Jacobian evolution over time for each target
+        Produces mean |∂f/∂y| and |∂f/∂u| heatmaps, a per-target sensitivity bar
+        chart, and the evolution of both along the trajectory.
         """
-        logger.info(f"\n{'='*20}")
+        logger.info(f"\n{'=' * 20}")
         logger.info("JACOBIAN SENSITIVITY ANALYSIS")
-        logger.info(f"{'='*20}")
+        logger.info(f"{'=' * 20}")
 
-        num_runs, steps, n_input = all_inputs_scaled.shape
+        num_runs, steps, _ = all_inputs_scaled.shape
         device = self.device
         t_span = self.t_span.to(device)
 
-        # Sample a subset of runs and timesteps to keep computation tractable
-        max_runs = num_runs
-        # Sample evenly spaced timesteps (skip first and last)
+        # Evenly spaced timesteps, skipping the first and last.
         timestep_indices = np.linspace(1, steps - 2, min(20, steps - 2), dtype=int)
-
         logger.info(
-            f"Evaluating Jacobians: {max_runs} runs × {len(timestep_indices)} timesteps"
+            f"Evaluating Jacobians: {num_runs} runs × {len(timestep_indices)} timesteps"
         )
 
-        # Accumulators: (n_timesteps_sampled, n_target, n_target) and (n_timesteps_sampled, n_target, n_input)
-        all_state_jacs = []  # list of (n_target, n_target) per (run, timestep)
-        all_forcing_jacs = []  # list of (n_target, n_input) per (run, timestep)
-
-        # For time-resolved analysis: {timestep_idx: list of jacobians}
+        all_state_jacs, all_forcing_jacs = [], []
         state_jacs_by_time = {t: [] for t in timestep_indices}
         forcing_jacs_by_time = {t: [] for t in timestep_indices}
 
-        batch_size = 32
-
-        for batch_start in range(0, max_runs, batch_size):
-            batch_end = min(batch_start + batch_size, max_runs)
+        for start in range(0, num_runs, JACOBIAN_BATCH):
+            end = min(start + JACOBIAN_BATCH, num_runs)
 
             inputs_batch = torch.tensor(
-                all_inputs_scaled[batch_start:batch_end],
-                dtype=torch.float32,
-                device=device,
+                all_inputs_scaled[start:end], dtype=torch.float32, device=device
             )
             trues_batch = torch.tensor(
-                all_trues_scaled[batch_start:batch_end],
-                dtype=torch.float32,
-                device=device,
+                all_trues_scaled[start:end], dtype=torch.float32, device=device
             )
 
             for t_idx in timestep_indices:
-                y_t = trues_batch[:, t_idx, :]  # (batch, n_target)
-
-                # State Jacobian: ∂f/∂y
-                state_jac = self.compute_state_jacobian(
-                    t_span, y_t, inputs_batch, int(t_idx)
-                )
+                y_t = trues_batch[:, t_idx, :]
                 abs_state_jac = (
-                    state_jac.abs().cpu().numpy()
-                )  # (batch, n_target, n_target)
-
-                # Forcing Jacobian: ∂f/∂u
-                forcing_jac = self.compute_forcing_jacobian(
-                    t_span, y_t, inputs_batch, int(t_idx)
+                    self.compute_state_jacobian(t_span, y_t, inputs_batch, int(t_idx))
+                    .abs()
+                    .cpu()
+                    .numpy()
                 )
                 abs_forcing_jac = (
-                    forcing_jac.abs().cpu().numpy()
-                )  # (batch, n_target, n_input)
+                    self.compute_forcing_jacobian(t_span, y_t, inputs_batch, int(t_idx))
+                    .abs()
+                    .cpu()
+                    .numpy()
+                )
 
-                # Collect per-sample Jacobians
                 for b in range(abs_state_jac.shape[0]):
                     all_state_jacs.append(abs_state_jac[b])
                     all_forcing_jacs.append(abs_forcing_jac[b])
                     state_jacs_by_time[t_idx].append(abs_state_jac[b])
                     forcing_jacs_by_time[t_idx].append(abs_forcing_jac[b])
 
-        # ── Aggregate: mean absolute Jacobians ──
-        mean_state_jac = np.mean(all_state_jacs, axis=0)  # (n_target, n_target)
-        mean_forcing_jac = np.mean(all_forcing_jacs, axis=0)  # (n_target, n_input)
+        mean_state_jac = np.mean(all_state_jacs, axis=0)
+        mean_forcing_jac = np.mean(all_forcing_jacs, axis=0)
         std_state_jac = np.std(all_state_jacs, axis=0)
         std_forcing_jac = np.std(all_forcing_jacs, axis=0)
 
-        # ── Log summary ──
         logger.info("\nMean |∂f/∂y| (state sensitivities):")
         for i, t_name in enumerate(target_names):
             for j, s_name in enumerate(target_names):
                 logger.info(
-                    f"  ∂(d{t_name}/dt)/∂{s_name}: {mean_state_jac[i,j]:.6f} ± {std_state_jac[i,j]:.6f}"
+                    f"  ∂(d{t_name}/dt)/∂{s_name}: "
+                    f"{mean_state_jac[i, j]:.6f} ± {std_state_jac[i, j]:.6f}"
                 )
 
         logger.info("\nMean |∂f/∂u| (forcing sensitivities):")
         for i, t_name in enumerate(target_names):
             for j, f_name in enumerate(forcing_names):
                 logger.info(
-                    f"  ∂(d{t_name}/dt)/∂{f_name}: {mean_forcing_jac[i,j]:.6f} ± {std_forcing_jac[i,j]:.6f}"
+                    f"  ∂(d{t_name}/dt)/∂{f_name}: "
+                    f"{mean_forcing_jac[i, j]:.6f} ± {std_forcing_jac[i, j]:.6f}"
                 )
 
-        # ── Plot 1: State Jacobian heatmap ──
-        self._plot_jacobian_heatmap(
+        plot.plot_jacobian_heatmap(
             mean_state_jac,
             target_names,
             target_names,
@@ -651,9 +538,7 @@ class NODE_Model(L.LightningModule):
             ylabel="Derivative (dy_i/dt)",
             save_path=os.path.join(self.result_dir, "jacobian_state_heatmap.png"),
         )
-
-        # ── Plot 2: Forcing Jacobian heatmap ──
-        self._plot_jacobian_heatmap(
+        plot.plot_jacobian_heatmap(
             mean_forcing_jac,
             forcing_names,
             target_names,
@@ -663,506 +548,140 @@ class NODE_Model(L.LightningModule):
             save_path=os.path.join(self.result_dir, "jacobian_forcing_heatmap.png"),
         )
 
-        # ── Plot 3: Combined sensitivity bar chart per target ──
         all_names = target_names + forcing_names
-        combined_jac = np.concatenate(
-            [mean_state_jac, mean_forcing_jac], axis=1
-        )  # (n_target, n_target + n_input)
+        combined_jac = np.concatenate([mean_state_jac, mean_forcing_jac], axis=1)
         combined_std = np.concatenate([std_state_jac, std_forcing_jac], axis=1)
 
-        for idx, t_name in enumerate(target_names):
-            output_dir = os.path.join(self.result_dir, t_name)
-            os.makedirs(output_dir, exist_ok=True)
-
-            self._plot_combined_sensitivity(
-                combined_jac[idx],
-                combined_std[idx],
-                all_names,
-                target_names,
-                forcing_names,
-                title=f"Sensitivity of d{t_name}/dt",
-                save_path=os.path.join(output_dir, "jacobian_combined_sensitivity.png"),
-            )
-
-        # ── Plot 4: Jacobian evolution over time per target ──
         sorted_timesteps = sorted(timestep_indices)
         time_fractions = self.t_span.cpu().numpy()[sorted_timesteps]
 
         for idx, t_name in enumerate(target_names):
             output_dir = os.path.join(self.result_dir, t_name)
+            os.makedirs(output_dir, exist_ok=True)
 
-            # State sensitivities over time
-            state_over_time = np.array(
-                [
-                    np.mean([j[idx, :] for j in state_jacs_by_time[t]], axis=0)
-                    for t in sorted_timesteps
-                ]
-            )  # (n_timesteps, n_target)
-
-            # Forcing sensitivities over time
-            forcing_over_time = np.array(
-                [
-                    np.mean([j[idx, :] for j in forcing_jacs_by_time[t]], axis=0)
-                    for t in sorted_timesteps
-                ]
-            )  # (n_timesteps, n_input)
-
-            self._plot_jacobian_over_time(
+            plot.plot_combined_sensitivity(
+                combined_jac[idx],
+                combined_std[idx],
+                all_names,
+                len(target_names),
+                len(forcing_names),
+                title=f"Sensitivity of d{t_name}/dt",
+                save_path=os.path.join(output_dir, "jacobian_combined_sensitivity.png"),
+            )
+            plot.plot_jacobian_over_time(
                 time_fractions,
-                state_over_time,
-                forcing_over_time,
+                np.array(
+                    [
+                        np.mean([j[idx, :] for j in state_jacs_by_time[t]], axis=0)
+                        for t in sorted_timesteps
+                    ]
+                ),
+                np.array(
+                    [
+                        np.mean([j[idx, :] for j in forcing_jacs_by_time[t]], axis=0)
+                        for t in sorted_timesteps
+                    ]
+                ),
                 target_names,
                 forcing_names,
                 title=f"Sensitivity evolution: d{t_name}/dt",
                 save_path=os.path.join(output_dir, "jacobian_time_evolution.png"),
             )
 
-        logger.info(f"\n  ✓ Jacobian analysis plots saved to: {self.result_dir}")
+        logger.info(f"\n  Jacobian analysis plots saved to: {self.result_dir}")
 
-    def _plot_jacobian_heatmap(
-        self, matrix, col_names, row_names, title, xlabel, ylabel, save_path
-    ):
-        """Plot a heatmap of a Jacobian matrix."""
-
-        fig, ax = plt.subplots(
-            figsize=(max(8, len(col_names) * 1.2), max(6, len(row_names) * 0.8))
-        )
-
-        im = ax.imshow(matrix, cmap="YlOrRd", aspect="auto")
-        plt.colorbar(im, ax=ax, label="Mean absolute sensitivity")
-
-        ax.set_xticks(range(len(col_names)))
-        ax.set_xticklabels(col_names, rotation=45, ha="right", fontsize=9)
-        ax.set_yticks(range(len(row_names)))
-        ax.set_yticklabels(row_names, fontsize=9)
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
-        ax.set_title(title)
-
-        # Annotate cells with values
-        for i in range(len(row_names)):
-            for j in range(len(col_names)):
-                val = matrix[i, j]
-                color = "white" if val > matrix.max() * 0.6 else "black"
-                ax.text(
-                    j,
-                    i,
-                    f"{val:.4f}",
-                    ha="center",
-                    va="center",
-                    fontsize=8,
-                    color=color,
-                )
-
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
-        plt.close()
-
-    def _plot_combined_sensitivity(
-        self,
-        sensitivities,
-        stds,
-        all_names,
-        target_names,
-        forcing_names,
-        title,
-        save_path,
-    ):
-        """Bar chart showing sensitivity of one derivative to all state + forcing variables."""
-
-        n_target = len(target_names)
-        n_forcing = len(forcing_names)
-
-        colors = ["#2196F3"] * n_target + [
-            "#FF9800"
-        ] * n_forcing  # Blue for state, orange for forcing
-
-        sorted_idx = np.argsort(sensitivities)[::-1]
-        sorted_sens = sensitivities[sorted_idx]
-        sorted_stds = stds[sorted_idx]
-        sorted_names = [all_names[i] for i in sorted_idx]
-        sorted_colors = [colors[i] for i in sorted_idx]
-
-        fig, ax = plt.subplots(figsize=(max(8, len(all_names) * 0.6), 5))
-        ax.bar(
-            range(len(sorted_sens)),
-            sorted_sens,
-            yerr=sorted_stds,
-            color=sorted_colors,
-            capsize=3,
-            edgecolor="gray",
-            linewidth=0.5,
-        )
-
-        ax.set_xticks(range(len(sorted_names)))
-        ax.set_xticklabels(sorted_names, rotation=45, ha="right", fontsize=9)
-        ax.set_ylabel("Mean |∂f/∂·|")
-        ax.set_title(title)
-
-        # Legend
-
-        legend_elements = [
-            Patch(facecolor="#2196F3", label="State (∂f/∂y)"),
-            Patch(facecolor="#FF9800", label="Forcing (∂f/∂u)"),
-        ]
-        ax.legend(handles=legend_elements, loc="upper right")
-
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
-        plt.close()
-
-    def _plot_jacobian_over_time(
-        self,
-        time_fractions,
-        state_over_time,
-        forcing_over_time,
-        target_names,
-        forcing_names,
-        title,
-        save_path,
-    ):
-        """Line plot showing how sensitivities evolve over the trajectory."""
-
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-
-        # State sensitivities
-        for j, name in enumerate(target_names):
-            ax1.plot(time_fractions, state_over_time[:, j], label=name, linewidth=1.5)
-        ax1.set_xlabel("Normalised time")
-        ax1.set_ylabel("Mean |∂f/∂y_j|")
-        ax1.set_title("State sensitivities")
-        ax1.legend(fontsize=8)
-        ax1.grid(True, alpha=0.3)
-
-        # Forcing sensitivities
-        for j, name in enumerate(forcing_names):
-            ax2.plot(time_fractions, forcing_over_time[:, j], label=name, linewidth=1.5)
-        ax2.set_xlabel("Normalised time")
-        ax2.set_ylabel("Mean |∂f/∂u_j|")
-        ax2.set_title("Forcing sensitivities")
-        ax2.legend(fontsize=8)
-        ax2.grid(True, alpha=0.3)
-
-        fig.suptitle(title, fontsize=12, fontweight="bold")
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
-        plt.close()
-
-        # ─── Depletion Matrix Analysis (matrix ODE only) ─────────────────────
+    # ── Depletion matrix (matrix ODE only) ───────────────────────────────────
 
     def _get_unscaling_matrix(self, target_names):
-        """
-        Build the (n_target, n_target) conversion matrix to go from scaled to
-        physical rate coefficients.
+        """Elementwise factors converting the scaled matrix to units of 1/day.
 
-        In scaled space: dy_s/dt_n = A_s @ y_s
-        In physical space: dy/dt = A_phys @ y  (approximately, ignoring MinMax offset)
+        In scaled space dy_s/dt_n = A_s @ y_s; in physical space
+        A_phys[i,j] = A_s[i,j] * (range_i / range_j) / T_total_days. This ignores
+        the MinMax offset, which is exact only where a target's minimum is zero —
+        see AUDIT.md for why that matters for U238.
 
-        Conversion: A_phys[i,j] = A_s[i,j] * (range_i / range_j) / T_total_days
-
-        where range_i = y_max_i - y_min_i (from MinMax scaler) and
-        T_total_days = physical time span in days (from "time_days" column).
-
-        Returns: (scale_matrix, T_total_days, time_unit)
-          scale_matrix: (n_target, n_target) — multiply A_scaled elementwise
-          T_total_days: physical time span in days
-          time_unit: 'days'
+        Returns (scale_matrix, T_total_days, time_unit).
         """
         dm = self.trainer.datamodule
         n_target = len(target_names)
 
-        # Extract per-feature ranges using the existing inverse_transformer.
-        # Passing scaled values of 0 and 1 recovers the physical min and max.
-        zeros = np.zeros((1, n_target))
-        ones = np.ones((1, n_target))
-        phys_min = data_scaler.inverse_transformer(dm.target_scaler, zeros)[0]
-        phys_max = data_scaler.inverse_transformer(dm.target_scaler, ones)[0]
+        # Scaled 0 and 1 invert to the physical min and max, so their difference
+        # is the per-feature range without reaching into the scaler's internals.
+        phys_min = dm.target_scaler.inverse_transform(np.zeros((1, n_target)))[0]
+        phys_max = dm.target_scaler.inverse_transform(np.ones((1, n_target)))[0]
         ranges = phys_max - phys_min
 
-        # Physical time span, in days (the HDF5 carries it as column "time_days").
-        # NOTE: hardcoded, and the training data actually spans 990 days
-        # (dm.time_array[:dm.actual_steps]), so every coefficient below is ~1% low.
-        # Left as-is deliberately: changing it moves the published depletion-matrix
-        # figure. See AUDIT.md Pass 2 §B1.
+        # Hardcoded: the training data actually spans 990 days, so every
+        # coefficient below is ~1% low. Left as-is deliberately — changing it
+        # moves the published depletion-matrix figure. See AUDIT.md.
         T_total_days = 1000
 
-        # Build scale matrix: scale[i,j] = range_i / (range_j * T_total_days)
-        # This converts A_scaled[i,j] -> A_phys[i,j] in units of 1/days
-        scale_matrix = np.outer(ranges, 1.0 / ranges) / T_total_days
-        time_unit = "days"
-
         logger.info(f"  Physical time span: {T_total_days:.2f} days")
-
         for idx, name in enumerate(target_names):
             logger.info(f"  {name} range: {ranges[idx]:.6e}")
 
-        return scale_matrix, T_total_days, time_unit
+        return np.outer(ranges, 1.0 / ranges) / T_total_days, T_total_days, "days"
 
     def _compute_depletion_matrix_analysis(
-        self, all_inputs_scaled, all_trues_scaled, target_names
+        self, all_inputs_scaled, all_trues_scaled, target_names, max_runs=20
     ):
         """Extract and visualise the learned depletion matrix A(t) over time."""
-
-        logger.info(f"\n{'='*20}")
+        logger.info(f"\n{'=' * 20}")
         logger.info("DEPLETION MATRIX ANALYSIS")
-        logger.info(f"{'='*20}")
+        logger.info(f"{'=' * 20}")
 
-        num_runs, steps, n_input = all_inputs_scaled.shape
-        n_target = len(target_names)
+        num_runs, steps, _ = all_inputs_scaled.shape
         device = self.device
         t_span = self.t_span.to(device)
 
-        # Get unscaling conversion factors
-        scale_matrix, T_total, time_unit = self._get_unscaling_matrix(target_names)
+        scale_matrix, _, time_unit = self._get_unscaling_matrix(target_names)
 
-        max_runs = min(20, num_runs)
+        max_runs = min(max_runs, num_runs)
         timestep_indices = np.linspace(0, steps - 1, min(30, steps), dtype=int)
-
-        # Collect matrices at each timestep: {t_idx: list of (n_target, n_target)}
         matrices_by_time = {t: [] for t in timestep_indices}
 
-        batch_size = 32
-        for batch_start in range(0, max_runs, batch_size):
-            batch_end = min(batch_start + batch_size, max_runs)
+        for start in range(0, max_runs, JACOBIAN_BATCH):
+            end = min(start + JACOBIAN_BATCH, max_runs)
 
             inputs_batch = torch.tensor(
-                all_inputs_scaled[batch_start:batch_end],
-                dtype=torch.float32,
-                device=device,
+                all_inputs_scaled[start:end], dtype=torch.float32, device=device
             )
-
             trues_batch = torch.tensor(
-                all_trues_scaled[batch_start:batch_end],
-                dtype=torch.float32,
-                device=device,
+                all_trues_scaled[start:end], dtype=torch.float32, device=device
             )
-
             self.func.set_forcing(t_span, inputs_batch)
 
             for t_idx in timestep_indices:
                 with torch.no_grad():
                     forcing_t = self.func._interpolate_forcing(t_span[int(t_idx)])
-                    y_t = trues_batch[:, int(t_idx), :]  # true state at this timestep
-                    A = self.func._build_matrix(forcing_t, y_t)  # (batch, n, n)
+                    A = self.func._build_matrix(
+                        forcing_t, trues_batch[:, int(t_idx), :]
+                    )
 
                 for b in range(A.shape[0]):
-                    A_phys = A[b].cpu().numpy() * scale_matrix
-                    matrices_by_time[t_idx].append(A_phys)
+                    matrices_by_time[t_idx].append(A[b].cpu().numpy() * scale_matrix)
 
-        # ── Plot 1: Mean depletion matrix (time-averaged) ──
-        all_matrices = []
-        for t_idx in timestep_indices:
-            all_matrices.extend(matrices_by_time[t_idx])
-        mean_A = np.mean(all_matrices, axis=0)
-        std_A = np.std(all_matrices, axis=0)
-
-        fig, ax = plt.subplots(figsize=(max(6, n_target * 1.5), max(5, n_target * 1.2)))
-        im = ax.imshow(
-            mean_A,
-            cmap="RdBu_r",
-            aspect="auto",
-            vmin=-np.abs(mean_A).max(),
-            vmax=np.abs(mean_A).max(),
-        )
-        plt.colorbar(im, ax=ax, label=f"Rate coefficient [1/{time_unit}]")
-
-        ax.set_xticks(range(n_target))
-        ax.set_xticklabels(target_names, rotation=45, ha="right", fontsize=10)
-        ax.set_yticks(range(n_target))
-        ax.set_yticklabels([f"d{n}/dt" for n in target_names], fontsize=10)
-        ax.set_title("Learned Depletion Matrix A (time-averaged, physical units)")
-
-        for i in range(n_target):
-            for j in range(n_target):
-                val = mean_A[i, j]
-                color = "white" if abs(val) > np.abs(mean_A).max() * 0.6 else "black"
-                ax.text(
-                    j,
-                    i,
-                    f"{val:.4e}\n(\u00b1{std_A[i,j]:.2e})",
-                    ha="center",
-                    va="center",
-                    fontsize=8,
-                    color=color,
-                )
-
-        plt.tight_layout()
-        plt.savefig(
+        all_matrices = [m for t in timestep_indices for m in matrices_by_time[t]]
+        plot.plot_depletion_matrix_mean(
+            np.mean(all_matrices, axis=0),
+            np.std(all_matrices, axis=0),
+            target_names,
+            time_unit,
             os.path.join(self.result_dir, "depletion_matrix_mean.png"),
-            dpi=150,
-            bbox_inches="tight",
         )
-        plt.close()
 
-        # ── Plot 2: Matrix entries over time ──
         sorted_ts = sorted(timestep_indices)
-        time_fractions = self.t_span.cpu().numpy()[sorted_ts]
-
-        mean_over_time = np.array(
-            [np.mean(matrices_by_time[t], axis=0) for t in sorted_ts]
-        )  # (n_timesteps, n_target, n_target)
-
-        std_over_time = np.array(
-            [np.std(matrices_by_time[t], axis=0) for t in sorted_ts]
-        )
-
-        fig, axes = plt.subplots(
-            n_target, n_target, figsize=(4 * n_target, 3.5 * n_target), sharex=True
-        )
-        for i in range(n_target):
-            for j in range(n_target):
-                ax = axes[i, j] if n_target > 1 else axes
-                mean_vals = mean_over_time[:, i, j]
-                std_vals = std_over_time[:, i, j]
-
-                color = "tab:red" if i == j else "tab:blue"
-                ax.plot(time_fractions, mean_vals, linewidth=1.5, color=color)
-                ax.fill_between(
-                    time_fractions,
-                    mean_vals - std_vals,
-                    mean_vals + std_vals,
-                    alpha=0.2,
-                    color=color,
-                )
-                ax.set_title(f"A[{target_names[i]},{target_names[j]}]", fontsize=9)
-                ax.grid(True, alpha=0.3)
-                ax.axhline(0, color="gray", linewidth=0.5, linestyle="--")
-
-                # Y-axis label with units
-                if j == 0:
-                    ax.set_ylabel(f"[1/{time_unit}]", fontsize=8)
-
-                if i == n_target - 1:
-                    ax.set_xlabel("Normalised time")
-
-        fig.suptitle(
-            f"Depletion Matrix Entries Over Time (physical units, 1/{time_unit})\n"
-            f"shaded = \u00b11\u03c3 across {max_runs} runs",
-            fontsize=13,
-            fontweight="bold",
-        )
-        plt.tight_layout()
-        plt.savefig(
+        plot.plot_depletion_matrix_evolution(
+            self.t_span.cpu().numpy()[sorted_ts],
+            np.array([np.mean(matrices_by_time[t], axis=0) for t in sorted_ts]),
+            np.array([np.std(matrices_by_time[t], axis=0) for t in sorted_ts]),
+            target_names,
+            time_unit,
+            max_runs,
             os.path.join(self.result_dir, "depletion_matrix_evolution.png"),
-            dpi=150,
-            bbox_inches="tight",
-        )
-        plt.close()
-
-        logger.info(f"  Depletion matrix plots saved to: {self.result_dir}")
-
-    # ─── Prediction Comparisons ──────────────────────────────────────────
-
-    def _plot_prediction_comparisons(
-        self, trues_unscaled, ar_preds_unscaled, tf_preds_unscaled, target_names
-    ):
-        """Plot teacher-forcing vs autoregressive predictions (same as DNN)."""
-        logger.info(f"\n{'='*20}")
-        logger.info("PREDICTION COMPARISON (Teacher-Forcing vs Autoregressive)")
-        logger.info(f"{'='*20}")
-
-        for idx, target_name in enumerate(target_names):
-            logger.info(f"\nPlotting prediction comparison for: {target_name}")
-
-            # Use first run for comparison plot
-            ground_truth = trues_unscaled[0, :, idx]
-            teacher_forced_preds = tf_preds_unscaled[0, :, idx]
-            autoregressive_preds = ar_preds_unscaled[0, :, idx]
-
-            output_dir = os.path.join(self.result_dir, target_name)
-            plot.plot_prediction_comparison(
-                ground_truth,
-                teacher_forced_preds,
-                autoregressive_preds,
-                target_name,
-                output_dir,
-            )
-
-            logger.info(f"  ✓ Comparison plot saved to: {output_dir}")
-
-    # ─── Error Growth ───────────────────────────────────────────────────
-
-    def _plot_error_growth(
-        self, trues_unscaled, ar_preds_unscaled, tf_preds_unscaled, target_names
-    ):
-        """Calculate and plot how prediction error grows over time (same as DNN)."""
-        logger.info(f"\n{'='*20}")
-        logger.info("ERROR GROWTH ANALYSIS (Teacher-Forcing vs Autoregressive)")
-        logger.info(f"{'='*20}")
-
-        num_runs = trues_unscaled.shape[0]
-        logger.info(f"Analyzing error growth across {num_runs} runs")
-
-        curves = evaluation.error_growth_curves(
-            trues_unscaled, ar_preds_unscaled, tf_preds_unscaled
         )
 
-        for idx, target_name in enumerate(target_names):
-            logger.info(f"\nAnalyzing error growth for: {target_name}")
-            c = curves[idx]
-
-            # Log final MALE values
-            self.log(f"{target_name}/Final MALE (AR)", float(c["avg_ar_male"][-1]))
-            self.log(f"{target_name}/Final MALE (TF)", float(c["avg_tf_male"][-1]))
-
-            output_dir = os.path.join(self.result_dir, target_name)
-
-            for metric_name, ylabel in (
-                ("MAE", "Mean Absolute Error"),
-                ("MALE", "Mean Absolute Log Error"),
-            ):
-                key = metric_name.lower()
-                plot.plot_error_growth_metric(
-                    c[f"avg_tf_{key}"],
-                    c[f"avg_ar_{key}"],
-                    c[f"std_tf_{key}"],
-                    c[f"std_ar_{key}"],
-                    target_name,
-                    output_dir,
-                    num_runs,
-                    metric_name=metric_name,
-                    ylabel=ylabel,
-                    skip_first_n=0,
-                    tf_errors_all=c[f"tf_{key}_errors"],
-                    ar_errors_all=c[f"ar_{key}_errors"],
-                )
-
-            logger.info(f"  ✓ Error growth plots saved to: {output_dir}")
-
-    # ── Predict ──────────────────────────────────────────────────────────
-
-    def predict_step(self, batch, batch_idx, dataloader_idx=0):
-        target_pred, target_true = self._forward_batch(batch)
-        return {
-            "pred": target_pred.squeeze(-1).cpu(),
-            "true": target_true.squeeze(-1).cpu(),
-        }
-
-    # ── Optimizer ────────────────────────────────────────────────────────
-    def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(
-            self.parameters(),
-            lr=self.cfg.train.learning_rate,
-            weight_decay=self.cfg.train.weight_decay,
-        )
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            mode="min",
-            factor=0.5,
-            patience=self.cfg.train.lr_scheduler_patience,
-        )
-
-        logger.info(
-            f"Optimizer: AdamW | LR: {self.cfg.train.learning_rate} | Weight Decay: {self.cfg.train.weight_decay}"
-        )
-        logger.info(
-            f"Scheduler: ReduceLROnPlateau | Patience: {self.cfg.train.lr_scheduler_patience} | Factor: 0.5"
-        )
-
-        return [optimizer], [{"scheduler": scheduler, "monitor": "val_loss"}]
-
-    # ─── Occlusion Importance (forcing inputs) ───────────────────────────
-    # ─── Per-Step Teacher-Forced Importance ───────────────────────────────────────
+    # ── Per-step teacher-forced importance ───────────────────────────────────
 
     def _compute_stepwise_importance(
         self,
@@ -1174,31 +693,23 @@ class NODE_Model(L.LightningModule):
         seed=0,
         max_timesteps=50,
     ):
+        """Per-step teacher-forced permutation importance.
+
+        At each sampled timestep t the true y(t) is the initial condition; one
+        feature is replaced with values from a randomly chosen donor run; the
+        model integrates one step; and the change in |error| at t+1 is the
+        feature's importance there.
+
+        Sampling per step is what makes the zero-start isotopes measurable: at
+        t=0 U239 is zero in every run so permuting it does nothing, but by t=5 it
+        has built up and permuting it registers. The time-evolution plot shows
+        exactly when each isotope starts mattering.
+
+        Returns (mean_delta, sem_delta, mean_pct, sem_pct, mean_by_time).
         """
-        Per-step teacher-forced permutation importance.
-
-        At each sampled timestep t:
-          - Use the true y(t) as the ODE initial condition (teacher forcing)
-          - For each feature j, replace y(t)[:,j] or forcing(t)[:,j] with values
-            from a randomly chosen donor run
-          - Integrate ONE step forward → pred(t+1)
-          - ΔMAE = |pred_perturbed(t+1) - true(t+1)| - |pred_baseline(t+1) - true(t+1)|
-
-        Why this works for zero-start isotopes:
-          At t=0, U239=0 for every run so permuting it does nothing (ΔMAE≈0).
-          By t=5, U239 has built up to varying concentrations — permuting it
-          disrupts the model and registers non-zero importance.
-          The time-evolution plot shows exactly when each isotope starts mattering.
-
-        Outputs per target:
-          - Time-averaged importance table (mean ± SEM) → paper table
-          - Bar chart of time-averaged importance
-          - Line plot of importance evolution over the trajectory
-          - CSV and markdown printout for copy-paste
-        """
-        logger.info(f"\n{'='*20}")
+        logger.info(f"\n{'=' * 20}")
         logger.info(f"PER-STEP TEACHER-FORCED IMPORTANCE (K={n_permutations})")
-        logger.info(f"{'='*20}")
+        logger.info(f"{'=' * 20}")
 
         num_runs, steps, n_input = all_inputs_scaled.shape
         n_state = all_trues_scaled.shape[2]
@@ -1208,7 +719,7 @@ class NODE_Model(L.LightningModule):
         all_feature_names = list(forcing_names) + list(target_names)
         feature_types = ["Forcing"] * n_input + ["State"] * n_state
 
-        # Sample timesteps evenly — need t+1 to exist so stop at steps-2
+        # Stop at steps-2 so that t+1 always exists.
         timestep_indices = np.linspace(
             0, steps - 2, min(max_timesteps, steps - 1), dtype=int
         )
@@ -1220,25 +731,21 @@ class NODE_Model(L.LightningModule):
             f"{n_features} features × {n_permutations} permutations"
         )
 
-        # per_run_avg:  (num_runs, n_features, n_state) — time-averaged ΔMAE per run
-        # mean_by_time: (n_sampled, n_features, n_state) — mean ΔMAE at each timestep
+        # per_run_avg:  (runs, features, states)   time-averaged ΔMAE per run
+        # mean_by_time: (sampled, features, states) mean ΔMAE at each timestep
         per_run_avg = np.zeros((num_runs, n_features, n_state))
         mean_by_time = np.zeros((n_sampled, n_features, n_state))
 
         for t_enum, t_idx in enumerate(timestep_indices):
             if t_enum % 10 == 0:
-                logger.info(f"  Timestep {t_enum+1}/{n_sampled} (idx={t_idx})")
+                logger.info(f"  Timestep {t_enum + 1}/{n_sampled} (idx={t_idx})")
 
-            y_t = all_trues_scaled[:, t_idx, :]  # (num_runs, n_state)
-            y_tp1 = all_trues_scaled[:, t_idx + 1, :]  # (num_runs, n_state)
+            y_t = all_trues_scaled[:, t_idx, :]
+            y_tp1_unscaled = self._unscale_targets(all_trues_scaled[:, t_idx + 1, :])
 
-            # ── Baseline: true state + true forcing ──────────────────────
             base_pred = self._single_step_batch(y_t, t_idx, all_inputs_scaled)
-            base_pred_unscaled = self._unscale_targets(base_pred)
-            y_tp1_unscaled = self._unscale_targets(y_tp1)
-            base_ae = np.abs(base_pred_unscaled - y_tp1_unscaled)  # (num_runs, n_state)
+            base_ae = np.abs(self._unscale_targets(base_pred) - y_tp1_unscaled)
 
-            # ── Permute each feature ──────────────────────────────────────
             for j in range(n_features):
                 deltas_k = np.zeros((n_permutations, num_runs, n_state))
 
@@ -1246,9 +753,8 @@ class NODE_Model(L.LightningModule):
                     perm = rng.permutation(num_runs)
 
                     if j < n_input:
-                        # Forcing: swap column j at this specific timestep only.
-                        # ZOH interpolation uses forcing_profiles[:, t_idx, :] for
-                        # the entire interval [t_span[t_idx], t_span[t_idx+1]).
+                        # Forcing: swap column j at this timestep only. ZOH means
+                        # forcing[:, t_idx, :] governs the whole interval.
                         perturbed_forcing = all_inputs_scaled.copy()
                         perturbed_forcing[:, t_idx, j] = all_inputs_scaled[
                             perm, t_idx, j
@@ -1257,8 +763,8 @@ class NODE_Model(L.LightningModule):
                             y_t, t_idx, perturbed_forcing
                         )
                     else:
-                        # State: swap isotope (j - n_input) in y(t) across runs.
-                        # All other isotopes and all forcings stay as ground truth.
+                        # State: swap one isotope in y(t); everything else stays
+                        # at ground truth.
                         j_s = j - n_input
                         perturbed_y_t = y_t.copy()
                         perturbed_y_t[:, j_s] = y_t[perm, j_s]
@@ -1267,26 +773,79 @@ class NODE_Model(L.LightningModule):
                         )
 
                     pert_ae = np.abs(self._unscale_targets(pert_pred) - y_tp1_unscaled)
-                    deltas_k[k] = pert_ae - base_ae  # (num_runs, n_state)
+                    deltas_k[k] = pert_ae - base_ae
 
-                delta_at_step = deltas_k.mean(axis=0)  # (num_runs, n_state)
+                delta_at_step = deltas_k.mean(axis=0)
                 per_run_avg[:, j, :] += delta_at_step / n_sampled
                 mean_by_time[t_enum, j, :] = delta_at_step.mean(axis=0)
 
-        # ── Aggregate: mean ± SEM across runs ────────────────────────────
-        mean_delta = per_run_avg.mean(axis=0)  # (n_features, n_state)
+        mean_delta = per_run_avg.mean(axis=0)
         sem_delta = per_run_avg.std(axis=0, ddof=1) / np.sqrt(num_runs)
 
-        # Per-run % normalisation → mean ± SEM of percentages
+        # Normalise to percentages per run, then average, so the spread reflects
+        # run-to-run variation rather than the magnitude of the errors.
         delta_clipped = np.clip(per_run_avg, 0.0, None)
-        totals = delta_clipped.sum(axis=1, keepdims=True)  # (num_runs, 1, n_state)
+        totals = delta_clipped.sum(axis=1, keepdims=True)
         pct_per_run = np.where(
             totals > 0, 100.0 * delta_clipped / np.maximum(totals, 1e-30), 0.0
         )
-        mean_pct = pct_per_run.mean(axis=0)  # (n_features, n_state)
+        mean_pct = pct_per_run.mean(axis=0)
         sem_pct = pct_per_run.std(axis=0, ddof=1) / np.sqrt(num_runs)
 
-        # ── Logger ───────────────────────────────────────────────────────
+        self._log_stepwise_importance(
+            mean_delta,
+            sem_delta,
+            mean_pct,
+            sem_pct,
+            all_feature_names,
+            feature_types,
+            target_names,
+            n_features,
+        )
+        self._write_stepwise_importance_tables(
+            mean_delta,
+            sem_delta,
+            mean_pct,
+            sem_pct,
+            all_feature_names,
+            feature_types,
+            target_names,
+            num_runs,
+            n_sampled,
+            n_permutations,
+        )
+
+        plot.plot_stepwise_importance_bar(
+            mean_pct,
+            sem_pct,
+            all_feature_names,
+            feature_types,
+            target_names,
+            num_runs,
+            self.result_dir,
+        )
+        plot.plot_stepwise_importance_over_time(
+            mean_by_time,
+            t_fractions,
+            all_feature_names,
+            feature_types,
+            target_names,
+            self.result_dir,
+        )
+
+        return mean_delta, sem_delta, mean_pct, sem_pct, mean_by_time
+
+    def _log_stepwise_importance(
+        self,
+        mean_delta,
+        sem_delta,
+        mean_pct,
+        sem_pct,
+        feature_names,
+        feature_types,
+        target_names,
+        n_features,
+    ):
         for k, tname in enumerate(target_names):
             logger.info(f"\n  Per-step importance — target: {tname}")
             logger.info(
@@ -1295,16 +854,29 @@ class NODE_Model(L.LightningModule):
             )
             for j in np.argsort(mean_pct[:, k])[::-1]:
                 logger.info(
-                    f"    {all_feature_names[j]:<28} {feature_types[j]:<10} "
-                    f"{mean_delta[j,k]:>10.4e} ± {sem_delta[j,k]:.2e}   "
-                    f"{mean_pct[j,k]:>7.2f} ± {sem_pct[j,k]:.2f}"
+                    f"    {feature_names[j]:<28} {feature_types[j]:<10} "
+                    f"{mean_delta[j, k]:>10.4e} ± {sem_delta[j, k]:.2e}   "
+                    f"{mean_pct[j, k]:>7.2f} ± {sem_pct[j, k]:.2f}"
                 )
             for j in range(n_features):
-                safe = all_feature_names[j].replace(" ", "_")
+                safe = feature_names[j].replace(" ", "_")
                 self.log(f"{tname}/stepwise_pct/{safe}", float(mean_pct[j, k]))
                 self.log(f"{tname}/stepwise_dMAE/{safe}", float(mean_delta[j, k]))
 
-        # ── Markdown printout ────────────────────────────────────────────
+    def _write_stepwise_importance_tables(
+        self,
+        mean_delta,
+        sem_delta,
+        mean_pct,
+        sem_pct,
+        feature_names,
+        feature_types,
+        target_names,
+        num_runs,
+        n_sampled,
+        n_permutations,
+    ):
+        """One CSV per target, plus a markdown dump for pasting into the write-up."""
         _print_unicode_safe("\n" + "=" * 70)
         _print_unicode_safe(
             "PER-STEP IMPORTANCE TABLES — paste everything between the markers"
@@ -1316,24 +888,21 @@ class NODE_Model(L.LightningModule):
             f"mean ± SEM across {num_runs} runs, "
             f"{n_sampled} sampled timesteps, K={n_permutations}_\n"
         )
+
         for k, tname in enumerate(target_names):
+            order = np.argsort(mean_pct[:, k])[::-1]
+
             _print_unicode_safe(f"#### Target: `{tname}`\n")
             _print_unicode_safe("| Feature | Type | ΔMAE | MAE Imp. [%] |")
             _print_unicode_safe("|---|---|---|---|")
-            for j in np.argsort(mean_pct[:, k])[::-1]:
+            for j in order:
                 _print_unicode_safe(
-                    f"| {all_feature_names[j]} | {feature_types[j]} | "
-                    f"{mean_delta[j,k]:.4e} ± {sem_delta[j,k]:.2e} | "
-                    f"{mean_pct[j,k]:.2f} ± {sem_pct[j,k]:.2f} |"
+                    f"| {feature_names[j]} | {feature_types[j]} | "
+                    f"{mean_delta[j, k]:.4e} ± {sem_delta[j, k]:.2e} | "
+                    f"{mean_pct[j, k]:.2f} ± {sem_pct[j, k]:.2f} |"
                 )
             _print_unicode_safe()
-        _print_unicode_safe("<<<END_STEPWISE_IMPORTANCE_TABLES>>>")
-        _print_unicode_safe("=" * 70 + "\n")
 
-        # ── CSV ──────────────────────────────────────────────────────────
-        import csv
-
-        for k, tname in enumerate(target_names):
             output_dir = os.path.join(self.result_dir, tname)
             os.makedirs(output_dir, exist_ok=True)
             csv_path = os.path.join(output_dir, "stepwise_importance.csv")
@@ -1349,191 +918,77 @@ class NODE_Model(L.LightningModule):
                         "MAE_Imp_pct_SEM",
                     ]
                 )
-                for j in np.argsort(mean_pct[:, k])[::-1]:
-                    writer.writerow(
-                        [
-                            all_feature_names[j],
-                            feature_types[j],
-                            f"{mean_delta[j,k]:.6e}",
-                            f"{sem_delta[j,k]:.6e}",
-                            f"{mean_pct[j,k]:.4f}",
-                            f"{sem_pct[j,k]:.4f}",
-                        ]
-                    )
-            logger.info(f"  ✓ Stepwise importance CSV: {csv_path}")
+                writer.writerows(
+                    [
+                        feature_names[j],
+                        feature_types[j],
+                        f"{mean_delta[j, k]:.6e}",
+                        f"{sem_delta[j, k]:.6e}",
+                        f"{mean_pct[j, k]:.4f}",
+                        f"{sem_pct[j, k]:.4f}",
+                    ]
+                    for j in order
+                )
+            logger.info(f"  Stepwise importance CSV: {csv_path}")
 
-        # ── Plots ────────────────────────────────────────────────────────
-        self._plot_stepwise_importance_bar(
-            mean_pct, sem_pct, all_feature_names, feature_types, target_names, num_runs
-        )
-        self._plot_stepwise_importance_over_time(
-            mean_by_time, t_fractions, all_feature_names, feature_types, target_names
-        )
-
-        return mean_delta, sem_delta, mean_pct, sem_pct, mean_by_time
+        _print_unicode_safe("<<<END_STEPWISE_IMPORTANCE_TABLES>>>")
+        _print_unicode_safe("=" * 70 + "\n")
 
     def _single_step_batch(self, y_t_np, t_idx, forcing_profiles_np):
-        """
-        Integrate one teacher-forced ODE step for all runs in batches.
+        """Integrate one teacher-forced step for every run, in batches.
 
-        y_t_np:              (num_runs, n_state)        — current state (numpy)
-        t_idx:               int                        — index into t_span
-        forcing_profiles_np: (num_runs, steps, n_input) — full forcing profiles (numpy)
-
-        Returns: (num_runs, n_state) numpy — predicted state at t+1 (scaled)
+        y_t_np is (runs, n_state), forcing_profiles_np is (runs, steps, n_input);
+        returns (runs, n_state) in model units.
         """
-        num_runs = y_t_np.shape[0]
-        n_state = y_t_np.shape[1]
+        num_runs, n_state = y_t_np.shape
         device = self.device
         t_span = self.t_span.to(device)
         t_short = t_span[t_idx : t_idx + 2]
 
         preds = np.zeros((num_runs, n_state))
-        batch_size = 128  # larger than full-traj batch — only one ODE step each
-
         with torch.no_grad():
-            for bs in range(0, num_runs, batch_size):
-                be = min(bs + batch_size, num_runs)
+            for start in range(0, num_runs, SINGLE_STEP_BATCH):
+                end = min(start + SINGLE_STEP_BATCH, num_runs)
                 y_batch = torch.tensor(
-                    y_t_np[bs:be], dtype=torch.float32, device=device
+                    y_t_np[start:end], dtype=torch.float32, device=device
                 )
                 f_batch = torch.tensor(
-                    forcing_profiles_np[bs:be], dtype=torch.float32, device=device
+                    forcing_profiles_np[start:end], dtype=torch.float32, device=device
                 )
                 self.func.set_forcing(t_span, f_batch)
-                pred = self._odeint(y_batch, t_short)[-1]  # (batch, n_state)
-                preds[bs:be] = pred.cpu().numpy()
+                preds[start:end] = self._odeint(y_batch, t_short)[-1].cpu().numpy()
 
         return preds
 
-    def _plot_stepwise_importance_bar(
-        self,
-        mean_pct,
-        sem_pct,
-        all_feature_names,
-        feature_types,
-        target_names,
-        num_runs,
-    ):
-        """Time-averaged bar chart: % importance with SEM, sorted descending."""
+    # ── Predict / optimiser ──────────────────────────────────────────────────
 
-        n_features = len(all_feature_names)
-        base_colors = [
-            "#2196F3" if ft == "Forcing" else "#FF9800" for ft in feature_types
-        ]
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        target_pred, target_true = self._forward_batch(batch)
+        return {
+            "pred": target_pred.squeeze(-1).cpu(),
+            "true": target_true.squeeze(-1).cpu(),
+        }
 
-        for k, tname in enumerate(target_names):
-            order = np.argsort(mean_pct[:, k])[::-1]
-            sorted_means = mean_pct[order, k]
-            sorted_sems = sem_pct[order, k]
-            sorted_names = [all_feature_names[i] for i in order]
-            sorted_colors = [base_colors[i] for i in order]
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=self.cfg.train.learning_rate,
+            weight_decay=self.cfg.train.weight_decay,
+        )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=0.5,
+            patience=self.cfg.train.lr_scheduler_patience,
+        )
 
-            fig, ax = plt.subplots(figsize=(max(8, n_features * 0.9), 5))
-            ax.bar(
-                range(n_features),
-                sorted_means,
-                yerr=sorted_sems,
-                color=sorted_colors,
-                capsize=4,
-                edgecolor="gray",
-                linewidth=0.5,
-            )
+        logger.info(
+            f"Optimizer: AdamW | LR: {self.cfg.train.learning_rate} | "
+            f"Weight Decay: {self.cfg.train.weight_decay}"
+        )
+        logger.info(
+            f"Scheduler: ReduceLROnPlateau | "
+            f"Patience: {self.cfg.train.lr_scheduler_patience} | Factor: 0.5"
+        )
 
-            y_top = float((sorted_means + sorted_sems).max()) if n_features else 1.0
-            for i, (m, s) in enumerate(zip(sorted_means, sorted_sems)):
-                ax.text(
-                    i,
-                    m + s + y_top * 0.02,
-                    f"{m:.1f}±{s:.1f}",
-                    ha="center",
-                    va="bottom",
-                    fontsize=8,
-                )
-
-            ax.set_xticks(range(n_features))
-            ax.set_xticklabels(sorted_names, rotation=45, ha="right", fontsize=9)
-            ax.set_ylabel("MAE Importance [%]", fontsize=12)
-            ax.set_title(
-                f"Per-step teacher-forced importance — target: {tname}\n"
-                f"(time-averaged mean ± SEM, {num_runs} runs)",
-                fontsize=11,
-            )
-            ax.legend(
-                handles=[
-                    Patch(facecolor="#2196F3", label="Forcing input"),
-                    Patch(facecolor="#FF9800", label="Isotope state"),
-                ],
-                fontsize=9,
-            )
-            ax.grid(True, alpha=0.3, axis="y")
-            ax.set_ylim(0, y_top * 1.20 if y_top > 0 else 1.0)
-
-            output_dir = os.path.join(self.result_dir, tname)
-            os.makedirs(output_dir, exist_ok=True)
-            plt.tight_layout()
-            plt.savefig(
-                os.path.join(output_dir, "stepwise_importance_bar.png"),
-                dpi=150,
-                bbox_inches="tight",
-            )
-            plt.close()
-
-    def _plot_stepwise_importance_over_time(
-        self, mean_by_time, t_fractions, all_feature_names, feature_types, target_names
-    ):
-        """
-        Line plot: importance of each feature as a function of normalised time.
-        Two panels per target — forcings (left) and isotope states (right).
-        This is the key plot: isotopes that start at 0 should show rising
-        importance curves as concentrations build up during burnup.
-        """
-
-        forcing_idx = [j for j, ft in enumerate(feature_types) if ft == "Forcing"]
-        state_idx = [j for j, ft in enumerate(feature_types) if ft == "State"]
-
-        for k, tname in enumerate(target_names):
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-
-            for j in forcing_idx:
-                ax1.plot(
-                    t_fractions,
-                    mean_by_time[:, j, k],
-                    label=all_feature_names[j],
-                    linewidth=1.8,
-                )
-            ax1.set_xlabel("Normalised time", fontsize=11)
-            ax1.set_ylabel("Mean ΔMAE per step", fontsize=11)
-            ax1.set_title("Forcing importance over time", fontsize=11)
-            ax1.legend(fontsize=9)
-            ax1.grid(True, alpha=0.3)
-
-            for j in state_idx:
-                ax2.plot(
-                    t_fractions,
-                    mean_by_time[:, j, k],
-                    label=all_feature_names[j],
-                    linewidth=1.8,
-                )
-            ax2.set_xlabel("Normalised time", fontsize=11)
-            ax2.set_ylabel("Mean ΔMAE per step", fontsize=11)
-            ax2.set_title("Isotope state importance over time", fontsize=11)
-            ax2.legend(fontsize=9)
-            ax2.grid(True, alpha=0.3)
-
-            fig.suptitle(
-                f"Per-step importance evolution — target: {tname}",
-                fontsize=12,
-                fontweight="bold",
-            )
-            plt.tight_layout()
-
-            output_dir = os.path.join(self.result_dir, tname)
-            os.makedirs(output_dir, exist_ok=True)
-            plt.savefig(
-                os.path.join(output_dir, "stepwise_importance_over_time.png"),
-                dpi=150,
-                bbox_inches="tight",
-            )
-            plt.close()
-            logger.info(f"  ✓ Stepwise importance plots saved: {output_dir}")
+        return [optimizer], [{"scheduler": scheduler, "monitor": "val_loss"}]

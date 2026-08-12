@@ -1,18 +1,19 @@
-from loguru import logger
 import lightning as L
 import numpy as np
 import torch
+from loguru import logger
 from torch.utils.data import DataLoader
 
-# Local Imports
+import nuclear_surrogates.datamodule.data_scalers as data_scalers
 import nuclear_surrogates.datamodule.dataset_helper as data_help
 import nuclear_surrogates.utils.plot as plot
-import nuclear_surrogates.datamodule.data_scalers as data_scalers
 from nuclear_surrogates.datamodule.preprocessor import Preprocessor
 from nuclear_surrogates.utils.paths import result_dir
 
 
 class DNN_Datamodule(L.LightningDataModule):
+    """Serves (state_t -> state_t+1) pairs, split 80/10/10 by whole runs."""
+
     def __init__(self, cfg_object):
         super().__init__()
 
@@ -33,21 +34,17 @@ class DNN_Datamodule(L.LightningDataModule):
         self.preprocessor = None
         self.make_plots = cfg_object.runtime.get("plots", True)
 
-        # `modes.inference` sets this; the DNN has no inference branch, so it
-        # must fail loudly rather than quietly testing on the training file's
-        # own split and reporting it as a cross-dataset number (AUDIT.md §A3).
+        # `modes.inference` sets this; setup() then refuses to run, because the
+        # DNN has no inference branch.
         self.inference_mode = False
 
-        # Get the inputs and target dictionaries that include their respective scaling
         self.inputs = data_scalers.create_scaler_dict(cfg_object.dataset["inputs"])
         self.target = data_scalers.create_scaler_dict(cfg_object.dataset["targets"])
         self.delta_conc = cfg_object.dataset.target_delta_conc
         self.train_drop_last = cfg_object.train.drop_last
 
-        # === Result output directory === #
         self.result_dir = result_dir(cfg_object)
-
-        # Private variable to ensure set up is not done twice when calling training and test scripts back to back
+        # Guards against setting up twice when training and testing back to back.
         self._has_setup = False
 
     def setup(self, stage):
@@ -57,31 +54,26 @@ class DNN_Datamodule(L.LightningDataModule):
 
         if self.inference_mode:
             raise NotImplementedError(
-                "DNN inference mode is not implemented. `modes.inference` sets "
-                "inference_mode, but this datamodule has no branch for it, so it "
-                "would silently evaluate the TRAINING file's own test split — a "
-                "cross-dataset claim made that way would be false (AUDIT.md §A3). "
-                "Use runtime.model=NODE for inference, or implement the branch "
-                "mirroring NODE_Datamodule._setup_inference."
+                "DNN inference mode is not implemented. Without a branch here it "
+                "would silently evaluate the TRAINING file's own test split, so a "
+                "cross-dataset claim made that way would be false. Use "
+                "runtime.model=NODE, or implement the branch mirroring "
+                "NODE_Datamodule._setup_inference."
             )
 
         logger.info("Setting up the data module...")
 
-        # Obtain the df, the run length and the actualy time data such that we can plot
         data_df, self.run_length, self.time_array = data_help.read_data(
             self.path_to_data, self.fraction_of_data, drop_run_label=True
         )
         data_help.print_dataset_stats(data_df)
 
-        # Preserve order: inputs first, then targets (no duplicates)
+        # Inputs first, then any target that is not also an input.
         all_columns = list(self.inputs.keys()) + [
-            k for k in self.target.keys() if k not in self.inputs.keys()
+            k for k in self.target if k not in self.inputs
         ]
+        data_df = data_df.select(all_columns)
 
-        # Get the columns we are interested in this analysis
-        data_df = data_help.filter_columns(data_df, all_columns)
-
-        # Get the array and dictionary for inputs and output
         self.input_data_arr, self.col_index_map = data_help.split_df(
             data_df, self.inputs.keys()
         )
@@ -98,7 +90,11 @@ class DNN_Datamodule(L.LightningDataModule):
             self.delta_conc,
         )
 
-        # Split data 80/10/10 -- Train/validation/Test, this is Time aware
+        # One (t -> t+1) pair per timestep except the last of each run, which has
+        # no successor inside the run.
+        self.samples_per_run = self.run_length - 1
+
+        # Split 80/10/10 by whole runs, sequentially in time.
         X_train, X_val, X_test, y_train, y_val, y_test, split_info = (
             data_help.timeseries_train_val_test_split(
                 X,
@@ -106,7 +102,7 @@ class DNN_Datamodule(L.LightningDataModule):
                 train_frac=0.8,
                 val_frac=0.1,
                 test_frac=0.1,
-                steps_per_run=100,
+                steps_per_run=self.samples_per_run,
                 shuffle_within_train=True,
                 rng=np.random.default_rng(self.seed),
             )
@@ -115,15 +111,7 @@ class DNN_Datamodule(L.LightningDataModule):
         data_help.write_split_indices(self.result_dir, split_info, self.seed)
 
         if self.make_plots:
-            plot.plot_data_distributions(
-                X_train, self.col_index_map, save_dir=self.result_dir, name="Raw_Inputs"
-            )
-            plot.plot_data_distributions(
-                y_train,
-                self.target_index_map,
-                save_dir=self.result_dir,
-                name="Raw_Targets",
-            )
+            self._plot_distributions(X_train, y_train, "Raw")
 
         # Fit (or load) the scalers, then apply them. Fitting happens on the
         # training split only — val/test are transform-only.
@@ -165,20 +153,8 @@ class DNN_Datamodule(L.LightningDataModule):
         self.Y_test = y_test
 
         if self.make_plots:
-            plot.plot_data_distributions(
-                X_train,
-                self.col_index_map,
-                save_dir=self.result_dir,
-                name="Scaled_Inputs",
-            )
-            plot.plot_data_distributions(
-                y_train,
-                self.target_index_map,
-                save_dir=self.result_dir,
-                name="Scaled_Targets",
-            )
+            self._plot_distributions(X_train, y_train, "Scaled")
 
-        # Create tensor datasets and log their sizes
         self.train_dataset, self.val_dataset, self.test_dataset = (
             data_help.create_tensor_datasets(
                 X_train, X_val, X_test, y_train, y_val, y_test
@@ -187,6 +163,20 @@ class DNN_Datamodule(L.LightningDataModule):
         logger.info(f"Training dataset size: {len(y_train)}")
         logger.info(f"Validation dataset size: {len(y_val)}")
         logger.info(f"Test dataset size: {len(y_test)}")
+
+    def _plot_distributions(self, inputs, targets, prefix):
+        plot.plot_data_distributions(
+            inputs,
+            self.col_index_map,
+            save_dir=self.result_dir,
+            name=f"{prefix}_Inputs",
+        )
+        plot.plot_data_distributions(
+            targets,
+            self.target_index_map,
+            save_dir=self.result_dir,
+            name=f"{prefix}_Targets",
+        )
 
     def train_dataloader(self):
         return DataLoader(

@@ -19,7 +19,9 @@ The training and testing of the model is controlled by a .yaml file which the us
 
 - **`inputs`**: `dictionary`
   - Contains the columns to include as the inputs to the model, and their specific scaling
-  - The possible scalers are:  MinMax, Standard, Robust, MaxAbs, Normalizer, Quantile, Power and None if no scaling should be applied. 
+  - The possible scalers are: MinMax, Standard, Robust, MaxAbs, Normalizer,
+    Quantile, Power, and None if no scaling should be applied. Any other value
+    raises, rather than silently leaving the column unscaled.
   ```yaml
     power_W_g: "MinMax"
     U238: "robust"
@@ -64,11 +66,12 @@ The training and testing of the model is controlled by a .yaml file which the us
 
 - **`activation`**: `string`
   - Activation function for hidden layers
-  - **Options**: `"relu"`, `"tanh"`, `"sigmoid"`, `"leaky_relu"`, `"elu"`, `"gelu"`
+  - **Options**: `"relu"`, `"tanh"`, `"sigmoid"`, `"leaky_relu"`, `"elu"`,
+    `"gelu"`, `"selu"`, `"softplus"`, `"none"`
+  - Any other value raises, rather than silently substituting a default
 
 - **`output_activation`**: `string`
-  - Activation function for output layer
-  - **Options**: `"none"`, `"sigmoid"`, `"tanh"`, `"softplus"`
+  - Activation function for output layer, from the same set as `activation`
   - Use `"none"` for regression tasks
 
 - **`residual_connections`**: `boolean`

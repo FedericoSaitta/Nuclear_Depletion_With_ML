@@ -5,7 +5,7 @@ frozen checkpoint, the 10-run mini dataset, and the fitted scalers distilled out
 of the training file by `make_golden.py`. Nothing here opens the 542 MB training
 dataset; that dependency is what used to make this whole module skip.
 
-Tolerances (rationale in AUDIT.md §D): CPU float32 dopri5 trajectories get
+Tolerances: CPU float32 dopri5 trajectories get
 atol=1e-6/rtol=1e-5 — enough headroom to survive operation reordering from a
 refactor, tight enough to catch a real change. Scalar metrics get rtol=1e-4.
 Loosen these only deliberately, never to make a red test green.
@@ -16,7 +16,6 @@ import os
 
 import numpy as np
 import pytest
-
 from golden_setup import FIX, build_inference_cfg, fixtures_present, matrix_probes
 from golden_setup import run_inference as _run_inference
 

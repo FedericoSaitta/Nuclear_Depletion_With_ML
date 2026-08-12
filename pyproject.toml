@@ -136,6 +136,12 @@ torch = [
 target-version = "py312"
 extend-exclude = ["notebooks"]   # learning-journey scripts, not library code
 
+[tool.ruff.lint]
+# Beyond the default (E4/E7/E9/F): import order, modern idioms, likely bugs, and
+# the comprehension/return simplifications. ARG is deliberately absent — it
+# flags Lightning's required hook signatures, which cannot be changed.
+extend-select = ["I", "UP", "B", "SIM", "C4", "RET"]
+
 [tool.ruff.lint.per-file-ignores]
 # E402 (import not at top of file) is load-bearing in the datagen entry points:
 # they must parse argv and set OMP_NUM_THREADS *before* `import openmc`, which
@@ -144,6 +150,12 @@ extend-exclude = ["notebooks"]   # learning-journey scripts, not library code
 "data_generation/datagen.py" = ["E402"]
 "data_generation/quarter_datagen.py" = ["E402"]
 "data_generation/zoom_datagen.py" = ["E402"]
+
+# The OpenMC half is held to the default rule set only. It cannot be imported —
+# let alone exercised — from the ML environment, so a stylistic auto-fix there
+# would be an unverifiable change to code that produced published data.
+"data_generation/**" = ["I", "UP", "B", "SIM", "C4", "RET"]
+"util/**" = ["I", "UP", "B", "SIM", "C4", "RET"]
 
 # ============================================================================
 [tool.pytest.ini_options]

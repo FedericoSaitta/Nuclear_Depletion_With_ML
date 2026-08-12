@@ -5,10 +5,9 @@ hit repeatedly: a config that looks complete, is committed, and then dies on
 first use because a key the code dereferences is absent — or worse, *runs* with
 a silently substituted default.
 
-Two of the traps here are the silent fallbacks AUDIT.md flags: `get_scaler`
-returns a NoOpScaler for an unrecognised name and `get_activation` returns ReLU,
-each logging an error and carrying on. A typo in a scaler name therefore trains
-a model on unscaled data and reports it as a result.
+`get_scaler` and `get_activation` now reject an unrecognised name, so a typo
+fails at construction rather than training a model on unscaled data. These tests
+catch the same typo earlier still — before a config is committed.
 """
 
 import os
@@ -99,8 +98,11 @@ def test_required_keys_present(name):
 
 @pytest.mark.parametrize("name", CONFIG_FILES)
 def test_enumerated_values_are_recognised(name):
-    """Guards the silent fallbacks: an unknown scaler or activation does not
-    raise, it substitutes a default and logs. That must not reach a config."""
+    """An unrecognised scaler, activation or loss must not reach a config.
+
+    The registries reject one at construction; catching it here says which key
+    of which file is wrong instead of failing partway into a run.
+    """
     cfg = load(name)
 
     assert cfg["runtime"]["mode"] in VALID_MODES
@@ -113,8 +115,7 @@ def test_enumerated_values_are_recognised(name):
         for column, scaler in cfg["dataset"][side].items():
             assert str(scaler).lower() in VALID_SCALERS, (
                 f"{name}: {side}.{column} uses scaler {scaler!r}, which "
-                f"get_scaler does not recognise — it would silently become a "
-                f"NoOpScaler and the column would go unscaled"
+                f"get_scaler does not recognise"
             )
 
 

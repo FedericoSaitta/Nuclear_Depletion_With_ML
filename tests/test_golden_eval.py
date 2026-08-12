@@ -3,7 +3,7 @@
 `test_golden.py` pins the model's forward pass. This pins what is computed
 *from* it: the teacher-forced rollout, the error-growth curves, and the MARE
 comparison. Those are the numbers in the manuscript, and they are produced by
-the ~1,100 lines of analysis code inside `neural_ode.py` that AUDIT.md issue 11
+the analysis code that was extracted out of `neural_ode.py`, which
 proposes extracting — which is exactly the refactor these tests exist to make
 safe.
 
@@ -17,7 +17,6 @@ import os
 
 import numpy as np
 import pytest
-
 from golden_setup import FIX, fixtures_present
 
 GOLDEN_TF = os.path.join(FIX, "golden_node_tf_preds.npy")
@@ -118,7 +117,7 @@ COMPOUNDING = ("U238", "Pu240", "Pu241", "Pu242")
 # sampled point, so their concentration is slaved to the local capture rate
 # rather than to the trajectory's history — feeding predictions back in cannot
 # accumulate error for them. Pu239, the first long-lived member, is buffered by
-# the same effect. This is the identifiability limit AUDIT.md §B3 describes,
+# the same effect. This is the identifiability limit AUDIT.md P3 describes,
 # stated here as a test rather than a caveat in prose.
 EQUILIBRIUM_BUFFERED = ("U239", "Np239", "Pu239")
 

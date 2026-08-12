@@ -160,20 +160,33 @@ def test_column_wise_scaler_rejects_wrong_width():
 def test_matches_the_column_transformer_it_replaces():
     """ColumnWiseScaler stands in for sklearn's ColumnTransformer. Equivalence
     is what kept the existing golden values byte-identical through the swap."""
+    from sklearn.compose import ColumnTransformer
+
     rng = np.random.default_rng(0)
     data = rng.random((128, 3)) * [1.0, 1e-3, 1e6]
 
-    index_map = {"a": 0, "b": 1, "c": 2}
-    reference = data_scalers.create_column_transformer(
-        {n: data_scalers.get_scaler("minmax") for n in index_map}, index_map
+    reference = ColumnTransformer(
+        [
+            (name, data_scalers.get_scaler("minmax"), [i])
+            for i, name in enumerate("abc")
+        ],
+        sparse_threshold=0,
     ).fit(data)
     ours = ColumnWiseScaler(
         ["a", "b", "c"], [data_scalers.get_scaler("minmax") for _ in range(3)]
     ).fit(data)
 
     np.testing.assert_array_equal(reference.transform(data), ours.transform(data))
+
+    # ColumnTransformer has no inverse_transform, so invert column by column —
+    # which is precisely the indirection ColumnWiseScaler removes.
+    scaled = reference.transform(data)
+    reference_inverse = np.hstack(
+        [
+            fitted.inverse_transform(scaled[:, [i]])
+            for i, (_, fitted, _) in enumerate(reference.transformers_)
+        ]
+    )
     np.testing.assert_allclose(
-        data_scalers.inverse_transformer(reference, reference.transform(data)),
-        ours.inverse_transform(ours.transform(data)),
-        atol=1e-12,
+        reference_inverse, ours.inverse_transform(ours.transform(data)), atol=1e-12
     )

@@ -21,7 +21,13 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from test_training import CONFIGS, GOLDEN_TRAIN, epoch_losses, load_cfg, train  # noqa: E402
+from test_training import (  # noqa: E402
+    CONFIGS,
+    GOLDEN_TRAIN,
+    epoch_losses,
+    load_cfg,
+    train,
+)
 
 
 def main():
@@ -47,7 +53,7 @@ def main():
             model, _, _ = train(load_cfg(kind, Path(tmp) / kind, **{"runtime.seed": 0}))
             losses = epoch_losses(model)
             payload[kind] = {"train_losses": losses}
-            print(f"{kind}: {['%.6g' % x for x in losses]}")
+            print(f"{kind}: {[f'{x:.6g}' for x in losses]}")
 
     with open(GOLDEN_TRAIN, "w") as f:
         json.dump(payload, f, indent=2)

@@ -1,10 +1,5 @@
 """A model bundle: everything needed to reuse a trained model, in one directory.
 
-A `.ckpt` is half a model — the other half is the fitted scalers and the config
-that shaped them. Shipping only weights is what forced every reload to re-derive
-the scalers from a 542 MB HDF5, and what made the golden regression tests
-un-runnable anywhere but the author's machine.
-
     bundles/<run_id>/
     ├── weights.ckpt          Lightning checkpoint
     ├── preprocessor.json     fitted scalers, PLAIN TEXT (source of truth)
@@ -14,7 +9,7 @@ un-runnable anywhere but the author's machine.
     └── metadata.json         git sha, seed, dataset sha256, library versions
 
 `metadata.json` is what lets a number be traced back to the weights that
-produced it six months later (AUDIT.md §6.1).
+produced it six months later.
 """
 
 from __future__ import annotations
@@ -26,7 +21,7 @@ import platform
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from loguru import logger
 from omegaconf import OmegaConf
@@ -101,7 +96,7 @@ def write_bundle(
     dirty = _git("status", "--porcelain")
     metadata = {
         "bundle_version": BUNDLE_VERSION,
-        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "created_utc": datetime.now(UTC).isoformat(),
         "model_name": cfg.model.get("name"),
         "model_kind": cfg.runtime.get("model"),
         "seed": cfg.runtime.get("seed"),

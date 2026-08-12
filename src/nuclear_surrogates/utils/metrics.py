@@ -1,12 +1,11 @@
-# Functions to calculate metrics and probe the performance of ML models
+"""Metrics, permutation importance, and the DNN autoregressive rollout."""
+
 import numpy as np
 import torch
 from loguru import logger
 from tqdm import tqdm
 
-import nuclear_surrogates.datamodule.data_scalers as data_scaler
 from nuclear_surrogates.datamodule.dataset_helper import ensure_2d
-
 
 # ── Metric helpers ───────────────────────────────────────────────────────────
 
@@ -51,7 +50,12 @@ def r2(y_true, y_pred):
 
 
 def mare(y_true, y_pred):
-    """Max-Absolute-Range Error (scalar)."""
+    """Mean absolute error normalised by the largest |truth| (scalar).
+
+    Despite the name this is NOT mean absolute *relative* error: it divides by a
+    single global maximum, not per-sample. Published numbers depend on it, so
+    the definition must not drift — see AUDIT.md.
+    """
     y_true, y_pred = np.asarray(y_true), np.asarray(y_pred)
     max_abs = np.max(np.abs(y_true))
     result = np.mean(np.abs(y_true - y_pred) / max_abs) if max_abs > 0 else float("nan")
@@ -63,7 +67,7 @@ def mare(y_true, y_pred):
 
 def _collect_loader(loader):
     """Concatenate all batches from a DataLoader into numpy arrays."""
-    xs, ys = zip(*[(x.numpy(), y.numpy()) for x, y in loader])
+    xs, ys = zip(*[(x.numpy(), y.numpy()) for x, y in loader], strict=False)
     return np.concatenate(xs), ensure_2d(np.concatenate(ys))
 
 
@@ -81,7 +85,7 @@ def get_model_prediction(model, x_input, y_scaler):
 
     model.eval()
     pred_scaled = _predict_numpy(model, x_input, device)
-    return data_scaler.inverse_transformer(y_scaler, pred_scaled)
+    return y_scaler.inverse_transform(pred_scaled)
 
 
 # ── Feature importance (permutation-based) ───────────────────────────────────
@@ -99,7 +103,7 @@ def calculate_feature_importance(
     test_loader,
     device,
     n_repeats=10,
-    metric={"name": "r2", "direction": "increasing"},
+    metric=None,
     output_idx=None,
     seed=0,
 ):
@@ -108,6 +112,8 @@ def calculate_feature_importance(
     *seed* fixes the permutations so the importance figures are reproducible
     across re-runs; previously they changed on every invocation.
     """
+    if metric is None:
+        metric = {"name": "r2", "direction": "increasing"}
     rng = np.random.default_rng(seed)
     X_test, y_test = _collect_loader(test_loader)
 
@@ -175,13 +181,13 @@ def model_autoregress(
 ):
     # Work on a copy: the rollout feeds predictions back into the next
     # timestep's inputs, and the caller reuses this same array afterwards for
-    # the comparison and error-growth figures (AUDIT Pass 2 §A8).
+    # the comparison and error-growth figures.
     X_data = np.array(X_data, copy=True)
 
     total_samples = len(X_data)
     n_runs = total_samples // steps_per_run
 
-    unscaled_x = data_scaler.inverse_transformer(x_scaler, X_data)
+    unscaled_x = x_scaler.inverse_transform(X_data)
     target_names = list(target_col_indices.keys())
 
     logger.info(f"Autoregressive: {n_runs} runs × {steps_per_run} steps")
@@ -196,9 +202,7 @@ def model_autoregress(
         # Initialise concentrations for delta mode
         concentrations = {}
         if delta_conc:
-            init_x = data_scaler.inverse_transformer(
-                x_scaler, X_data[start].reshape(1, -1)
-            )[0]
+            init_x = x_scaler.inverse_transform(X_data[start].reshape(1, -1))[0]
             concentrations = {
                 name: init_x[inputs_indices[name]]
                 for name in target_names
@@ -207,7 +211,7 @@ def model_autoregress(
 
         for t in range(start, end):
             pred = get_model_prediction(model, X_data[t], y_scaler)
-            gt = data_scaler.inverse_transformer(y_scaler, Y_data[t].reshape(1, -1))
+            gt = y_scaler.inverse_transform(Y_data[t].reshape(1, -1))
 
             for name, idx in target_col_indices.items():
                 predictions_dict[name].append(pred[0, idx])

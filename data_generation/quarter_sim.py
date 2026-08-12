@@ -7,7 +7,7 @@ No boron — water is pure H2O with S(α,β) thermal scattering.
 Tally coverage for the 7-isotope uncertainty analysis
 -----------------------------------------------------
 The depletion uncertainty analysis (uncertainty_analysis.py — NOT in this
-repository; it lives on the cluster, see AUDIT.md §C6) reconstructs the
+repository; it lives on the cluster, see AUDIT.md P12) reconstructs the
 7x7 Bateman matrix for the chain:
 
     U238 --(n,γ)--> U239 --(β⁻)--> Np239 --(β⁻)--> Pu239

@@ -8,7 +8,7 @@ Two tiers, deliberately separated:
 * **Contract and determinism** (unmarked): no pinned numbers, so they never go
   stale across a torch, BLAS or OS change and never need regenerating. These are
   the higher-value tier — `test_same_seed_gives_the_same_split` is what stops
-  the unseeded-split class of bug (AUDIT.md §A1) from returning.
+  the unseeded-split class of bug from returning.
 * **Pinned trajectory** (`@pytest.mark.golden_train`): catches numerical drift a
   contract test cannot see, but is only reproducible on a fixed runner image, so
   CI runs it in its own Linux-only job.
@@ -99,7 +99,7 @@ def train(cfg, max_epochs=None):
 
 @pytest.mark.parametrize("kind", ["DNN", "NODE"])
 def test_same_seed_gives_the_same_split(kind, tmp_path):
-    """The guard against AUDIT.md §A1.
+    """The guard against an unseeded split.
 
     The published NODE's test set was drawn by an unseeded permutation, so the
     runs it was evaluated on are unknowable and ~60% of them had been trained
@@ -134,7 +134,7 @@ def test_same_seed_gives_the_same_initial_weights(kind, tmp_path):
     first, _ = build(load_cfg(kind, tmp_path / "a", **{"runtime.seed": 3}))
     second, _ = build(load_cfg(kind, tmp_path / "b", **{"runtime.seed": 3}))
     for (name, p), (_, q) in zip(
-        first.state_dict().items(), second.state_dict().items()
+        first.state_dict().items(), second.state_dict().items(), strict=False
     ):
         torch.testing.assert_close(p, q, msg=f"{name} differs at equal seed")
 
@@ -145,7 +145,9 @@ def test_different_seeds_give_different_initial_weights(kind, tmp_path):
     second, _ = build(load_cfg(kind, tmp_path / "b", **{"runtime.seed": 4}))
     assert any(
         not torch.equal(p, q)
-        for p, q in zip(first.state_dict().values(), second.state_dict().values())
+        for p, q in zip(
+            first.state_dict().values(), second.state_dict().values(), strict=False
+        )
     )
 
 
@@ -219,7 +221,7 @@ def test_scalers_are_fit_on_the_training_split_only(kind, tmp_path, monkeypatch)
     assert held_out, "no held-out runs — the fixture is too small to test leakage"
 
     perturbed, _ = scaler_params(perturb_runs=held_out)
-    for column, (a, b) in enumerate(zip(baseline, perturbed)):
+    for column, (a, b) in enumerate(zip(baseline, perturbed, strict=False)):
         np.testing.assert_allclose(
             a,
             b,
@@ -235,7 +237,7 @@ def test_scalers_are_fit_on_the_training_split_only(kind, tmp_path, monkeypatch)
     # pass and we would believe we had checked for leakage.
     moved, _ = scaler_params(perturb_runs=list(split["train"]))
     assert any(
-        not np.allclose(a, b) for a, b in zip(baseline, moved)
+        not np.allclose(a, b) for a, b in zip(baseline, moved, strict=False)
     ), "perturbing the training runs changed nothing — the test is not testing anything"
 
 
@@ -266,7 +268,7 @@ def test_checkpoint_round_trips(kind, tmp_path):
     restored = load_checkpoint_into_model(model_cls(cfg), str(ckpt))
 
     for (name, a), (_, b) in zip(
-        model.state_dict().items(), restored.state_dict().items()
+        model.state_dict().items(), restored.state_dict().items(), strict=False
     ):
         torch.testing.assert_close(a, b, msg=f"{name} changed across save/load")
 
@@ -295,11 +297,62 @@ def test_run_writes_split_indices_and_a_bundle(tmp_path):
 
 def test_dnn_inference_mode_fails_loudly(tmp_path):
     """The DNN has no inference branch. It must raise rather than quietly
-    evaluate the training file's own test split (AUDIT.md §A3)."""
+    evaluate the training file's own test split."""
     _, dm = build(load_cfg("DNN", tmp_path))
     dm.inference_mode = True
     with pytest.raises(NotImplementedError, match="DNN inference mode"):
         dm.setup(stage="test")
+
+
+# ── evaluation epoch ─────────────────────────────────────────────────────────
+
+
+def test_dnn_test_epoch_reports_and_plots_every_target(tmp_path):
+    """Drive `DNN_Model.on_test_epoch_end` end to end.
+
+    The rest of this module stops at `trainer.fit`, so without this nothing
+    exercises the autoregressive rollout, the delta -> absolute conversion or
+    any of the evaluation figures. `smoke_dnn.yaml` sets `target_delta_conc`,
+    which is the branch that carries the conversion.
+    """
+    import lightning as L
+
+    cfg = load_cfg("DNN", tmp_path, **{"train.num_epochs": 1})
+    model, dm, _ = train(cfg)
+
+    trainer = L.Trainer(
+        accelerator="cpu",
+        logger=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+    )
+    reported = trainer.test(model, datamodule=dm)[0]
+
+    for key in (
+        "Mean Absolute Error (avg)",
+        "Root Mean Squared Error (avg)",
+        "R-squared coefficient (avg)",
+    ):
+        assert np.isfinite(reported[key]), f"{key} is not finite: {reported[key]}"
+
+    result_dir = os.path.join(str(tmp_path / "results"), cfg.model.name)
+    for target in cfg.dataset.targets:
+        for metric in ("MARE_TeacherForcing", "MARE_Autoregressive"):
+            value = reported[f"{target}/{metric}"]
+            assert np.isfinite(value), f"{target}/{metric} is not finite: {value}"
+
+        target_dir = os.path.join(result_dir, target)
+        for figure in (
+            "predictions_vs_actual.png",
+            "residuals_combined.png",
+            f"{target}_prediction_comparison.png",
+            f"{target}_MAE_growth_linear.png",
+            f"{target}_MALE_growth_log.png",
+            "r2_score_importance.png",
+        ):
+            assert os.path.exists(
+                os.path.join(target_dir, figure)
+            ), f"{target}: {figure} was not written"
 
 
 # ── pinned trajectory ────────────────────────────────────────────────────────

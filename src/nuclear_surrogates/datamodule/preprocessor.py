@@ -1,32 +1,17 @@
 """Fitted preprocessing state, saved next to the weights.
 
-A checkpoint on its own is half a model. The other half is the fitted scalers,
-which until now were re-derived from the raw training file every time a model
-was loaded. Two consequences, both real:
+A checkpoint on its own is half a model; the other half is the fitted scalers.
+Persisting them is what lets a published checkpoint be served or evaluated
+without the training dataset, and what stops inference from re-fitting on a
+different set than training used.
 
-* a published checkpoint could not be used without the 542 MB training HDF5, so
-  the golden regression tests skipped everywhere except the author's machine;
-* inference re-fit the scalers on a *different* set than training had used
-  (`AUDIT.md` §3.3), so a served model silently worked in a different unit
-  system than the one it was optimised in.
+`save` writes `preprocessor.json` and `preprocessor.joblib`. **The JSON is the
+source of truth**: scikit-learn does not guarantee a pickled estimator unpickles
+across minor versions, and unpickling is arbitrary code execution. The joblib is
+a convenience copy that `tests/test_preprocessor.py` checks against it.
 
-`Preprocessor.save` writes both `preprocessor.json` and `preprocessor.joblib`.
-**The JSON is the source of truth.** scikit-learn does not guarantee that a
-pickled estimator unpickles across minor versions, and unpickling is arbitrary
-code execution — a reviewer is right to refuse to load one. The joblib is a
-convenience copy; `tests/test_preprocessor.py` asserts the two agree.
-
-Reconstruction deliberately does *not* rebuild a `ColumnTransformer`. Restoring
-one from JSON means hand-setting private fitted state (`transformers_`,
-`output_indices_`, …) that scikit-learn is free to change. Every transformer
-this project builds operates on exactly one column
-(`data_scalers.create_column_transformer`), so a plain list of per-column
-estimators is both simpler and exactly equivalent.
-
-Note on ``t_days``: the value *recorded* here is the one the run actually used,
-which for historical runs is the hardcoded 1000 rather than the data's true
-990-day span. Both are stored so the discrepancy is visible; correcting the
-figures that consume it is `AUDIT.md` §B1 and is deliberately not done here.
+Both the ``t_days`` a run actually used and the data's true span are recorded,
+because historical runs hardcoded 1000 days against 990 days of data.
 """
 
 from __future__ import annotations
@@ -74,9 +59,9 @@ def _jsonify(value):
     """Convert numpy scalars/arrays to JSON-native types."""
     if isinstance(value, np.ndarray):
         return value.tolist()
-    if isinstance(value, (np.integer,)):
+    if isinstance(value, np.integer):
         return int(value)
-    if isinstance(value, (np.floating,)):
+    if isinstance(value, np.floating):
         return float(value)
     return value
 
@@ -126,10 +111,10 @@ def _load_scaler(spec: dict):
 class ColumnWiseScaler:
     """Per-column fitted scalers applied as a single array transform.
 
-    Drop-in for whatever `data_scalers.create_column_transformer` returns: the
-    only surface the rest of the codebase touches is `fit`, `transform` and
-    `inverse_transform` (the latter via `data_scalers.inverse_transformer`,
-    which falls through to it for anything that is not a `ColumnTransformer`).
+    Replaces sklearn's `ColumnTransformer`, which cannot invert itself and whose
+    private fitted state (`transformers_`, `output_indices_`, ...) would have to
+    be hand-restored from JSON. Every transformer here covers exactly one
+    column, so a plain list is both simpler and exactly equivalent.
     """
 
     def __init__(self, names, scalers):
@@ -171,7 +156,7 @@ class ColumnWiseScaler:
 
     def __repr__(self):
         kinds = [type(s).__name__ for s in self.scalers]
-        return f"ColumnWiseScaler({dict(zip(self.names, kinds))})"
+        return f"ColumnWiseScaler({dict(zip(self.names, kinds, strict=False))})"
 
 
 @dataclass
@@ -250,7 +235,7 @@ class Preprocessor:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict) -> "Preprocessor":
+    def from_dict(cls, payload: dict) -> Preprocessor:
         version = payload.get("schema_version")
         if version != SCHEMA_VERSION:
             raise ValueError(
@@ -302,7 +287,7 @@ class Preprocessor:
         return json_path
 
     @classmethod
-    def load(cls, path) -> "Preprocessor":
+    def load(cls, path) -> Preprocessor:
         """Load from a `preprocessor.json`, or from a directory holding one.
 
         Never fits. This is the whole point: the scalers a model is served with
@@ -352,7 +337,8 @@ def _dump_side(scaler: ColumnWiseScaler) -> dict:
     return {
         "order": list(scaler.names),
         "scalers": {
-            name: _dump_scaler(s) for name, s in zip(scaler.names, scaler.scalers)
+            name: _dump_scaler(s)
+            for name, s in zip(scaler.names, scaler.scalers, strict=False)
         },
     }
 

@@ -10,7 +10,6 @@ import torch
 from loguru import logger
 from torch.utils.data import TensorDataset
 
-
 # ── I/O helpers ──────────────────────────────────────────────────────────────
 
 
@@ -119,10 +118,6 @@ def print_dataset_stats(df):
 
 
 # ── Column selection / splitting ─────────────────────────────────────────────
-
-
-def filter_columns(df, columns):
-    return df.select(columns)
 
 
 def split_df(df, keys):
@@ -256,8 +251,8 @@ def timeseries_train_val_test_split(
 def write_split_indices(result_dir_path, split_info, seed):
     """Record which runs went to train/val/test, next to the run's outputs.
 
-    Without this the partition of a finished run is unrecoverable, which is what
-    made the published NODE test metrics unverifiable (AUDIT Pass 2 §A1).
+    Without it the partition of a finished run is unrecoverable, and so is any
+    claim that its test metrics were computed on held-out data.
     """
     path = os.path.join(result_dir_path, "split_indices.json")
     with open(path, "w") as f:

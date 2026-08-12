@@ -1,24 +1,25 @@
-# ML/datamodule/node_datamodule.py
 from dataclasses import dataclass
 from typing import Any
 
-from loguru import logger
 import lightning as L
-from torch.utils.data import DataLoader, TensorDataset
-import torch
 import numpy as np
+import torch
+from loguru import logger
+from torch.utils.data import DataLoader, TensorDataset
 
-import nuclear_surrogates.datamodule.dataset_helper as data_help
 import nuclear_surrogates.datamodule.data_scalers as data_scalers
+import nuclear_surrogates.datamodule.dataset_helper as data_help
 import nuclear_surrogates.utils.plot as plot
 from nuclear_surrogates.datamodule.preprocessor import Preprocessor
 from nuclear_surrogates.utils.paths import result_dir
 
 # The physical span the NODE's normalised time axis is measured against.
 # Historically hardcoded; the data's true span is 990 days, and correcting the
-# figures that consume this is AUDIT.md §B1 — deliberately not done here, so
-# that this change moves no published number.
+# figures that consume this would move published numbers — see AUDIT.md.
 DEFAULT_TRAINING_T_DAYS = 1000.0
+
+TRAIN_FRACTION = 0.6
+VAL_FRACTION = 0.2
 
 
 @dataclass
@@ -45,64 +46,79 @@ def _data_span(traj: _Trajectories) -> float:
     return float(raw_t[-1] - raw_t[0])
 
 
+def _to_trajectory_tensor(input_scaled, target_scaled):
+    """Concatenate forcing and target features into one (runs, steps, features) tensor."""
+    combined = np.concatenate([input_scaled, target_scaled], axis=-1)
+    return torch.tensor(combined, dtype=torch.float32)
+
+
 class NODE_Datamodule(L.LightningDataModule):
-    """
-    DataModule for Neural ODE trajectory training.
+    """Serves whole trajectories rather than (input, target) pairs.
 
-    Key difference from the standard datamodule: instead of serving
-    (input, target) pairs, this serves FULL TRAJECTORIES.
-    Each item in the dataset is one complete run of shape (steps, features).
-    A batch is (batch_size, steps, features).
-
-    Uses separate input_scaler and target_scaler, matching the DNN datamodule.
+    Each item is one complete run of shape (steps, features); a batch is
+    (batch_size, steps, features). Inputs and targets get separate scalers, as
+    in the DNN datamodule.
     """
 
     def __init__(self, cfg_object):
         super().__init__()
+        self.path_to_data = cfg_object.dataset.path_to_data
         self.path_to_inference_data = getattr(
             cfg_object.dataset, "path_to_inference_data", None
         )
         self.inference_mode = False
-        self.path_to_data = cfg_object.dataset.path_to_data
         self.fraction_of_data = cfg_object.dataset.fraction_of_data
 
         # When set, the fitted scalers are LOADED rather than re-derived from
         # path_to_data. This is what lets a checkpoint be evaluated without the
-        # training dataset, and what removes the train/serve skew in inference
-        # mode (AUDIT.md §3.3).
+        # training dataset, and what removes the train/serve skew.
         self.preprocessor_path = cfg_object.dataset.get("preprocessor_path", None)
         self.preprocessor = None
         self.make_plots = cfg_object.runtime.get("plots", True)
 
         self.train_batch_size = cfg_object.dataset.train.batch_size
         self.val_batch_size = cfg_object.dataset.val.batch_size
-
         self.num_workers = cfg_object.runtime.num_workers
 
         # Seeded here rather than relying on the global RNG, so a datamodule
         # constructed outside main() (tests, packaging) splits identically.
         self.seed = cfg_object.runtime.get("seed", 42)
 
-        # Separate scaler configs for inputs and targets (same as DNN)
         self.inputs = data_scalers.create_scaler_dict(cfg_object.dataset["inputs"])
         self.target = data_scalers.create_scaler_dict(cfg_object.dataset["targets"])
 
         self.result_dir = result_dir(cfg_object)
-
         self._has_setup = False
+
+    def setup(self, stage=None):
+        if self._has_setup:
+            return
+        self._has_setup = True
+
+        logger.info("Setting up NODE trajectory data module...")
+
+        all_columns = list(self.inputs.keys()) + [
+            k for k in self.target if k not in self.inputs
+        ]
+
+        if self.inference_mode:
+            self._setup_inference(all_columns)
+        else:
+            self._setup_training(all_columns)
+
+    # ── Reading ──────────────────────────────────────────────────────────────
 
     def _read_trajectories(self, path, fraction, all_columns):
         """Read one file into (runs, steps, features) arrays.
 
         The last row of every run is dropped — it is the NaN end-of-run marker
-        the depletion writer emits. This logic used to exist twice, once per
-        branch of setup() (AUDIT.md Pass 1 §4).
+        the depletion writer emits.
         """
         df, steps_per_run, time_array = data_help.read_data(
             path, fraction, drop_run_label=True
         )
         data_help.print_dataset_stats(df)
-        df = data_help.filter_columns(df, all_columns)
+        df = df.select(all_columns)
 
         input_arr, col_index_map = data_help.split_df(df, self.inputs.keys())
         target_arr, target_index_map = data_help.split_df(df, self.target.keys())
@@ -119,12 +135,8 @@ class NODE_Datamodule(L.LightningDataModule):
 
         actual_steps = steps_per_run - 1
         logger.info(f"Dropped {num_runs} NaN rows, {input_arr.shape[0]} samples remain")
-        assert not np.isnan(
-            input_arr
-        ).any(), "NaNs in input data after dropping last rows!"
-        assert not np.isnan(
-            target_arr
-        ).any(), "NaNs in target data after dropping last rows!"
+        assert not np.isnan(input_arr).any(), "NaNs in input data after dropping!"
+        assert not np.isnan(target_arr).any(), "NaNs in target data after dropping!"
 
         n_in, n_tgt = input_arr.shape[1], target_arr.shape[1]
         logger.info(f"Total trajectories: {num_runs}, each {actual_steps} steps")
@@ -145,14 +157,124 @@ class NODE_Datamodule(L.LightningDataModule):
             time_array=time_array,
         )
 
+    def _adopt(self, traj: _Trajectories):
+        """Copy a file's shape and column layout onto the datamodule."""
+        self.steps_per_run = traj.steps_per_run
+        self.actual_steps = traj.actual_steps
+        self.time_array = traj.time_array
+        self.col_index_map = traj.col_index_map
+        self.target_index_map = traj.target_index_map
+        self.n_input_features = traj.n_input_features
+        self.n_target_features = traj.n_target_features
+
+    def _scale(self, traj: _Trajectories, input_raw, target_raw):
+        """Apply the fitted scalers, preserving the (runs, steps, features) shape."""
+        n = len(input_raw)
+        input_scaled = self.input_scaler.transform(
+            input_raw.reshape(-1, traj.n_input_features)
+        ).reshape(n, traj.actual_steps, traj.n_input_features)
+        target_scaled = self.target_scaler.transform(
+            target_raw.reshape(-1, traj.n_target_features)
+        ).reshape(n, traj.actual_steps, traj.n_target_features)
+        return input_scaled, target_scaled
+
+    # ── Training ─────────────────────────────────────────────────────────────
+
+    def _setup_training(self, all_columns):
+        """Split by run, fit the scalers on the training split, build the datasets."""
+        traj = self._read_trajectories(
+            self.path_to_data, self.fraction_of_data, all_columns
+        )
+        self._adopt(traj)
+
+        if self.make_plots:
+            self._plot_distributions(traj.input_flat, traj.target_flat, "Raw")
+
+        num_runs = traj.num_runs
+        perm = np.random.default_rng(self.seed).permutation(num_runs)
+        input_trajs = traj.input_trajs[perm]
+        target_trajs = traj.target_trajs[perm]
+
+        n_train = int(num_runs * TRAIN_FRACTION)
+        n_val = int(num_runs * VAL_FRACTION)
+
+        # perm[i] is the original run index now sitting at position i, so the
+        # split is recorded in terms of runs as they appear in the source file.
+        self.split_info = {
+            "strategy": "random_by_run",
+            "n_runs": num_runs,
+            "steps_per_run": self.actual_steps,
+            "train": perm[:n_train].tolist(),
+            "val": perm[n_train : n_train + n_val].tolist(),
+            "test": perm[n_train + n_val :].tolist(),
+        }
+        data_help.write_split_indices(self.result_dir, self.split_info, self.seed)
+
+        splits = {
+            "train": (input_trajs[:n_train], target_trajs[:n_train]),
+            "val": (
+                input_trajs[n_train : n_train + n_val],
+                target_trajs[n_train : n_train + n_val],
+            ),
+            "test": (input_trajs[n_train + n_val :], target_trajs[n_train + n_val :]),
+        }
+        logger.info(
+            f"Train: {n_train}, Val: {n_val}, Test: {num_runs - n_train - n_val} runs"
+        )
+
+        # Fitted on the training split only — no leakage from val/test.
+        train_input_raw, train_target_raw = splits["train"]
+        self.preprocessor = Preprocessor.fit(
+            self.inputs,
+            self.target,
+            train_input_raw.reshape(-1, traj.n_input_features),
+            train_target_raw.reshape(-1, traj.n_target_features),
+            self.col_index_map,
+            self.target_index_map,
+            t_days=DEFAULT_TRAINING_T_DAYS,
+            t_days_data_span=_data_span(traj),
+        )
+        self.input_scaler = self.preprocessor.input_scaler
+        self.target_scaler = self.preprocessor.target_scaler
+
+        scaled = {
+            name: self._scale(traj, *raw_pair) for name, raw_pair in splits.items()
+        }
+
+        if self.make_plots:
+            train_input_scaled, train_target_scaled = scaled["train"]
+            self._plot_distributions(
+                train_input_scaled.reshape(-1, traj.n_input_features),
+                train_target_scaled.reshape(-1, traj.n_target_features),
+                "Scaled",
+            )
+
+        datasets = {}
+        for name, (input_scaled, target_scaled) in scaled.items():
+            trajs = _to_trajectory_tensor(input_scaled, target_scaled)
+            assert not torch.isnan(trajs).any(), f"NaNs in {name} trajectories"
+            datasets[name] = TensorDataset(trajs)
+            logger.info(f"{name.capitalize()} dataset size: {len(trajs)} trajectories")
+
+        self.train_dataset = datasets["train"]
+        self.val_dataset = datasets["val"]
+        self.test_dataset = datasets["test"]
+        self.test_trajs = self.test_dataset.tensors[0]
+
+        raw_t = self.time_array[: self.actual_steps]
+        self.t_span = torch.tensor(
+            (raw_t - raw_t[0]) / (raw_t[-1] - raw_t[0]), dtype=torch.float32
+        )
+
+    # ── Inference ────────────────────────────────────────────────────────────
+
     def _setup_inference(self, all_columns):
         """Evaluate a frozen model on `path_to_inference_data`.
 
         With `dataset.preprocessor_path` set, the fitted scalers are loaded and
         `path_to_data` is never opened — which is what lets a checkpoint be
-        evaluated without shipping the training dataset, and what removes the
-        train/serve skew (AUDIT.md §3.3). Without it, the historical behaviour
-        is kept: scalers are re-fit on `path_to_data`.
+        evaluated without shipping the training dataset. Without it, the
+        historical behaviour is kept: scalers are re-fit on `path_to_data`.
         """
         if self.preprocessor_path:
             logger.info("Inference mode: loading fitted scalers from the bundle")
@@ -162,7 +284,7 @@ class NODE_Datamodule(L.LightningDataModule):
             logger.warning(
                 "Inference mode with no dataset.preprocessor_path: re-fitting "
                 "scalers on path_to_data. These are NOT the scalers the "
-                "checkpoint was trained with — see AUDIT.md §3.3."
+                "checkpoint was trained with."
             )
             fit_traj = self._read_trajectories(
                 self.path_to_data, self.fraction_of_data, all_columns
@@ -183,26 +305,14 @@ class NODE_Datamodule(L.LightningDataModule):
         self.target_scaler = self.preprocessor.target_scaler
 
         traj = self._read_trajectories(self.path_to_inference_data, 1.0, all_columns)
-        self.steps_per_run = traj.steps_per_run
-        self.actual_steps = traj.actual_steps
-        self.time_array = traj.time_array
-        self.col_index_map = traj.col_index_map
-        self.target_index_map = traj.target_index_map
-        self.n_input_features = traj.n_input_features
-        self.n_target_features = traj.n_target_features
+        self._adopt(traj)
 
-        input_scaled = self.input_scaler.transform(traj.input_flat).reshape(
-            traj.num_runs, traj.actual_steps, traj.n_input_features
+        test_trajs = _to_trajectory_tensor(
+            *self._scale(traj, traj.input_trajs, traj.target_trajs)
         )
-        target_scaled = self.target_scaler.transform(traj.target_flat).reshape(
-            traj.num_runs, traj.actual_steps, traj.n_target_features
-        )
-
-        combined = np.concatenate([input_scaled, target_scaled], axis=-1)
-        test_trajs = torch.tensor(combined, dtype=torch.float32)
         assert not torch.isnan(test_trajs).any(), "NaNs in scaled inference data!"
 
-        # Dummy train/val (empty but valid shape)
+        # Empty but correctly shaped, so Lightning can still build the loaders.
         dummy = torch.zeros(
             0, traj.actual_steps, traj.n_input_features + traj.n_target_features
         )
@@ -213,11 +323,11 @@ class NODE_Datamodule(L.LightningDataModule):
 
         logger.info(f"Test dataset size: {traj.num_runs} trajectories")
 
-        # Time span from inference data, normalised by the TRAINING time range
+        # Inference time is normalised by the TRAINING span, not its own, so the
+        # model sees the same time units it was fitted in.
         raw_t_inf = traj.time_array[: traj.actual_steps]
         self.t_span = torch.tensor(
-            (raw_t_inf - raw_t_inf[0]) / training_T,
-            dtype=torch.float32,
+            (raw_t_inf - raw_t_inf[0]) / training_T, dtype=torch.float32
         )
         logger.info(
             f"Training time span: {training_T:.4f}, "
@@ -225,170 +335,21 @@ class NODE_Datamodule(L.LightningDataModule):
         )
         logger.info(f"Normalised inference t_span: [0, {self.t_span[-1]:.6f}]")
 
-    def setup(self, stage=None):
-        if self._has_setup:
-            return
-        self._has_setup = True
+    def _plot_distributions(self, input_flat, target_flat, prefix):
+        plot.plot_data_distributions(
+            input_flat,
+            self.col_index_map,
+            save_dir=self.result_dir,
+            name=f"{prefix}_Inputs",
+        )
+        plot.plot_data_distributions(
+            target_flat,
+            self.target_index_map,
+            save_dir=self.result_dir,
+            name=f"{prefix}_Targets",
+        )
 
-        logger.info("Setting up NODE trajectory data module...")
-
-        all_columns = list(self.inputs.keys()) + [
-            k for k in self.target.keys() if k not in self.inputs.keys()
-        ]
-
-        if self.inference_mode:
-            self._setup_inference(all_columns)
-        else:
-            traj = self._read_trajectories(
-                self.path_to_data, self.fraction_of_data, all_columns
-            )
-            self.steps_per_run = traj.steps_per_run
-            self.time_array = traj.time_array
-            self.actual_steps = traj.actual_steps
-            self.col_index_map = traj.col_index_map
-            self.target_index_map = traj.target_index_map
-            num_runs = traj.num_runs
-            n_input_features = traj.n_input_features
-            n_target_features = traj.n_target_features
-            input_trajs = traj.input_trajs
-            target_trajs = traj.target_trajs
-
-            if self.make_plots:
-                plot.plot_data_distributions(
-                    traj.input_flat,
-                    self.col_index_map,
-                    save_dir=self.result_dir,
-                    name="Raw_Inputs",
-                )
-                plot.plot_data_distributions(
-                    traj.target_flat,
-                    self.target_index_map,
-                    save_dir=self.result_dir,
-                    name="Raw_Targets",
-                )
-
-            # ══════════════════════════════════════════════════════════════
-            # TRAINING: split into train/val/test, scalers fitted on train only
-            # ══════════════════════════════════════════════════════════════
-
-            # Re-fit scalers on TRAINING split only (overwrite the full-data fit above)
-            perm = np.random.default_rng(self.seed).permutation(num_runs)
-            input_trajs = input_trajs[perm]
-            target_trajs = target_trajs[perm]
-
-            n_train = int(num_runs * 0.6)
-            n_val = int(num_runs * 0.2)
-
-            # perm[i] is the original run index now sitting at position i, so the
-            # split is recorded in terms of runs as they appear in the source file.
-            self.split_info = {
-                "strategy": "random_by_run",
-                "n_runs": num_runs,
-                "steps_per_run": self.actual_steps,
-                "train": perm[:n_train].tolist(),
-                "val": perm[n_train : n_train + n_val].tolist(),
-                "test": perm[n_train + n_val :].tolist(),
-            }
-            data_help.write_split_indices(self.result_dir, self.split_info, self.seed)
-
-            train_input_raw = input_trajs[:n_train]
-            val_input_raw = input_trajs[n_train : n_train + n_val]
-            test_input_raw = input_trajs[n_train + n_val :]
-
-            train_target_raw = target_trajs[:n_train]
-            val_target_raw = target_trajs[n_train : n_train + n_val]
-            test_target_raw = target_trajs[n_train + n_val :]
-
-            logger.info(
-                f"Train: {len(train_input_raw)}, Val: {len(val_input_raw)}, Test: {len(test_input_raw)} runs"
-            )
-
-            # Fit scalers on the training split only (no data leakage)
-            train_input_flat = train_input_raw.reshape(-1, n_input_features)
-            train_target_flat = train_target_raw.reshape(-1, n_target_features)
-
-            self.preprocessor = Preprocessor.fit(
-                self.inputs,
-                self.target,
-                train_input_flat,
-                train_target_flat,
-                self.col_index_map,
-                self.target_index_map,
-                t_days=DEFAULT_TRAINING_T_DAYS,
-                t_days_data_span=_data_span(traj),
-            )
-            self.input_scaler = self.preprocessor.input_scaler
-            self.target_scaler = self.preprocessor.target_scaler
-
-            # Scale all splits
-            def scale_split(input_raw, target_raw):
-                n = len(input_raw)
-                input_scaled = self.input_scaler.transform(
-                    input_raw.reshape(-1, n_input_features)
-                ).reshape(n, self.actual_steps, n_input_features)
-                target_scaled = self.target_scaler.transform(
-                    target_raw.reshape(-1, n_target_features)
-                ).reshape(n, self.actual_steps, n_target_features)
-                return input_scaled, target_scaled
-
-            train_input_scaled, train_target_scaled = scale_split(
-                train_input_raw, train_target_raw
-            )
-            val_input_scaled, val_target_scaled = scale_split(
-                val_input_raw, val_target_raw
-            )
-            test_input_scaled, test_target_scaled = scale_split(
-                test_input_raw, test_target_raw
-            )
-
-            if self.make_plots:
-                plot.plot_data_distributions(
-                    train_input_scaled.reshape(-1, n_input_features),
-                    self.col_index_map,
-                    save_dir=self.result_dir,
-                    name="Scaled_Inputs",
-                )
-                plot.plot_data_distributions(
-                    train_target_scaled.reshape(-1, n_target_features),
-                    self.target_index_map,
-                    save_dir=self.result_dir,
-                    name="Scaled_Targets",
-                )
-
-            def combine_to_tensor(input_scaled, target_scaled):
-                combined = np.concatenate([input_scaled, target_scaled], axis=-1)
-                return torch.tensor(combined, dtype=torch.float32)
-
-            train_trajs = combine_to_tensor(train_input_scaled, train_target_scaled)
-            val_trajs = combine_to_tensor(val_input_scaled, val_target_scaled)
-            test_trajs = combine_to_tensor(test_input_scaled, test_target_scaled)
-
-            for split_name, trajs in [
-                ("train", train_trajs),
-                ("val", val_trajs),
-                ("test", test_trajs),
-            ]:
-                assert (
-                    not torch.isnan(trajs).any()
-                ), f"NaNs in {split_name} trajectories: {torch.isnan(trajs).sum()}"
-
-            raw_t = self.time_array[: self.actual_steps]
-            self.t_span = torch.tensor(
-                (raw_t - raw_t[0]) / (raw_t[-1] - raw_t[0]),
-                dtype=torch.float32,
-            )
-
-            self.train_dataset = TensorDataset(train_trajs)
-            self.val_dataset = TensorDataset(val_trajs)
-            self.test_dataset = TensorDataset(test_trajs)
-            self.test_trajs = test_trajs
-
-            logger.info(f"Training dataset size: {len(train_trajs)} trajectories")
-            logger.info(f"Validation dataset size: {len(val_trajs)} trajectories")
-            logger.info(f"Test dataset size: {len(test_trajs)} trajectories")
-
-            self.n_input_features = n_input_features
-            self.n_target_features = n_target_features
+    # ── Dataloaders ──────────────────────────────────────────────────────────
 
     def train_dataloader(self):
         return DataLoader(

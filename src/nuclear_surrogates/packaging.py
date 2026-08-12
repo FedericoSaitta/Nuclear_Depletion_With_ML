@@ -14,14 +14,12 @@ them and the dataset they were trained on:
 Run it once, on a machine that still has the datasets. The resulting bundle is a
 few hundred kB and needs neither.
 
-**The honest caveat, which the bundle records rather than hides.** The scalers
-this produces are *refitted*, not the originals. The original train/val/test
-split was an unseeded permutation (AUDIT.md §A1), so for any checkpoint trained
-before seeding was wired up, the exact training subset — and therefore the exact
-scalers the weights were optimised against — is unrecoverable. `metadata.json`
-carries `scalers_refit: true` and `original_split_recoverable: false` so nobody
-later mistakes a backfilled bundle for a faithful record. Such a bundle is a
-valid regression anchor; it is not a basis for a new published number.
+The caveat, which the bundle records rather than hides: these scalers are
+*refitted*, not the originals. Splits used to be unseeded, so for a checkpoint
+predating that fix the exact training subset — and the scalers fitted to it — is
+unrecoverable. `metadata.json` carries `scalers_refit` and
+`original_split_recoverable` so a backfilled bundle is never mistaken for a
+faithful record: it is a valid regression anchor, not a basis for a new number.
 """
 
 from __future__ import annotations
@@ -114,8 +112,8 @@ def package(ckpt_path, config_path, out_dir, data_path=None, overrides=None):
             "provenance_note": (
                 "Backfilled by nucml-package. The scalers were refitted from the "
                 "dataset under the config's seed; the checkpoint's ORIGINAL split "
-                "was unseeded and is unrecoverable (AUDIT.md §A1). Valid as a "
-                "regression anchor, not as a reproduction of the original run."
+                "was unseeded and is unrecoverable. Valid as a regression anchor, "
+                "not as a reproduction of the original run."
             ),
         },
     )

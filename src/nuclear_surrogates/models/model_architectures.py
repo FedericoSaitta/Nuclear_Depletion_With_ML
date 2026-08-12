@@ -1,7 +1,8 @@
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from nuclear_surrogates.models.model_helper import get_activation
-import torch
 
 
 class Deep_Neural_Network(nn.Module):
@@ -15,14 +16,16 @@ class Deep_Neural_Network(nn.Module):
         output_activation,
         residual,
     ):
-        super(Deep_Neural_Network, self).__init__()
+        super().__init__()
         self.residual = residual
 
         layer_sizes = [n_inputs] + hidden_layers + [n_outputs]
         self.layers = nn.ModuleList(
             [
                 nn.Linear(in_size, out_size)
-                for in_size, out_size in zip(layer_sizes[:-1], layer_sizes[1:])
+                for in_size, out_size in zip(
+                    layer_sizes[:-1], layer_sizes[1:], strict=False
+                )
             ]
         )
         self.dropout = nn.Dropout(p=dropout_prob)
@@ -42,8 +45,7 @@ class Deep_Neural_Network(nn.Module):
                 x = x + residual
 
         y = self.layers[-1](x)
-        y = self.output_activation_fn(y)
-        return y
+        return self.output_activation_fn(y)
 
 
 # ─── ODE Function ────────────────────────────────────────────────────────────
@@ -66,19 +68,24 @@ class ForcedODEFunc(nn.Module):
         self.t_points = t_points
         self.forcing_profiles = forcing_profiles  # (batch, steps, n_input)
 
-    def _interpolate_forcing(self, t):
-        """Piecewise-constant (zero-order hold) forcing interpolation.
+    def forcing_index(self, t):
+        """Index of the forcing interval containing *t*.
 
-        Returns the forcing value at the left endpoint of whichever interval
-        t falls into, i.e. the value is held constant until the next grid point.
-        This is correct for power profiles that are sampled independently at
-        each timestep (step-function behaviour).
+        Also needed by the Jacobian analysis, which must attribute a gradient to
+        the same interval the forward pass actually read.
         """
         t_clamped = t.clamp(self.t_points[0], self.t_points[-1])
         idx = torch.searchsorted(self.t_points, t_clamped.unsqueeze(0)).squeeze() - 1
-        idx = idx.clamp(0, len(self.t_points) - 2)
+        return idx.clamp(0, len(self.t_points) - 2)
 
-        return self.forcing_profiles[:, idx, :]  # (batch, n_input)
+    def _interpolate_forcing(self, t):
+        """Piecewise-constant (zero-order hold) forcing interpolation.
+
+        Returns the forcing at the left endpoint of t's interval, held constant
+        until the next grid point — correct for power profiles sampled
+        independently at each timestep.
+        """
+        return self.forcing_profiles[:, self.forcing_index(t), :]  # (batch, n_input)
 
 
 class ODEFuncForced(ForcedODEFunc):

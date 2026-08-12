@@ -10,7 +10,6 @@ import pytest
 
 from nuclear_surrogates.datamodule import data_scalers, dataset_helper
 
-
 # ── run structure ────────────────────────────────────────────────────────────
 
 
@@ -89,7 +88,12 @@ def test_split_rejects_fractions_that_do_not_sum_to_one():
 
 def test_same_seed_gives_the_same_training_order():
     X, Y = _split_fixture()
-    kwargs = dict(train_frac=0.8, val_frac=0.1, test_frac=0.1, steps_per_run=100)
+    kwargs = {
+        "train_frac": 0.8,
+        "val_frac": 0.1,
+        "test_frac": 0.1,
+        "steps_per_run": 100,
+    }
     a = dataset_helper.timeseries_train_val_test_split(
         X, Y, rng=np.random.default_rng(7), **kwargs
     )
@@ -103,7 +107,12 @@ def test_same_seed_gives_the_same_training_order():
 def test_different_seeds_give_different_training_orders():
     """Guards against a seed that is accepted and then ignored."""
     X, Y = _split_fixture()
-    kwargs = dict(train_frac=0.8, val_frac=0.1, test_frac=0.1, steps_per_run=100)
+    kwargs = {
+        "train_frac": 0.8,
+        "val_frac": 0.1,
+        "test_frac": 0.1,
+        "steps_per_run": 100,
+    }
     a = dataset_helper.timeseries_train_val_test_split(
         X, Y, rng=np.random.default_rng(1), **kwargs
     )
@@ -140,28 +149,27 @@ def test_split_info_partitions_every_run_exactly_once():
     "kind", ["minmax", "standard", "robust", "maxabs", "quantile", "none"]
 )
 def test_inverse_transform_round_trips(kind):
+    from nuclear_surrogates.datamodule.preprocessor import ColumnWiseScaler
+
     rng = np.random.default_rng(0)
     data = rng.normal(size=(200, 3)) * [1.0, 1e-6, 1e3]
 
-    scaler_dict = {name: data_scalers.get_scaler(kind) for name in ("a", "b", "c")}
-    index_map = {"a": 0, "b": 1, "c": 2}
-    transformer = data_scalers.create_column_transformer(scaler_dict, index_map)
-    transformer.fit(data)
+    scaler = ColumnWiseScaler(
+        ["a", "b", "c"], [data_scalers.get_scaler(kind) for _ in range(3)]
+    ).fit(data)
 
-    scaled = transformer.transform(data)
-    restored = data_scalers.inverse_transformer(transformer, scaled)
+    restored = scaler.inverse_transform(scaler.transform(data))
     np.testing.assert_allclose(restored, data, rtol=1e-6, atol=1e-9)
 
 
-def test_unknown_scaler_falls_back_silently():
-    """Documents a real trap rather than asserting it is fine.
+def test_unknown_scaler_raises():
+    """A typo'd scaler name must fail, not silently train on unscaled data.
 
-    `get_scaler` logs an error and returns a NoOpScaler, so a typo'd scaler name
-    trains on unscaled data instead of failing. `tests/test_configs.py` is what
-    actually prevents that reaching a committed config.
+    `get_scaler` used to log an error and hand back a NoOpScaler, so
+    `minmaxx` produced a model whose reported metrics looked ordinary.
     """
-    scaler = data_scalers.get_scaler("minmaxx")
-    assert isinstance(scaler, data_scalers.NoOpScaler)
+    with pytest.raises(ValueError, match="Unknown scaler"):
+        data_scalers.get_scaler("minmaxx")
 
 
 def test_remove_empty_columns_drops_all_zero_columns():
@@ -179,7 +187,6 @@ def test_mini_fixture_keeps_every_configured_column():
     import os
 
     import polars as pl
-
     from golden_setup import MINI_H5
 
     if not os.path.exists(MINI_H5):
