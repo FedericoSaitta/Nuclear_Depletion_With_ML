@@ -38,6 +38,26 @@ REQUIRED_FIXTURES = (
 )
 
 
+# Tolerances for comparing against the committed fixtures.
+#
+# TRAJECTORY_* is deliberately looser than the rest. dopri5 chooses its steps
+# adaptively from an error estimate, so a last-bit arithmetic difference can tip
+# it into a different step sequence and the whole trajectory inherits that. The
+# fixtures were generated with the CUDA build of torch on Windows; CI installs
+# the CPU wheel on Linux, a different oneDNN/MKL, and the two disagree by up to
+# ~2e-3 relative. That is float noise amplified by step selection, not a change
+# in behaviour — confirmed by the fact that the depletion-matrix probes, which
+# involve no solver at all, still agree to 1e-5, and the aggregate metrics still
+# agree to 1e-4.
+#
+# It is still a real anchor: every genuine regression seen so far moved
+# trajectories by >= 2e-2, four times this bound.
+TRAJECTORY_RTOL, TRAJECTORY_ATOL = 5e-3, 1e-6
+METRIC_RTOL = 1e-4
+# No ODE solve, so no adaptive amplification — this one stays tight.
+MATRIX_RTOL, MATRIX_ATOL = 1e-5, 1e-7
+
+
 def fixtures_present() -> bool:
     return all(os.path.exists(os.path.join(FIX, f)) for f in REQUIRED_FIXTURES)
 

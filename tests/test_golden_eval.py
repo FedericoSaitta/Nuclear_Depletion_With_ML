@@ -3,9 +3,8 @@
 `test_golden.py` pins the model's forward pass. This pins what is computed
 *from* it: the teacher-forced rollout, the error-growth curves, and the MARE
 comparison. Those are the numbers in the manuscript, and they are produced by
-the analysis code that was extracted out of `neural_ode.py`, which
-proposes extracting — which is exactly the refactor these tests exist to make
-safe.
+the analysis code that was extracted out of `neural_ode.py` — exactly the
+refactor these tests exist to make safe.
 
 The maths lives in `nuclear_surrogates.evaluation` so it can be called on plain
 arrays; the model methods call the same functions, so pinning them here pins the
@@ -17,7 +16,13 @@ import os
 
 import numpy as np
 import pytest
-from golden_setup import FIX, fixtures_present
+from golden_setup import (
+    FIX,
+    METRIC_RTOL,
+    TRAJECTORY_ATOL,
+    TRAJECTORY_RTOL,
+    fixtures_present,
+)
 
 GOLDEN_TF = os.path.join(FIX, "golden_node_tf_preds.npy")
 GOLDEN_EVAL = os.path.join(FIX, "golden_node_eval.json")
@@ -65,7 +70,10 @@ def test_teacher_forced_rollout_unchanged(evaluated):
     already pinned in test_golden.py — 99 single-step solves per run."""
     _require(GOLDEN_TF)
     np.testing.assert_allclose(
-        evaluated["tf_scaled"], np.load(GOLDEN_TF), rtol=1e-5, atol=1e-6
+        evaluated["tf_scaled"],
+        np.load(GOLDEN_TF),
+        rtol=TRAJECTORY_RTOL,
+        atol=TRAJECTORY_ATOL,
     )
 
 
@@ -84,7 +92,7 @@ def test_error_growth_curves_unchanged(evaluated):
             np.testing.assert_allclose(
                 curves[idx][key],
                 golden["error_growth"][name][key],
-                rtol=1e-5,
+                rtol=TRAJECTORY_RTOL,
                 atol=1e-12,
                 err_msg=f"{name}/{key} moved",
             )
@@ -104,7 +112,7 @@ def test_mare_comparison_unchanged(evaluated):
         np.testing.assert_allclose(
             [comparison[idx]["mare_tf"], comparison[idx]["mare_ar"]],
             [golden["mare"][name]["mare_tf"], golden["mare"][name]["mare_ar"]],
-            rtol=1e-4,
+            rtol=METRIC_RTOL,
             err_msg=f"{name} MARE moved",
         )
 

@@ -74,9 +74,12 @@ deliberately. Only in the second case do you regenerate, and then:
 
 ## Tolerances
 
+Defined once in `tests/golden_setup.py`, not scattered through the assertions.
+
 | Comparison | Tolerance | Why |
 |---|---|---|
-| Trajectories, matrix probes | `rtol=1e-5, atol=1e-6` | CPU float32 ops are run-to-run deterministic; this survives operation reordering from a refactor but catches a real change. |
+| Trajectories (`TRAJECTORY_*`) | `rtol=5e-3, atol=1e-6` | **Not portable at a tighter bound.** dopri5 picks its steps from an error estimate, so a last-bit arithmetic difference can tip it into a different step sequence and the whole trajectory inherits that. These fixtures were generated with the CUDA build of torch on Windows; CI installs the CPU wheel on Linux, and the two disagree by up to ~2e-3 relative. Still a real anchor: every genuine regression seen so far moved trajectories by >= 2e-2, four times this bound. |
+| Matrix probes (`MATRIX_*`) | `rtol=1e-5, atol=1e-7` | No ODE solve, so no adaptive amplification — stays tight, and does pass cross-platform. |
 | Scalar metrics | `rtol=1e-4` | Accumulated over ~1000 points. |
 | Preprocessor round-trip | `atol=1e-12` | Pure serialisation — must be exact. |
 

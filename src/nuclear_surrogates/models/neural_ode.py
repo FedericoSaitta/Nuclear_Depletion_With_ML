@@ -88,12 +88,25 @@ class NODE_Model(L.LightningModule):
     # ── Forward ──────────────────────────────────────────────────────────────
 
     def _odeint(self, y0, t_span):
-        """Central odeint call — solver and backward method come from the yaml."""
+        """Central odeint call — solver and backward method come from the yaml.
+
+        With `train.use_adjoint`, gradients come from solving the adjoint system
+        backwards instead of storing the forward graph. That is O(1) in the
+        number of function evaluations rather than O(NFE), which is what makes a
+        large batch fit at all once the learned dynamics turn stiff — at roughly
+        twice the wall time, because the backward pass becomes a second solve.
+        """
         options = {}
         if self.cfg.train.solver == "rk4":
             step_size = getattr(self.cfg.train, "step_size", None)
             if step_size:
                 options["step_size"] = step_size
+
+        # Solver-specific keys the plain config cannot express, e.g.
+        # `{solver: BDF}` for scipy_solver. Explicit values win.
+        extra = getattr(self.cfg.train, "solver_options", None)
+        if extra:
+            options.update(OmegaConf.to_container(extra, resolve=True))
 
         common_kwargs = {
             "method": self.cfg.train.solver,
@@ -103,14 +116,21 @@ class NODE_Model(L.LightningModule):
         }
 
         if self.use_adjoint:
+            adjoint_kwargs = {
+                "adjoint_rtol": self.adjoint_rtol,
+                "adjoint_atol": self.adjoint_atol,
+                "adjoint_method": self.adjoint_method,
+            }
+            # Kept separate from the forward options: the adjoint may use a
+            # different method, and a forward-only key (rk4's `step_size`) is
+            # not valid for it.
+            adjoint_extra = getattr(self.cfg.train, "adjoint_solver_options", None)
+            if adjoint_extra:
+                adjoint_kwargs["adjoint_options"] = OmegaConf.to_container(
+                    adjoint_extra, resolve=True
+                )
             return odeint_adjoint(
-                self.func,
-                y0,
-                t_span,
-                adjoint_rtol=self.adjoint_rtol,
-                adjoint_atol=self.adjoint_atol,
-                adjoint_method=self.adjoint_method,
-                **common_kwargs,
+                self.func, y0, t_span, **adjoint_kwargs, **common_kwargs
             )
         return odeint(self.func, y0, t_span, **common_kwargs)
 
