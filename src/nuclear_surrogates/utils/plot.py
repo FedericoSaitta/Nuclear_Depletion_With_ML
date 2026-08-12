@@ -6,6 +6,7 @@ lets the evaluation code be tested without a display or a Trainer.
 
 import os
 
+import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 from loguru import logger
@@ -13,13 +14,28 @@ from matplotlib.patches import Patch
 
 from nuclear_surrogates.utils import metrics
 
+# Every figure here is written to disk and never shown, so an interactive
+# backend is pure cost. On a Windows desktop matplotlib picks Tk by default and
+# allocates a GUI canvas per figure — a test epoch draws over a hundred, and the
+# run dies part-way with "not enough free memory for image buffer". On a
+# headless cluster node an interactive backend fails outright. An explicit
+# MPLBACKEND still wins, so an interactive session can opt back in.
+if not os.environ.get("MPLBACKEND"):
+    matplotlib.use("Agg")
+
+# Figure resolution. Writing a PNG costs roughly linearly in dpi — measured at
+# ~380 ms per figure at 300 and ~175 ms at 150 — and a NODE test epoch writes
+# over a hundred of them, so this is the knob to turn if evaluation feels slow.
+FIGURE_DPI = 300  # per-target results that may end up in the write-up
+DIAGNOSTIC_DPI = 150  # sensitivity and importance grids, read on screen
+
 STATE_COLOR = "#2196F3"
 FORCING_COLOR = "#FF9800"
 TF_COLOR = "#2E86AB"
 AR_COLOR = "#A23B72"
 
 
-def _save(fig, path, message, dpi=300):
+def _save(fig, path, message, dpi=FIGURE_DPI):
     """Write *fig* to *path*, close it, and say where it went."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     fig.savefig(path, dpi=dpi, bbox_inches="tight")
@@ -650,7 +666,7 @@ def plot_jacobian_heatmap(
             )
 
     fig.tight_layout()
-    _save(fig, save_path, "Jacobian heatmap saved to", dpi=150)
+    _save(fig, save_path, "Jacobian heatmap saved to", dpi=DIAGNOSTIC_DPI)
 
 
 def plot_combined_sensitivity(
@@ -686,7 +702,7 @@ def plot_combined_sensitivity(
     )
 
     fig.tight_layout()
-    _save(fig, save_path, "Combined sensitivity plot saved to", dpi=150)
+    _save(fig, save_path, "Combined sensitivity plot saved to", dpi=DIAGNOSTIC_DPI)
 
 
 def plot_jacobian_over_time(
@@ -721,7 +737,7 @@ def plot_jacobian_over_time(
 
     fig.suptitle(title, fontsize=12, fontweight="bold")
     fig.tight_layout()
-    _save(fig, save_path, "Jacobian time-evolution plot saved to", dpi=150)
+    _save(fig, save_path, "Jacobian time-evolution plot saved to", dpi=DIAGNOSTIC_DPI)
 
 
 # ── Depletion matrix ─────────────────────────────────────────────────────────
@@ -755,7 +771,7 @@ def plot_depletion_matrix_mean(mean_A, std_A, target_names, time_unit, save_path
             )
 
     fig.tight_layout()
-    _save(fig, save_path, "Depletion matrix plot saved to", dpi=150)
+    _save(fig, save_path, "Depletion matrix plot saved to", dpi=DIAGNOSTIC_DPI)
 
 
 def plot_depletion_matrix_evolution(
@@ -803,7 +819,9 @@ def plot_depletion_matrix_evolution(
         fontweight="bold",
     )
     fig.tight_layout()
-    _save(fig, save_path, "Depletion matrix evolution plot saved to", dpi=150)
+    _save(
+        fig, save_path, "Depletion matrix evolution plot saved to", dpi=DIAGNOSTIC_DPI
+    )
 
 
 # ── Per-step importance ──────────────────────────────────────────────────────
@@ -870,7 +888,7 @@ def plot_stepwise_importance_bar(
             fig,
             os.path.join(result_dir, target_name, "stepwise_importance_bar.png"),
             f"{target_name} stepwise importance bar chart saved to",
-            dpi=150,
+            dpi=DIAGNOSTIC_DPI,
         )
 
 
@@ -916,5 +934,5 @@ def plot_stepwise_importance_over_time(
             fig,
             os.path.join(result_dir, target_name, "stepwise_importance_over_time.png"),
             f"{target_name} stepwise importance evolution saved to",
-            dpi=150,
+            dpi=DIAGNOSTIC_DPI,
         )

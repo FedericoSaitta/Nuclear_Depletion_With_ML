@@ -13,7 +13,9 @@ from omegaconf import OmegaConf
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 FIX = os.path.join(REPO, "tests", "fixtures")
-CONFIG = os.path.join(REPO, "configs", "main_config.yaml")
+# Frozen on purpose: a working config is free to change its solver tolerances,
+# and that silently moves every golden trajectory.
+CONFIG = os.path.join(FIX, "golden_node_eval.yaml")
 CKPT = os.path.join(FIX, "best-matrix_ode_7x7_breeding_chain-epoch=2367.ckpt")
 MINI_H5 = os.path.join(FIX, "mini_casl_10runs.h5")
 PREPROCESSOR = os.path.join(FIX, "preprocessor.json")
@@ -25,6 +27,7 @@ TRAIN_H5 = os.path.join(REPO, "datasets", "casl_3305_runs_inter.h5")
 # Fixtures the golden tests require. The full training dataset is deliberately
 # NOT in this list — decoupling from it is the point of the bundle.
 REQUIRED_FIXTURES = (
+    "golden_node_eval.yaml",
     "mini_casl_10runs.h5",
     "preprocessor.json",
     "golden_node_preds.npy",

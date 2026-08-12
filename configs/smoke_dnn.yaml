@@ -8,6 +8,12 @@ dataset:
   path_to_data: ../tests/fixtures/mini_casl_10runs.h5
   fraction_of_data: 1.0
 
+  # Fractions of whole runs, split sequentially in time.
+  split:
+    train: 0.8
+    val: 0.1
+    test: 0.1
+
   inputs:
     power_W_g: MinMax
     U238: MinMax

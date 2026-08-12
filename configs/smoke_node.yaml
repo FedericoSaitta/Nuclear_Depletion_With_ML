@@ -13,6 +13,13 @@ dataset:
   # The fixture is only 10 runs; a fraction would leave too few to split.
   fraction_of_data: 1.0
 
+  # Fractions of whole runs. The NODE partitions by a seeded random
+  # permutation of runs; the DNN splits sequentially in time.
+  split:
+    train: 0.6
+    val: 0.2
+    test: 0.2
+
   inputs:
     power_W_g: MinMax
   targets:

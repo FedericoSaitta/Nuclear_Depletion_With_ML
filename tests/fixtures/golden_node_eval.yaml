@@ -1,23 +1,25 @@
-# The paper's 7x7 matrix NODE, as it was actually trained.
+# FROZEN — the configuration the committed golden fixtures were generated from.
 #
-# The train block below was recovered from the checkpoint's own embedded
-# hyperparameters (`hyper_parameters` in
-# best-matrix_ode_7x7_breeding_chain-epoch=2367.ckpt) — the values previously
-# committed here had drifted from the run they claimed to describe. The model
-# block was verified against the same source and matched exactly.
+# `tests/golden_setup.py` builds the golden regression run from this file, so
+# the model block and the solver settings below must keep matching
+# `tests/fixtures/golden_node_*.npy`. Editing either means regenerating those
+# fixtures with `tests/make_golden.py`, which moves numbers the write-up may
+# already quote — a deliberate act, never a tidy-up.
+#
+# It lives beside the fixtures it pins, rather than in `configs/`, because it
+# is test infrastructure — not a configuration anyone should run. Keeping it
+# here also leaves `configs/main_config.yaml` free to edit for real runs
+# without silently breaking the regression anchor.
+#
+# Note the solver is rtol 1e-6 / atol 1e-8, which is what the fixtures were made
+# with. The checkpoint was *trained* at 1e-5 / 1e-7 — see AUDIT.md P4.
+# Reconciling the two means regenerating the fixtures.
 #
 # Paths are resolved relative to THIS FILE, not to the working directory.
 dataset:
-  path_to_data: ../datasets/casl_3305_runs_inter.h5   # training data (fits the scalers)
-  path_to_inference_data: ../datasets/casl_3305_runs_inter.h5
+  path_to_data: ../../datasets/casl_3305_runs_inter.h5   # training data (fits the scalers)
+  path_to_inference_data: ../../datasets/casl_3305_runs_inter.h5
   fraction_of_data: 0.1
-
-  # Fractions of whole runs. The NODE partitions by a seeded random
-  # permutation of runs; the DNN splits sequentially in time.
-  split:
-    train: 0.6
-    val: 0.2
-    test: 0.2
 
   inputs:
     power_W_g: MinMax
@@ -34,10 +36,10 @@ dataset:
   train:
     batch_size: 64
   val:
-    batch_size: 300
+    batch_size: 128
 
 model:
-  name: matrix_ode_7x7_breeding_chain
+  name: NODE_FIXED_IMPORTANCE
   matrix_ode: true
   layers: [128, 128]
   dropout_probability: 0.0
@@ -61,17 +63,17 @@ model:
 
 train:
   loss: mse
-  learning_rate: 0.004
+  learning_rate: 0.0
   weight_decay: 0.0
-  lr_scheduler_patience: 25
-  num_epochs: 5000
-  early_stopping_patience: 75
+  lr_scheduler_patience: 50
+  num_epochs: 1000
+  early_stopping_patience: 100
   grad_clip: 0.0
   drop_last: false
 
   solver: dopri5
-  rtol: 1e-5
-  atol: 1e-7
+  rtol: 1e-6
+  atol: 1e-8
   step_size: 0.01
 
 runtime:
@@ -80,11 +82,13 @@ runtime:
   # Checkpoint to load for mode: train_from_ckp / inference. Resolved like the
   # dataset paths above, so a relative value is taken from this file's directory.
   ckp_path: ""
-  device: cpu
+  device: cuda
+  # Seeds weight init, the DataLoader shuffle and the train/val/test split.
+  # The chosen split is written to <output_dir>/<model.name>/split_indices.json.
   seed: 42
-  num_workers: 0
+  num_workers: 12
 
   # Both resolved relative to this file, so output lands in the same place no
   # matter which directory the run was launched from.
-  output_dir: ../results
-  model_database: ../Chain_Model.db
+  output_dir: ../../results
+  model_database: ../../Chain_Model.db

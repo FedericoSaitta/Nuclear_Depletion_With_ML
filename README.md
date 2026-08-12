@@ -38,7 +38,8 @@ util/             one-off data and depletion-chain tools
 scripts/          bootstrap, OpenMC build, SLURM job scripts
 tests/            golden regression tests + fixtures; OpenMC install smoke tests
 notebooks/        exploration and learning-journey scripts, not library code
-docs/             configuration reference
+docs/             config_reference.md   every config key, with valid values
+                  training_pipeline.md  how both models are trained and evaluated
 
 datasets/         training HDF5 files          (untracked)
 data/             OpenMC nuclear data, 7 GB    (untracked)

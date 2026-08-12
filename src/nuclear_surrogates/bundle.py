@@ -1,6 +1,10 @@
 """A model bundle: everything needed to reuse a trained model, in one directory.
 
-    bundles/<run_id>/
+A training run writes it beside its own outputs, as
+`results/<model_name>/model-bundle/`; `nucml-package` writes one wherever
+`--out` points.
+
+    model-bundle/
     ├── weights.ckpt          Lightning checkpoint
     ├── preprocessor.json     fitted scalers, PLAIN TEXT (source of truth)
     ├── preprocessor.joblib   convenience copy
@@ -27,6 +31,9 @@ from loguru import logger
 from omegaconf import OmegaConf
 
 BUNDLE_VERSION = 1
+
+# Where a training run puts its bundle, relative to that run's result dir.
+BUNDLE_DIRNAME = "model-bundle"
 
 
 def _git(*args) -> str | None:

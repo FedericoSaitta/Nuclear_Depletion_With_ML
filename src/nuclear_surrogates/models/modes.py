@@ -6,7 +6,7 @@ import torch.multiprocessing as mp
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from loguru import logger
 
-from nuclear_surrogates.bundle import write_bundle
+from nuclear_surrogates.bundle import BUNDLE_DIRNAME, write_bundle
 from nuclear_surrogates.utils.paths import result_dir
 from nuclear_surrogates.utils.sql_lite_logger import SQLiteLogger
 
@@ -43,7 +43,11 @@ def _build_callbacks(cfg, result_dir_path):
 
 
 def _build_trainer(cfg, callbacks, pl_logger, **extra_kwargs):
-    mp.set_sharing_strategy("file_system")
+    # Only meaningful with dataloader workers: shipping tensors between
+    # processes exhausts the default file-descriptor sharing on Linux. With
+    # num_workers=0 there are no worker processes to share with.
+    if cfg.runtime.get("num_workers", 0):
+        mp.set_sharing_strategy("file_system")
 
     return L.Trainer(
         max_epochs=cfg.train.num_epochs,
@@ -107,7 +111,6 @@ def train_and_test(datamodule, model_class, cfg):
     pl_logger = SQLiteLogger(
         db_path=cfg.runtime.model_database,
         name=cfg.model.name,
-        config=cfg,
     )
 
     model = model_class(config_object=cfg)
@@ -125,7 +128,8 @@ def train_and_test(datamodule, model_class, cfg):
     best_path = checkpoint_cb.best_model_path
     logger.info(f"Best model saved at: {best_path}")
 
-    _write_run_bundle(datamodule, cfg, result_dir_path, best_path, val_metrics)
+    bundle = _write_run_bundle(datamodule, cfg, result_dir_path, best_path, val_metrics)
+    pl_logger.set_bundle_path(bundle)
 
     trainer.test(model=model, datamodule=datamodule, ckpt_path=best_path)
     return val_metrics
@@ -134,7 +138,11 @@ def train_and_test(datamodule, model_class, cfg):
 def _write_run_bundle(datamodule, cfg, result_dir_path, ckpt_path, metrics=None):
     """Package weights + fitted scalers + provenance beside the run's outputs.
 
-    Best-effort: a bundle failure must not throw away a finished training run.
+    This is the run's record: the experiment database stores results and a
+    pointer here rather than its own copy of the config.
+
+    Best-effort — a bundle failure must not throw away a finished training run,
+    so it returns None and the caller logs that the run has no record.
     """
     preprocessor = getattr(datamodule, "preprocessor", None)
     if preprocessor is None:
@@ -142,7 +150,7 @@ def _write_run_bundle(datamodule, cfg, result_dir_path, ckpt_path, metrics=None)
         return None
     try:
         return write_bundle(
-            out_dir=os.path.join(result_dir_path, "bundle"),
+            out_dir=os.path.join(result_dir_path, BUNDLE_DIRNAME),
             cfg=cfg,
             preprocessor=preprocessor,
             ckpt_path=ckpt_path,
@@ -162,7 +170,6 @@ def train_from_checkpoint_and_test(datamodule, model_class, cfg):
     pl_logger = SQLiteLogger(
         db_path=cfg.runtime.model_database,
         name=cfg.model.name,
-        config=cfg,
     )
 
     logger.info(f"Loading model from checkpoint: {cfg.runtime.ckp_path}")
@@ -179,7 +186,8 @@ def train_from_checkpoint_and_test(datamodule, model_class, cfg):
     best_path = checkpoint_cb.best_model_path
     logger.info(f"Best model saved at: {best_path}")
 
-    _write_run_bundle(datamodule, cfg, result_dir_path, best_path)
+    bundle = _write_run_bundle(datamodule, cfg, result_dir_path, best_path)
+    pl_logger.set_bundle_path(bundle)
 
     trainer.test(model=model, datamodule=datamodule, ckpt_path=best_path)
 

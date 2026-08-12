@@ -679,7 +679,14 @@ if __name__ == "__main__":
     NUM_WORKERS = args.cores
 
     for i in range(NUM_RUNS):
-        configs = create_worker_configs(base_config, NUM_WORKERS, master_seed=args.seed)
+        # Each outer iteration needs its own master seed. Passing the same one
+        # every time made create_worker_configs re-seed `random` identically, so
+        # every iteration regenerated the same worker seeds — the same operating
+        # histories and the same MC seeds — and the dataset filled with
+        # duplicates that then straddled the train/test split. `-n 1 -s S` is
+        # unaffected: offset 0 reproduces exactly what it produced before.
+        run_seed = None if args.seed is None else args.seed + i
+        configs = create_worker_configs(base_config, NUM_WORKERS, master_seed=run_seed)
 
         t0 = time.perf_counter()
         run_parallel_simulations(configs)

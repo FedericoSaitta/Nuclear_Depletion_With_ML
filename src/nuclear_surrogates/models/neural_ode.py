@@ -736,6 +736,13 @@ class NODE_Model(L.LightningModule):
         per_run_avg = np.zeros((num_runs, n_features, n_state))
         mean_by_time = np.zeros((n_sampled, n_features, n_state))
 
+        # The unperturbed forcing is reused by the baseline and by every state
+        # permutation — the large majority of the thousands of solves below — so
+        # it is converted once instead of on each call.
+        inputs_tensor = torch.tensor(
+            all_inputs_scaled, dtype=torch.float32, device=self.device
+        )
+
         for t_enum, t_idx in enumerate(timestep_indices):
             if t_enum % 10 == 0:
                 logger.info(f"  Timestep {t_enum + 1}/{n_sampled} (idx={t_idx})")
@@ -743,7 +750,7 @@ class NODE_Model(L.LightningModule):
             y_t = all_trues_scaled[:, t_idx, :]
             y_tp1_unscaled = self._unscale_targets(all_trues_scaled[:, t_idx + 1, :])
 
-            base_pred = self._single_step_batch(y_t, t_idx, all_inputs_scaled)
+            base_pred = self._single_step_batch(y_t, t_idx, inputs_tensor)
             base_ae = np.abs(self._unscale_targets(base_pred) - y_tp1_unscaled)
 
             for j in range(n_features):
@@ -769,7 +776,7 @@ class NODE_Model(L.LightningModule):
                         perturbed_y_t = y_t.copy()
                         perturbed_y_t[:, j_s] = y_t[perm, j_s]
                         pert_pred = self._single_step_batch(
-                            perturbed_y_t, t_idx, all_inputs_scaled
+                            perturbed_y_t, t_idx, inputs_tensor
                         )
 
                     pert_ae = np.abs(self._unscale_targets(pert_pred) - y_tp1_unscaled)
@@ -934,16 +941,26 @@ class NODE_Model(L.LightningModule):
         _print_unicode_safe("<<<END_STEPWISE_IMPORTANCE_TABLES>>>")
         _print_unicode_safe("=" * 70 + "\n")
 
-    def _single_step_batch(self, y_t_np, t_idx, forcing_profiles_np):
+    def _single_step_batch(self, y_t_np, t_idx, forcing_profiles):
         """Integrate one teacher-forced step for every run, in batches.
 
-        y_t_np is (runs, n_state), forcing_profiles_np is (runs, steps, n_input);
-        returns (runs, n_state) in model units.
+        y_t_np is (runs, n_state); *forcing_profiles* is (runs, steps, n_input),
+        either numpy or an already-built tensor. The importance sweep calls this
+        thousands of times with the same unperturbed forcing, so passing the
+        tensor lets the caller convert it once.
+
+        Returns (runs, n_state) in model units.
         """
         num_runs, n_state = y_t_np.shape
         device = self.device
         t_span = self.t_span.to(device)
         t_short = t_span[t_idx : t_idx + 2]
+
+        forcing = (
+            forcing_profiles
+            if torch.is_tensor(forcing_profiles)
+            else torch.tensor(forcing_profiles, dtype=torch.float32, device=device)
+        )
 
         preds = np.zeros((num_runs, n_state))
         with torch.no_grad():
@@ -952,10 +969,7 @@ class NODE_Model(L.LightningModule):
                 y_batch = torch.tensor(
                     y_t_np[start:end], dtype=torch.float32, device=device
                 )
-                f_batch = torch.tensor(
-                    forcing_profiles_np[start:end], dtype=torch.float32, device=device
-                )
-                self.func.set_forcing(t_span, f_batch)
+                self.func.set_forcing(t_span, forcing[start:end])
                 preds[start:end] = self._odeint(y_batch, t_short)[-1].cpu().numpy()
 
         return preds

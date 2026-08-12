@@ -282,11 +282,14 @@ def test_run_writes_split_indices_and_a_bundle(tmp_path):
     result_dir = modes.result_dir(cfg)
 
     dm.setup(stage="fit")
-    assert os.path.exists(os.path.join(result_dir, "split_indices.json"))
-
     bundle = modes._write_run_bundle(dm, cfg, result_dir, ckpt_path=None)
     assert bundle is not None
-    for name in ("preprocessor.json", "config.resolved.yaml", "metadata.json"):
+    for name in (
+        "preprocessor.json",
+        "config.resolved.yaml",
+        "metadata.json",
+        "split_indices.json",
+    ):
         assert os.path.exists(os.path.join(bundle, name)), f"bundle lacks {name}"
 
     with open(os.path.join(bundle, "metadata.json")) as f:

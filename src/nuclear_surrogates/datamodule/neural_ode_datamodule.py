@@ -18,9 +18,6 @@ from nuclear_surrogates.utils.paths import result_dir
 # figures that consume this would move published numbers — see AUDIT.md.
 DEFAULT_TRAINING_T_DAYS = 1000.0
 
-TRAIN_FRACTION = 0.6
-VAL_FRACTION = 0.2
-
 
 @dataclass
 class _Trajectories:
@@ -84,6 +81,9 @@ class NODE_Datamodule(L.LightningDataModule):
         # constructed outside main() (tests, packaging) splits identically.
         self.seed = cfg_object.runtime.get("seed", 42)
 
+        # Random-by-run 60/20/20 unless the config says otherwise.
+        self.split = data_help.split_fractions(cfg_object, default=(0.6, 0.2, 0.2))
+
         self.inputs = data_scalers.create_scaler_dict(cfg_object.dataset["inputs"])
         self.target = data_scalers.create_scaler_dict(cfg_object.dataset["targets"])
 
@@ -115,7 +115,7 @@ class NODE_Datamodule(L.LightningDataModule):
         the depletion writer emits.
         """
         df, steps_per_run, time_array = data_help.read_data(
-            path, fraction, drop_run_label=True
+            path, fraction, drop_run_label=True, columns=all_columns
         )
         data_help.print_dataset_stats(df)
         df = df.select(all_columns)
@@ -195,20 +195,21 @@ class NODE_Datamodule(L.LightningDataModule):
         input_trajs = traj.input_trajs[perm]
         target_trajs = traj.target_trajs[perm]
 
-        n_train = int(num_runs * TRAIN_FRACTION)
-        n_val = int(num_runs * VAL_FRACTION)
+        train_frac, val_frac, _ = self.split
+        n_train = int(num_runs * train_frac)
+        n_val = int(num_runs * val_frac)
 
         # perm[i] is the original run index now sitting at position i, so the
         # split is recorded in terms of runs as they appear in the source file.
         self.split_info = {
             "strategy": "random_by_run",
+            "fractions": list(self.split),
             "n_runs": num_runs,
             "steps_per_run": self.actual_steps,
             "train": perm[:n_train].tolist(),
             "val": perm[n_train : n_train + n_val].tolist(),
             "test": perm[n_train + n_val :].tolist(),
         }
-        data_help.write_split_indices(self.result_dir, self.split_info, self.seed)
 
         splits = {
             "train": (input_trajs[:n_train], target_trajs[:n_train]),

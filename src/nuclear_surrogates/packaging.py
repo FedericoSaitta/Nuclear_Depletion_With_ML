@@ -28,6 +28,11 @@ import argparse
 import sys
 from pathlib import Path
 
+from nuclear_surrogates.utils.quiet import silence_import_noise
+
+# Must precede the lightning import below — see main.py.
+silence_import_noise()
+
 import lightning as L
 from loguru import logger
 from omegaconf import OmegaConf
@@ -61,9 +66,8 @@ def package(ckpt_path, config_path, out_dir, data_path=None, overrides=None):
     seed = cfg.runtime.get("seed", 42)
     L.seed_everything(seed, workers=True)
 
-    # Building a datamodule has side effects (split_indices.json, distribution
-    # plots). Send them to a scratch directory: packaging must not write into
-    # results/, and write_bundle emits the canonical split_indices.json anyway.
+    # Building a datamodule has side effects (distribution plots). Send them to
+    # a scratch directory: packaging must not write into results/.
     scratch = tempfile.TemporaryDirectory(prefix="nucml-package-")
     cfg.runtime.output_dir = scratch.name
 

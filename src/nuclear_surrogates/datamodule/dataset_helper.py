@@ -1,6 +1,4 @@
 # Reshape and mold the csv/h5 dataset to be more approachable for ML
-import json
-import os
 import re
 
 import h5py
@@ -18,34 +16,67 @@ def _decode(value):
     return value.decode("utf-8") if isinstance(value, bytes) else str(value)
 
 
-def read_h5_file(file_path):
+def read_h5_file(file_path, columns=None):
+    """Read the HDF5 written by the datagen pipeline into a polars DataFrame.
+
+    With *columns*, only those are pulled out of `numeric_data`. The files hold
+    every nuclide in the depletion chain — 238 columns for the CASL set — while a
+    run configures a handful, so reading the lot costs seconds and hundreds of MB
+    that are then discarded.
+    """
     with h5py.File(file_path, "r") as f:
         all_columns = [_decode(c) for c in f["all_columns"][:]]
+        wanted = None if columns is None else set(columns)
         data_dict = {}
 
         if "numeric_data" in f:
             numeric_cols = [_decode(c) for c in f["numeric_columns"][:]]
-            numeric_data = f["numeric_data"][:]
-            for i, col in enumerate(numeric_cols):
+            if wanted is None:
+                numeric_data = f["numeric_data"][:]
+                keep = list(enumerate(numeric_cols))
+            else:
+                # h5py needs the indices in increasing order; the DataFrame is
+                # reordered by `all_columns` below regardless.
+                keep_idx = sorted(
+                    i for i, col in enumerate(numeric_cols) if col in wanted
+                )
+                numeric_data = f["numeric_data"][:, keep_idx]
+                keep = [(pos, numeric_cols[i]) for pos, i in enumerate(keep_idx)]
+
+            for i, col in keep:
                 data_dict[col] = numeric_data[:, i]
 
         if "string_columns" in f:
             for col in [_decode(c) for c in f["string_columns"][:]]:
+                if wanted is not None and col not in wanted:
+                    continue
                 raw = f[f"string_{col}"][:]
                 data_dict[col] = (
                     [_decode(s) for s in raw] if raw.dtype.kind in ("S", "O") else raw
                 )
 
-        return pl.DataFrame(data_dict).select(all_columns)
+        ordered = [c for c in all_columns if c in data_dict]
+        return pl.DataFrame(data_dict).select(ordered)
 
 
-def read_data(file_path, fraction_of_data, drop_run_label=True):
+def read_data(file_path, fraction_of_data, drop_run_label=True, columns=None):
+    """Read a run's data, keeping only *columns* (plus what this function needs).
+
+    Passing the columns a run actually configures avoids materialising the whole
+    file; `time_days` is always included because the run-length detection and the
+    NODE's time axis both need it.
+    """
     logger.info(f"Reading data from: {file_path}")
+
+    if columns is not None:
+        columns = [*dict.fromkeys([*columns, "time_days"])]
 
     if file_path.endswith(".csv"):
         df = pl.read_csv(file_path)
+        if columns is not None:
+            df = df.select([c for c in df.columns if c in set(columns)])
     elif file_path.endswith(".h5"):
-        df = read_h5_file(file_path)
+        df = read_h5_file(file_path, columns=columns)
     else:
         raise ValueError(f"Unsupported file format: {file_path}")
 
@@ -168,6 +199,30 @@ def create_timeseries_targets(
 # ── Train / val / test splitting ─────────────────────────────────────────────
 
 
+def split_fractions(cfg, default):
+    """Read `dataset.split` as (train, val, test), falling back to *default*.
+
+    The two models partition differently — the DNN sequentially, the NODE by a
+    seeded permutation — so each passes its own historical default. That keeps a
+    config written before this key existed behaving exactly as it did.
+    """
+    section = cfg.dataset.get("split") if "dataset" in cfg else None
+    if section is None:
+        return default
+
+    fractions = tuple(float(section[name]) for name in ("train", "val", "test"))
+    if not np.isclose(sum(fractions), 1.0):
+        raise ValueError(
+            f"dataset.split must sum to 1.0, got {fractions} summing to "
+            f"{sum(fractions)}"
+        )
+    if any(f < 0 for f in fractions):
+        raise ValueError(
+            f"dataset.split fractions must be non-negative, got {fractions}"
+        )
+    return fractions
+
+
 def timeseries_train_val_test_split(
     X,
     Y,
@@ -235,6 +290,7 @@ def timeseries_train_val_test_split(
 
     split_info = {
         "strategy": "sequential_by_run",
+        "fractions": [train_frac, val_frac, test_frac],
         "n_runs": total_runs,
         "steps_per_run": steps_per_run,
         "train": list(range(n_train)),
@@ -243,22 +299,6 @@ def timeseries_train_val_test_split(
         "train_shuffle_order": None if order is None else order.tolist(),
     }
     return X_train, X_val, X_test, y_train, y_val, y_test, split_info
-
-
-# ── Split provenance ─────────────────────────────────────────────────────────
-
-
-def write_split_indices(result_dir_path, split_info, seed):
-    """Record which runs went to train/val/test, next to the run's outputs.
-
-    Without it the partition of a finished run is unrecoverable, and so is any
-    claim that its test metrics were computed on held-out data.
-    """
-    path = os.path.join(result_dir_path, "split_indices.json")
-    with open(path, "w") as f:
-        json.dump({"seed": seed, **split_info}, f, indent=2)
-    logger.info(f"Wrote split indices to {path}")
-    return path
 
 
 # ── Scaling & tensor conversion ──────────────────────────────────────────────

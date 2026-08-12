@@ -133,6 +133,47 @@ def test_shuffle_keeps_timesteps_ordered_within_a_run():
         assert np.all(np.diff(block) > 0), "timestep order was scrambled"
 
 
+def test_split_fractions_default_when_config_is_silent():
+    """A config written before `dataset.split` existed must behave as it did."""
+    from omegaconf import OmegaConf
+
+    cfg = OmegaConf.create({"dataset": {"fraction_of_data": 1.0}})
+    assert dataset_helper.split_fractions(cfg, default=(0.8, 0.1, 0.1)) == (
+        0.8,
+        0.1,
+        0.1,
+    )
+    assert dataset_helper.split_fractions(cfg, default=(0.6, 0.2, 0.2)) == (
+        0.6,
+        0.2,
+        0.2,
+    )
+
+
+def test_split_fractions_read_from_config():
+    from omegaconf import OmegaConf
+
+    cfg = OmegaConf.create(
+        {"dataset": {"split": {"train": 0.7, "val": 0.2, "test": 0.1}}}
+    )
+    assert dataset_helper.split_fractions(cfg, default=(0.8, 0.1, 0.1)) == (
+        0.7,
+        0.2,
+        0.1,
+    )
+
+
+def test_split_fractions_reject_a_config_that_does_not_sum_to_one():
+    """Silently renormalising would quietly change the size of the test set."""
+    from omegaconf import OmegaConf
+
+    cfg = OmegaConf.create(
+        {"dataset": {"split": {"train": 0.8, "val": 0.2, "test": 0.2}}}
+    )
+    with pytest.raises(ValueError, match="sum to 1.0"):
+        dataset_helper.split_fractions(cfg, default=(0.8, 0.1, 0.1))
+
+
 def test_split_info_partitions_every_run_exactly_once():
     X, Y = _split_fixture()
     *_, info = dataset_helper.timeseries_train_val_test_split(

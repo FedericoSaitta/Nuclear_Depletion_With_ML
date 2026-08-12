@@ -10,6 +10,12 @@ import os
 
 import pytest
 
+from nuclear_surrogates.utils.quiet import silence_import_noise
+
+# Runs before any test module imports lightning, which is when the warnings it
+# suppresses would be emitted.
+silence_import_noise()
+
 collect_ignore = []
 if importlib.util.find_spec("openmc") is None:
     collect_ignore = ["OPENMC_tests/test_openmc_install.py"]

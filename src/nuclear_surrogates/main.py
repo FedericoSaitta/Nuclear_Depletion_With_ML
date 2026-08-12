@@ -5,6 +5,13 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from nuclear_surrogates.utils.quiet import silence_import_noise
+
+# Must precede the lightning import below: the warnings it suppresses are
+# emitted while lightning is being imported. This is why E402 is scoped off
+# for this file in pyproject.toml.
+silence_import_noise()
+
 import lightning as L
 import torch
 from loguru import logger

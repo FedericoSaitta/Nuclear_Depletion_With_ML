@@ -1,8 +1,23 @@
+# The paper's 7x7 matrix NODE, as it was actually trained.
+#
+# The train block below was recovered from the checkpoint's own embedded
+# hyperparameters (`hyper_parameters` in
+# best-matrix_ode_7x7_breeding_chain-epoch=2367.ckpt) — the values previously
+# committed here had drifted from the run they claimed to describe. The model
+# block was verified against the same source and matched exactly.
+#
+# Paths are resolved relative to THIS FILE, not to the working directory.
 dataset:
-  # Paths are resolved relative to THIS FILE, not to the working directory.
   path_to_data: ../datasets/casl_3305_runs_inter.h5   # training data (fits the scalers)
   path_to_inference_data: ../datasets/casl_3305_runs_inter.h5
   fraction_of_data: 0.1
+
+  # Fractions of whole runs. The NODE partitions by a seeded random
+  # permutation of runs; the DNN splits sequentially in time.
+  split:
+    train: 0.6
+    val: 0.2
+    test: 0.2
 
   inputs:
     power_W_g: MinMax
@@ -17,12 +32,12 @@ dataset:
 
   target_delta_conc: False
   train:
-    batch_size: 64
+    batch_size: 512
   val:
-    batch_size: 128
+    batch_size: 512
 
 model:
-  name: NODE_FIXED_IMPORTANCE
+  name: matrix_ode_7x7_breeding_chain
   matrix_ode: true
   layers: [128, 128]
   dropout_probability: 0.0
@@ -46,17 +61,17 @@ model:
 
 train:
   loss: mse
-  learning_rate: 0.0
+  learning_rate: 0.004
   weight_decay: 0.0
-  lr_scheduler_patience: 50
-  num_epochs: 1000
-  early_stopping_patience: 100
+  lr_scheduler_patience: 25
+  num_epochs: 5000
+  early_stopping_patience: 75
   grad_clip: 0.0
   drop_last: false
 
   solver: dopri5
-  rtol: 1e-6
-  atol: 1e-8
+  rtol: 1e-5
+  atol: 1e-7
   step_size: 0.01
 
 runtime:
@@ -66,8 +81,6 @@ runtime:
   # dataset paths above, so a relative value is taken from this file's directory.
   ckp_path: ""
   device: cuda
-  # Seeds weight init, the DataLoader shuffle and the train/val/test split.
-  # The chosen split is written to <output_dir>/<model.name>/split_indices.json.
   seed: 42
   num_workers: 12
 

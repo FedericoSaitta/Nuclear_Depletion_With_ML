@@ -40,6 +40,8 @@ class DNN_Datamodule(L.LightningDataModule):
 
         self.inputs = data_scalers.create_scaler_dict(cfg_object.dataset["inputs"])
         self.target = data_scalers.create_scaler_dict(cfg_object.dataset["targets"])
+        # Sequential 80/10/10 unless the config says otherwise.
+        self.split = data_help.split_fractions(cfg_object, default=(0.8, 0.1, 0.1))
         self.delta_conc = cfg_object.dataset.target_delta_conc
         self.train_drop_last = cfg_object.train.drop_last
 
@@ -63,15 +65,19 @@ class DNN_Datamodule(L.LightningDataModule):
 
         logger.info("Setting up the data module...")
 
-        data_df, self.run_length, self.time_array = data_help.read_data(
-            self.path_to_data, self.fraction_of_data, drop_run_label=True
-        )
-        data_help.print_dataset_stats(data_df)
-
-        # Inputs first, then any target that is not also an input.
+        # Inputs first, then any target that is not also an input. Passing these
+        # to read_data keeps the rest of the depletion chain off the heap.
         all_columns = list(self.inputs.keys()) + [
             k for k in self.target if k not in self.inputs
         ]
+
+        data_df, self.run_length, self.time_array = data_help.read_data(
+            self.path_to_data,
+            self.fraction_of_data,
+            drop_run_label=True,
+            columns=all_columns,
+        )
+        data_help.print_dataset_stats(data_df)
         data_df = data_df.select(all_columns)
 
         self.input_data_arr, self.col_index_map = data_help.split_df(
@@ -94,21 +100,21 @@ class DNN_Datamodule(L.LightningDataModule):
         # no successor inside the run.
         self.samples_per_run = self.run_length - 1
 
-        # Split 80/10/10 by whole runs, sequentially in time.
+        # Split by whole runs, sequentially in time.
+        train_frac, val_frac, test_frac = self.split
         X_train, X_val, X_test, y_train, y_val, y_test, split_info = (
             data_help.timeseries_train_val_test_split(
                 X,
                 Y,
-                train_frac=0.8,
-                val_frac=0.1,
-                test_frac=0.1,
+                train_frac=train_frac,
+                val_frac=val_frac,
+                test_frac=test_frac,
                 steps_per_run=self.samples_per_run,
                 shuffle_within_train=True,
                 rng=np.random.default_rng(self.seed),
             )
         )
         self.split_info = split_info
-        data_help.write_split_indices(self.result_dir, split_info, self.seed)
 
         if self.make_plots:
             self._plot_distributions(X_train, y_train, "Raw")

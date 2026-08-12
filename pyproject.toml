@@ -151,6 +151,11 @@ extend-select = ["I", "UP", "B", "SIM", "C4", "RET"]
 "data_generation/quarter_datagen.py" = ["E402"]
 "data_generation/zoom_datagen.py" = ["E402"]
 
+# Same shape of problem on the ML side: both entry points must silence
+# import-time warnings *before* `import lightning`, which is what triggers them.
+"src/nuclear_surrogates/main.py" = ["E402"]
+"src/nuclear_surrogates/packaging.py" = ["E402"]
+
 # The OpenMC half is held to the default rule set only. It cannot be imported —
 # let alone exercised — from the ML environment, so a stylistic auto-fix there
 # would be an unverifiable change to code that produced published data.
@@ -160,6 +165,14 @@ extend-select = ["I", "UP", "B", "SIM", "C4", "RET"]
 # ============================================================================
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# pytest resets the warning filters around every test, so the ones
+# `nuclear_surrogates.utils.quiet` installs for normal runs do not survive here
+# and have to be declared again. (The logging-level change it makes does
+# survive, so the triton/flop-counter warning needs no entry.)
+filterwarnings = [
+  # lightning calls a torch pytree API that torch now deprecates — its fix, not ours.
+  "ignore:.*treespec, LeafSpec.*",
+]
 markers = [
   "openmc: requires the OpenMC install and nuclear data (skipped in the ML env)",
   "golden: pins published numbers against committed fixtures",

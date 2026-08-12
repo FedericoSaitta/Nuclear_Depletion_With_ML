@@ -78,16 +78,6 @@ def _predict_numpy(model, x_np, device):
     return ensure_2d(model(tensor).cpu().numpy())
 
 
-def get_model_prediction(model, x_input, y_scaler):
-    """Single-sample prediction, inverse-scaled to original units."""
-    x_input = np.atleast_2d(x_input)  # (13,) → (1, 13)
-    device = next(model.parameters()).device
-
-    model.eval()
-    pred_scaled = _predict_numpy(model, x_input, device)
-    return y_scaler.inverse_transform(pred_scaled)
-
-
 # ── Feature importance (permutation-based) ───────────────────────────────────
 
 METRIC_REGISTRY = {
@@ -145,13 +135,22 @@ def calculate_feature_importance(
         f"Feature importance ({label}) — {metric_name} ({metric_direction}), baseline={baseline_score:.4f}"
     )
 
-    # Permutation loop
+    # Permutation loop. One scratch copy is reused across every (feature,
+    # repeat) instead of copying the whole test set each time. The column is
+    # reset to its original values before every shuffle — shuffling an already
+    # shuffled column would compose two permutations and give a different
+    # arrangement than a fresh copy does — and restored once the feature is done,
+    # so the rest of the array stays pristine. Restoring a column touches neither
+    # the other columns nor the generator state, so the permutation sequence is
+    # unchanged.
     n_features = X_test.shape[1]
     importances = np.zeros((n_features, n_repeats))
+    X_perm = X_test.copy()
 
     for feat in range(n_features):
+        original_column = X_test[:, feat].copy()
         for rep in range(n_repeats):
-            X_perm = X_test.copy()
+            X_perm[:, feat] = original_column
             rng.shuffle(X_perm[:, feat])
 
             perm_preds = _predict_numpy(model, X_perm, device)
@@ -161,6 +160,7 @@ def calculate_feature_importance(
             importances[feat, rep] = sign * (
                 baseline_score - metric_fn(y_test, perm_preds)
             )
+        X_perm[:, feat] = original_column
 
     return importances.mean(axis=1), importances.std(axis=1), baseline_score
 
@@ -179,87 +179,83 @@ def model_autoregress(
     target_col_indices,
     delta_conc,
 ):
+    """Roll the model forward on its own predictions, one step at a time.
+
+    Only the step axis is sequential — runs are independent — so every run is
+    advanced together and the model, the scalers and the feedback write all see
+    whole `(runs, ...)` arrays instead of one row at a time.
+
+    Returns two {target: flat array} dicts in run-major order, matching the
+    layout the caller reshapes back to `(runs, steps)`.
+    """
     # Work on a copy: the rollout feeds predictions back into the next
     # timestep's inputs, and the caller reuses this same array afterwards for
     # the comparison and error-growth figures.
     X_data = np.array(X_data, copy=True)
 
-    total_samples = len(X_data)
-    n_runs = total_samples // steps_per_run
-
-    unscaled_x = x_scaler.inverse_transform(X_data)
+    n_runs = len(X_data) // steps_per_run
+    n_features = X_data.shape[1]
     target_names = list(target_col_indices.keys())
+
+    # Views onto the same buffers, addressed as (runs, steps, features).
+    X = X_data.reshape(n_runs, steps_per_run, n_features)
+    Y = Y_data.reshape(n_runs, steps_per_run, -1)
+    unscaled_x = x_scaler.inverse_transform(X_data).reshape(
+        n_runs, steps_per_run, n_features
+    )
+
+    # Targets that are also inputs are the ones fed back; the rest of the input
+    # row (power, temperatures, boron) keeps its true value throughout.
+    fed_back = [
+        (n, target_col_indices[n], inputs_indices[n])
+        for n in target_names
+        if n in inputs_indices
+    ]
+    concentrations = (
+        {n: unscaled_x[:, 0, in_idx].copy() for n, _, in_idx in fed_back}
+        if delta_conc
+        else {}
+    )
 
     logger.info(f"Autoregressive: {n_runs} runs × {steps_per_run} steps")
 
-    predictions_dict = {name: [] for name in target_names}
-    ground_truth_dict = {name: [] for name in target_names}
+    # Collected per step and stacked, so the result keeps the model's dtype
+    # rather than being widened by a preallocated float64 buffer.
+    predictions, ground_truth = [], []
 
-    for run in tqdm(range(n_runs), desc="Autoregressive MARE", unit="run"):
-        start = run * steps_per_run
-        end = start + steps_per_run
+    model.eval()
+    device = next(model.parameters()).device
 
-        # Initialise concentrations for delta mode
-        concentrations = {}
-        if delta_conc:
-            init_x = x_scaler.inverse_transform(X_data[start].reshape(1, -1))[0]
-            concentrations = {
-                name: init_x[inputs_indices[name]]
-                for name in target_names
-                if name in inputs_indices
-            }
+    for t in tqdm(range(steps_per_run), desc="Autoregressive MARE", unit="step"):
+        pred = y_scaler.inverse_transform(_predict_numpy(model, X[:, t, :], device))
+        predictions.append(pred)
+        ground_truth.append(y_scaler.inverse_transform(Y[:, t, :]))
 
-        for t in range(start, end):
-            pred = get_model_prediction(model, X_data[t], y_scaler)
-            gt = y_scaler.inverse_transform(Y_data[t].reshape(1, -1))
+        if t == steps_per_run - 1:
+            break
 
-            for name, idx in target_col_indices.items():
-                predictions_dict[name].append(pred[0, idx])
-                ground_truth_dict[name].append(gt[0, idx])
+        for name, target_idx, input_idx in fed_back:
+            value = pred[:, target_idx]
+            if delta_conc:
+                concentrations[name] += value
+                value = concentrations[name]
+            unscaled_x[:, t + 1, input_idx] = value
 
-            # Feed prediction back into next timestep
-            if t < end - 1:
-                _update_next_input(
-                    unscaled_x,
-                    X_data,
-                    x_scaler,
-                    t,
-                    pred,
-                    concentrations,
-                    inputs_indices,
-                    target_col_indices,
-                    delta_conc,
-                )
+        X[:, t + 1, :] = x_scaler.transform(unscaled_x[:, t + 1, :])
 
-    # Convert to arrays
-    predictions_dict = {k: np.array(v) for k, v in predictions_dict.items()}
-    ground_truth_dict = {k: np.array(v) for k, v in ground_truth_dict.items()}
+    # (steps, runs, targets) -> (runs, steps, targets), then flatten run-major,
+    # which is the order the caller reshapes back to (runs, steps).
+    predictions = np.stack(predictions, axis=1)
+    ground_truth = np.stack(ground_truth, axis=1)
+
+    predictions_dict = {
+        name: predictions[:, :, idx].reshape(-1)
+        for name, idx in target_col_indices.items()
+    }
+    ground_truth_dict = {
+        name: ground_truth[:, :, idx].reshape(-1)
+        for name, idx in target_col_indices.items()
+    }
 
     logger.info(f"Collected predictions for targets: {target_names}")
     return predictions_dict, ground_truth_dict
-
-
-def _update_next_input(
-    unscaled_x,
-    X_data,
-    x_scaler,
-    t,
-    pred,
-    concentrations,
-    inputs_indices,
-    target_col_indices,
-    delta_conc,
-):
-    """Write model output back into the next timestep's input features."""
-    for name, target_idx in target_col_indices.items():
-        if name not in inputs_indices:
-            continue
-
-        value = pred[0, target_idx]
-        if delta_conc:
-            concentrations[name] += value
-            value = concentrations[name]
-
-        unscaled_x[t + 1, inputs_indices[name]] = value
-
-    X_data[t + 1] = x_scaler.transform(unscaled_x[t + 1].reshape(1, -1))[0]

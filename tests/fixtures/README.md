@@ -9,6 +9,7 @@ no dependency on the datasets, which is what lets the golden tests run in CI.
 
 | File | Size | What it pins |
 |---|---|---|
+| `golden_node_eval.yaml` | 2 KB | The configuration these fixtures were generated from — architecture, and the `rtol 1e-6 / atol 1e-8` the trajectories were integrated at. Frozen: editing it invalidates every file below. |
 | `best-matrix_ode_7x7_breeding_chain-epoch=2367.ckpt` | 241 KB | The paper's NODE. Retrieved from cluster scratch — **this repo is now one of its few copies**. |
 | `mini_casl_10runs.h5` | 1.9 MB | First 10 runs (1010 rows) sliced deterministically from `casl_3305_runs_inter.h5`. |
 | `preprocessor.json` | 8 KB | The fitted scalers. See "Why this exists" below. |
@@ -44,6 +45,19 @@ Note `preprocessor.json` records `t_days: 1000.0` alongside
 `t_days_data_span: 990.0`. The data really spans 990 days; 1000 is the constant
 the published runs used. Both travel so the discrepancy is visible — correcting
 what consumes it is `AUDIT.md` P1 and has not been done.
+
+## Why the config lives here
+
+These fixtures pin the output of a *specific* configuration, so the config is
+part of the fixture. It used to be `configs/main_config.yaml`, which is a
+working file — the moment its solver tolerances were loosened from
+`rtol 1e-6 / atol 1e-8` to `1e-5 / 1e-7`, dopri5 took different steps and five
+of the nine golden tests failed on trajectories differing by ~2%. Nothing was
+wrong with the code; the anchor had simply moved.
+
+Note the tolerance recorded here is what the fixtures were *generated* with. The
+checkpoint was *trained* at `1e-5 / 1e-7` — see `AUDIT.md` P4. Reconciling the
+two means regenerating.
 
 ## Regenerating
 
