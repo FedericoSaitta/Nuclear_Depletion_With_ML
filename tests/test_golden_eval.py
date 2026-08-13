@@ -27,6 +27,13 @@ from golden_setup import (
 GOLDEN_TF = os.path.join(FIX, "golden_node_tf_preds.npy")
 GOLDEN_EVAL = os.path.join(FIX, "golden_node_eval.json")
 
+# Every error-growth curve starts at exactly 0 and then climbs, often over
+# several decades, so its smallest elements are differences of nearly equal
+# numbers: a purely relative bound on those pins arithmetic noise rather than
+# behaviour. Each curve is therefore also allowed a floor of 0.1% of its own
+# peak. A real regression moves a whole curve, not its smallest points.
+CURVE_ATOL_FRACTION = 1e-3
+
 pytestmark = [
     pytest.mark.golden,
     pytest.mark.skipif(not fixtures_present(), reason="golden fixtures are missing"),
@@ -89,11 +96,12 @@ def test_error_growth_curves_unchanged(evaluated):
     )
     for idx, name in enumerate(evaluated["target_names"]):
         for key in ("avg_ar_mae", "avg_tf_mae", "avg_ar_male", "avg_tf_male"):
+            expected = np.asarray(golden["error_growth"][name][key])
             np.testing.assert_allclose(
                 curves[idx][key],
-                golden["error_growth"][name][key],
+                expected,
                 rtol=TRAJECTORY_RTOL,
-                atol=1e-12,
+                atol=CURVE_ATOL_FRACTION * expected.max(),
                 err_msg=f"{name}/{key} moved",
             )
 

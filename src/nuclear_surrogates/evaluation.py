@@ -39,6 +39,21 @@ def error_growth_curves(trues, ar_preds, tf_preds, epsilon=MALE_EPSILON):
     absolute error (MAE) and absolute log error (MALE), under teacher forcing
     and autoregressive rollout.
     """
+
+    def log10_abs(a):
+        """log10|a| at double precision.
+
+        MALE subtracts two logs that, on a well-predicted channel, agree to
+        about seven digits — so in float32 it is almost pure cancellation.
+        U238's is ~5e-6 against logs of magnitude 1.65, a few ULPs, which leaves
+        the result at the mercy of the platform's log10 rounding: Windows and
+        Linux disagree there by 1-3 ULPs, which is percent-level on the metric.
+        Widening the log costs nothing and makes the number reproducible; the
+        predictions themselves stay float32, as does the MAE, whose subtraction
+        of two nearby floats is exact.
+        """
+        return np.log10(np.abs(np.asarray(a, dtype=np.float64)) + epsilon)
+
     results = []
     for idx in range(trues.shape[2]):
         gt = trues[:, :, idx]
@@ -48,9 +63,9 @@ def error_growth_curves(trues, ar_preds, tf_preds, epsilon=MALE_EPSILON):
         tf_mae_errors = np.abs(tf - gt)
         ar_mae_errors = np.abs(ar - gt)
 
-        log_gt = np.log10(np.abs(gt) + epsilon)
-        tf_male_errors = np.abs(np.log10(np.abs(tf) + epsilon) - log_gt)
-        ar_male_errors = np.abs(np.log10(np.abs(ar) + epsilon) - log_gt)
+        log_gt = log10_abs(gt)
+        tf_male_errors = np.abs(log10_abs(tf) - log_gt)
+        ar_male_errors = np.abs(log10_abs(ar) - log_gt)
 
         results.append(
             {
