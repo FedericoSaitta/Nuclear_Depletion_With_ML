@@ -47,13 +47,21 @@ REQUIRED_FIXTURES = (
 # the CPU wheel on Linux, a different oneDNN/MKL, and the two disagree by up to
 # ~2e-3 relative. That is float noise amplified by step selection, not a change
 # in behaviour — confirmed by the fact that the depletion-matrix probes, which
-# involve no solver at all, still agree to 1e-5, and the aggregate metrics still
-# agree to 1e-4.
+# involve no solver at all, still agree to 1e-5, and the aggregate metrics to
+# 1e-3.
 #
 # It is still a real anchor: every genuine regression seen so far moved
 # trajectories by >= 2e-2, four times this bound.
 TRAJECTORY_RTOL, TRAJECTORY_ATOL = 5e-3, 1e-6
-METRIC_RTOL = 1e-4
+
+# Averaging 7000 samples cancels most of that scatter, so the metrics pin five
+# times tighter than the trajectories they are computed from — but not
+# arbitrarily tighter, and the three platforms do not agree equally. The Linux
+# CPU wheel reproduces the fixtures bit for bit; the windows-latest runner, a
+# different CPU to the machine that generated them, moves per-isotope MAE and
+# MARE by up to 1.1e-4 relative. This bound clears that by ~9x while still
+# sitting 20x below the smallest genuine regression observed.
+METRIC_RTOL = 1e-3
 # No ODE solve, so no adaptive amplification — this one stays tight.
 MATRIX_RTOL, MATRIX_ATOL = 1e-5, 1e-7
 
