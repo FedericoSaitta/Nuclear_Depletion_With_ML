@@ -1,0 +1,210 @@
+import os
+
+import lightning as L
+import torch
+import torch.multiprocessing as mp
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
+from loguru import logger
+
+from nuclear_surrogates.bundle import BUNDLE_DIRNAME, write_bundle
+from nuclear_surrogates.utils.paths import result_dir
+from nuclear_surrogates.utils.sql_lite_logger import SQLiteLogger
+
+# ── Shared helpers ───────────────────────────────────────────────────────────
+
+
+def _build_callbacks(cfg, result_dir_path):
+    model_name = cfg.model.name
+    callbacks = []
+
+    checkpoint_cb = ModelCheckpoint(
+        dirpath=result_dir_path,
+        filename=f"best-{model_name}-{{epoch:02d}}",
+        monitor="val_loss",
+        mode="min",
+        save_top_k=1,
+        save_last=False,
+        verbose=False,
+    )
+    callbacks.append(checkpoint_cb)
+
+    patience = getattr(cfg.train, "early_stopping_patience", None)
+    if patience is not None:
+        callbacks.append(
+            EarlyStopping(
+                monitor="val_loss",
+                patience=patience,
+                mode="min",
+                verbose=False,
+            )
+        )
+
+    return callbacks, checkpoint_cb
+
+
+def _build_trainer(cfg, callbacks, pl_logger, **extra_kwargs):
+    # Only meaningful with dataloader workers: shipping tensors between
+    # processes exhausts the default file-descriptor sharing on Linux. With
+    # num_workers=0 there are no worker processes to share with.
+    if cfg.runtime.get("num_workers", 0):
+        mp.set_sharing_strategy("file_system")
+
+    return L.Trainer(
+        max_epochs=cfg.train.num_epochs,
+        accelerator=cfg.runtime.device,
+        devices="auto",
+        callbacks=callbacks,
+        logger=pl_logger,
+        gradient_clip_val=cfg.train.grad_clip,
+        gradient_clip_algorithm="norm",
+        **extra_kwargs,
+    )
+
+
+# ── Checkpoint utilities ─────────────────────────────────────────────────────
+
+
+def _fix_state_dict_keys(model_keys, ckpt_keys, state_dict):
+    """Reconcile a 'model.' prefix mismatch between model and checkpoint."""
+    if model_keys == ckpt_keys:
+        return state_dict
+
+    model_has_prefix = any(k.startswith("model.") for k in model_keys)
+    ckpt_has_prefix = any(k.startswith("model.") for k in ckpt_keys)
+
+    if model_has_prefix and not ckpt_has_prefix:
+        return {f"model.{k}": v for k, v in state_dict.items()}
+    if ckpt_has_prefix and not model_has_prefix:
+        return {k.replace("model.", "", 1): v for k, v in state_dict.items()}
+
+    # Keys differ for another reason — return as-is and let strict loading surface the error.
+    return state_dict
+
+
+def load_checkpoint_into_model(model, ckpt_path):
+    """Load a checkpoint into *model*, fixing a leading 'model.' prefix if needed."""
+    checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    state_dict = (
+        checkpoint.get("state_dict", checkpoint)
+        if isinstance(checkpoint, dict)
+        else checkpoint
+    )
+
+    formatted_state_dict = _fix_state_dict_keys(
+        set(model.state_dict().keys()),
+        set(state_dict.keys()),
+        state_dict,
+    )
+
+    model.load_state_dict(formatted_state_dict, strict=True)
+    return model
+
+
+# ── Public API ───────────────────────────────────────────────────────────────
+
+
+def train_and_test(datamodule, model_class, cfg):
+    """Instantiate a model, train it, and test using the best checkpoint."""
+    result_dir_path = result_dir(cfg)
+    callbacks, checkpoint_cb = _build_callbacks(cfg, result_dir_path)
+
+    pl_logger = SQLiteLogger(
+        db_path=cfg.runtime.model_database,
+        name=cfg.model.name,
+    )
+
+    model = model_class(config_object=cfg)
+    trainer = _build_trainer(cfg, callbacks, pl_logger)
+
+    trainer.fit(model=model, datamodule=datamodule)
+
+    # Capture validation metrics before test() overwrites callback_metrics.
+    val_metrics = {
+        "val_r2": float(trainer.callback_metrics.get("val_r2", -float("inf"))),
+        "val_loss": float(trainer.callback_metrics.get("val_loss", float("inf"))),
+        "val_mae": float(trainer.callback_metrics.get("val_mae", float("inf"))),
+    }
+
+    best_path = checkpoint_cb.best_model_path
+    logger.info(f"Best model saved at: {best_path}")
+
+    bundle = _write_run_bundle(datamodule, cfg, result_dir_path, best_path, val_metrics)
+    pl_logger.set_bundle_path(bundle)
+
+    trainer.test(model=model, datamodule=datamodule, ckpt_path=best_path)
+    return val_metrics
+
+
+def _write_run_bundle(datamodule, cfg, result_dir_path, ckpt_path, metrics=None):
+    """Package weights + fitted scalers + provenance beside the run's outputs.
+
+    This is the run's record: the experiment database stores results and a
+    pointer here rather than its own copy of the config.
+
+    Best-effort — a bundle failure must not throw away a finished training run,
+    so it returns None and the caller logs that the run has no record.
+    """
+    preprocessor = getattr(datamodule, "preprocessor", None)
+    if preprocessor is None:
+        logger.warning("Datamodule exposes no preprocessor — skipping bundle")
+        return None
+    try:
+        return write_bundle(
+            out_dir=os.path.join(result_dir_path, BUNDLE_DIRNAME),
+            cfg=cfg,
+            preprocessor=preprocessor,
+            ckpt_path=ckpt_path,
+            split_info=getattr(datamodule, "split_info", None),
+            metrics=metrics,
+        )
+    except Exception as exc:  # noqa: BLE001 - never lose a trained model to this
+        logger.error(f"Failed to write model bundle: {exc}")
+        return None
+
+
+def train_from_checkpoint_and_test(datamodule, model_class, cfg):
+    """Resume training from a checkpoint, then test using the best checkpoint."""
+    result_dir_path = result_dir(cfg)
+    callbacks, checkpoint_cb = _build_callbacks(cfg, result_dir_path)
+
+    pl_logger = SQLiteLogger(
+        db_path=cfg.runtime.model_database,
+        name=cfg.model.name,
+    )
+
+    logger.info(f"Loading model from checkpoint: {cfg.runtime.ckp_path}")
+
+    model = model_class(cfg)
+    datamodule.setup(stage="fit")
+    model = load_checkpoint_into_model(model, cfg.runtime.ckp_path)
+
+    logger.info("Successfully loaded checkpoint — starting training")
+
+    trainer = _build_trainer(cfg, callbacks, pl_logger)
+    trainer.fit(model=model, datamodule=datamodule)
+
+    best_path = checkpoint_cb.best_model_path
+    logger.info(f"Best model saved at: {best_path}")
+
+    bundle = _write_run_bundle(datamodule, cfg, result_dir_path, best_path)
+    pl_logger.set_bundle_path(bundle)
+
+    trainer.test(model=model, datamodule=datamodule, ckpt_path=best_path)
+
+
+def inference(datamodule, model_class, cfg):
+    """Load a checkpoint, fit scalers on training data, test on inference data."""
+    logger.info(f"Inference mode — loading checkpoint: {cfg.runtime.ckp_path}")
+
+    model = model_class(cfg)
+    model = load_checkpoint_into_model(model, cfg.runtime.ckp_path)
+
+    datamodule.inference_mode = True
+
+    trainer = L.Trainer(
+        accelerator=cfg.runtime.device,
+        devices="auto",
+        logger=False,
+    )
+
+    trainer.test(model=model, datamodule=datamodule)

@@ -1,0 +1,17 @@
+# Shell scripts must keep LF endings even when checked out on Windows with
+# core.autocrlf=true. scripts/*.sh run under WSL2 / the cluster; CRLF makes
+# bash fail with `$'\r': command not found`.
+*.sh text eol=lf
+
+# Same reasoning for anything else consumed by a POSIX tool.
+*.slurm text eol=lf
+
+# PowerShell is the Windows-side counterpart; keep it CRLF.
+*.ps1 text eol=crlf
+
+# Nuclear data and simulation output are binary — never touch them.
+*.h5 binary
+*.hdf5 binary
+*.npy binary
+*.npz binary
+*.ckpt binary

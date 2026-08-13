@@ -1,0 +1,68 @@
+# Best 7-isotope DNN, reconstructed from Chain_Model.db row 20
+# (Best_Chain_Result, 2025-11-26) — the original YAML was lost.
+# Pairs with results/legacy_ML/Best_Chain_Result/best-Best_Chain_Result-epoch=176.ckpt.
+#
+# Paths are resolved relative to THIS FILE, not to the working directory.
+dataset:
+  path_to_data: ../datasets/casl_3305_runs_inter.h5
+  fraction_of_data: 1.0
+  # Fractions of whole runs, split sequentially in time.
+  split:
+    train: 0.8
+    val: 0.1
+    test: 0.1
+
+  inputs:
+    power_W_g: MinMax
+    fuel_temp_K: MinMax
+    mod_temp_K: MinMax
+    clad_temp_K: MinMax
+    mod_density_g_cm3: MinMax
+    boron_ppm: MinMax
+    U238: quantile
+    U239: MinMax
+    Np239: MinMax
+    Pu239: robust
+    Pu240: standard
+    Pu241: MinMax
+    Pu242: MinMax
+  targets:
+    U238: robust
+    U239: robust
+    Np239: standard
+    Pu239: standard
+    Pu240: robust
+    Pu241: robust
+    Pu242: robust
+  target_delta_conc: true
+  train:
+    batch_size: 512
+  val:
+    batch_size: 8192
+model:
+  name: BEST_7_Isotope_DNN
+  layers:
+  - 128
+  - 128
+  dropout_probability: 0.0
+  activation: tanh
+  output_activation: none
+  residual_connections: true
+train:
+  loss: huber
+  learning_rate: 0.0009134017134849459
+  weight_decay: 0.00013378788391636378
+  lr_scheduler_patience: 10
+  num_epochs: 500
+  early_stopping_patience: 20
+  drop_last: false
+  grad_clip: 0.0
+runtime:
+  mode: train
+  model: DNN
+  ckp_path: ""
+  device: cuda
+  seed: 42
+  num_workers: 6
+  output_dir: ../results
+  model_database: ../Chain_Model.db

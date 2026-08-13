@@ -1,0 +1,194 @@
+{
+  "schema_version": 1,
+  "sklearn_version": "1.9.0",
+  "t_days": 1000.0,
+  "t_days_data_span": 990.0,
+  "inputs": {
+    "order": [
+      "power_W_g"
+    ],
+    "scalers": {
+      "power_W_g": {
+        "type": "MinMaxScaler",
+        "params": {
+          "min_": [
+            -2.3743484556543046e-05
+          ],
+          "scale_": [
+            0.024155496832911048
+          ],
+          "data_min_": [
+            0.0009829433325583
+          ],
+          "data_max_": [
+            41.39942765002697
+          ],
+          "data_range_": [
+            41.39844470669441
+          ],
+          "n_features_in_": 1
+        }
+      }
+    }
+  },
+  "targets": {
+    "order": [
+      "U238",
+      "U239",
+      "Np239",
+      "Pu239",
+      "Pu240",
+      "Pu241",
+      "Pu242"
+    ],
+    "scalers": {
+      "U238": {
+        "type": "MinMaxScaler",
+        "params": {
+          "min_": [
+            -48.54381581859745
+          ],
+          "scale_": [
+            2205.56602899156
+          ],
+          "data_min_": [
+            0.0220096860309337
+          ],
+          "data_max_": [
+            0.0224630843816769
+          ],
+          "data_range_": [
+            0.00045339835074319906
+          ],
+          "n_features_in_": 1
+        }
+      },
+      "U239": {
+        "type": "MinMaxScaler",
+        "params": {
+          "min_": [
+            0.0
+          ],
+          "scale_": [
+            48665598.5249362
+          ],
+          "data_min_": [
+            0.0
+          ],
+          "data_max_": [
+            2.05483962040989e-08
+          ],
+          "data_range_": [
+            2.05483962040989e-08
+          ],
+          "n_features_in_": 1
+        }
+      },
+      "Np239": {
+        "type": "MinMaxScaler",
+        "params": {
+          "min_": [
+            0.0
+          ],
+          "scale_": [
+            346277.0179918708
+          ],
+          "data_min_": [
+            0.0
+          ],
+          "data_max_": [
+            2.887861301911396e-06
+          ],
+          "data_range_": [
+            2.887861301911396e-06
+          ],
+          "n_features_in_": 1
+        }
+      },
+      "Pu239": {
+        "type": "MinMaxScaler",
+        "params": {
+          "min_": [
+            0.0
+          ],
+          "scale_": [
+            9059.162484577271
+          ],
+          "data_min_": [
+            0.0
+          ],
+          "data_max_": [
+            0.0001103854800819
+          ],
+          "data_range_": [
+            0.0001103854800819
+          ],
+          "n_features_in_": 1
+        }
+      },
+      "Pu240": {
+        "type": "MinMaxScaler",
+        "params": {
+          "min_": [
+            0.0
+          ],
+          "scale_": [
+            22208.605236903826
+          ],
+          "data_min_": [
+            0.0
+          ],
+          "data_max_": [
+            4.502759130223584e-05
+          ],
+          "data_range_": [
+            4.502759130223584e-05
+          ],
+          "n_features_in_": 1
+        }
+      },
+      "Pu241": {
+        "type": "MinMaxScaler",
+        "params": {
+          "min_": [
+            0.0
+          ],
+          "scale_": [
+            42499.040588450676
+          ],
+          "data_min_": [
+            0.0
+          ],
+          "data_max_": [
+            2.3529942938800244e-05
+          ],
+          "data_range_": [
+            2.3529942938800244e-05
+          ],
+          "n_features_in_": 1
+        }
+      },
+      "Pu242": {
+        "type": "MinMaxScaler",
+        "params": {
+          "min_": [
+            0.0
+          ],
+          "scale_": [
+            120131.82345697726
+          ],
+          "data_min_": [
+            0.0
+          ],
+          "data_max_": [
+            8.32418897194322e-06
+          ],
+          "data_range_": [
+            8.32418897194322e-06
+          ],
+          "n_features_in_": 1
+        }
+      }
+    }
+  }
+}

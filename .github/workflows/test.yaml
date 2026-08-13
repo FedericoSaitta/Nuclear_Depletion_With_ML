@@ -4,24 +4,94 @@ on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main ]
+  workflow_dispatch:
+
+# Determinism knobs. Thread count changes the order of floating-point
+# reductions, so the pinned training trajectories need it fixed — and a
+# single-threaded 2-core runner is not measurably slower on fixtures this small.
+env:
+  PYTHONHASHSEED: "0"
+  OMP_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
 
 jobs:
-  test:
+  ml:
+    name: ML env (uv, no OpenMC)
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 20
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Set up Conda
-        uses: conda-incubator/setup-miniconda@v3
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
         with:
-          auto-update-conda: true
-          environment-file: environment.yml
-          activate-environment: nuclear-ml
-
-      - name: Run pytest
-        shell: bash -l {0}
+          enable-cache: true
+      # CPU torch in CI: the cu128 index would pull ~3 GB of NVIDIA wheels
+      # for no benefit on a GitHub runner.
+      # --locked fails the build if uv.lock has drifted from pyproject.toml.
+      # The cluster syncs with --locked (scripts/bootstrap.sh), so without this
+      # drift passes CI green and only breaks on first clone there.
+      - run: uv sync --extra ml --locked --index-strategy unsafe-best-match
+        env:
+          UV_INDEX_PYTORCH_CU128: https://download.pytorch.org/whl/cpu
+      # Everything except the pinned training trajectories, which are
+      # platform-sensitive and get their own job below. This includes the golden
+      # regression tests: they read only committed fixtures, so unlike before
+      # they actually run here rather than skipping.
+      - name: Tests
+        run: uv run --extra ml pytest -v -m "not golden_train"
+      - name: Lint
         run: |
-          pytest tests/test.py -v
+          uv run --extra ml ruff check .
+          uv run --extra ml ruff format --check .
+
+  golden-train:
+    name: Pinned training trajectories
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --extra ml --locked --index-strategy unsafe-best-match
+        env:
+          UV_INDEX_PYTORCH_CU128: https://download.pytorch.org/whl/cpu
+      # Separated from the main job because these compare against numbers that
+      # were recorded on one platform and library set. A failure here means
+      # either a real change in the training path or a platform difference — the
+      # assertion message says how to tell them apart. Keeping them out of the
+      # main job means that ambiguity never blocks an unrelated PR.
+      - name: Pinned loss trajectories
+        run: uv run --extra ml pytest -v -m golden_train
+
+  windows:
+    name: Windows smoke
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --extra ml --locked --index-strategy unsafe-best-match
+        env:
+          UV_INDEX_PYTORCH_CU128: https://download.pytorch.org/whl/cpu
+      # Development happens on Windows while the rest of CI is Linux. This
+      # catches path-separator and line-ending bugs at the source rather than
+      # after a cluster run fails. uv.lock already resolves win32/AMD64.
+      - name: Tests
+        run: uv run --extra ml pytest -q -m "not golden_train"
+
+  simulation:
+    name: Simulation env (OpenMC source build)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: sudo apt-get update && sudo apt-get install -y g++ cmake libhdf5-dev
+      - run: UV_PROJECT_ENVIRONMENT=.venv-sim uv sync --extra sim --locked
+      - run: ./scripts/install_openmc.sh
+      # The OpenMC tests need the 7 GB nuclear-data library, which CI does not
+      # have — this job proves the *environment* builds, not the physics.
+      - run: UV_PROJECT_ENVIRONMENT=.venv-sim uv run python -c "import openmc.deplete; print(openmc.__version__)"

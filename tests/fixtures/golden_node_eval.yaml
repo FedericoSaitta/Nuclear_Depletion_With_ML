@@ -1,0 +1,94 @@
+# FROZEN — the configuration the committed golden fixtures were generated from.
+#
+# `tests/golden_setup.py` builds the golden regression run from this file, so
+# the model block and the solver settings below must keep matching
+# `tests/fixtures/golden_node_*.npy`. Editing either means regenerating those
+# fixtures with `tests/make_golden.py`, which moves numbers the write-up may
+# already quote — a deliberate act, never a tidy-up.
+#
+# It lives beside the fixtures it pins, rather than in `configs/`, because it
+# is test infrastructure — not a configuration anyone should run. Keeping it
+# here also leaves `configs/main_config.yaml` free to edit for real runs
+# without silently breaking the regression anchor.
+#
+# Note the solver is rtol 1e-6 / atol 1e-8, which is what the fixtures were made
+# with. The checkpoint was *trained* at 1e-5 / 1e-7 — see AUDIT.md P4.
+# Reconciling the two means regenerating the fixtures.
+#
+# Paths are resolved relative to THIS FILE, not to the working directory.
+dataset:
+  path_to_data: ../../datasets/casl_3305_runs_inter.h5   # training data (fits the scalers)
+  path_to_inference_data: ../../datasets/casl_3305_runs_inter.h5
+  fraction_of_data: 0.1
+
+  inputs:
+    power_W_g: MinMax
+  targets:
+    U238: MinMax
+    U239: MinMax
+    Np239: MinMax
+    Pu239: MinMax
+    Pu240: MinMax
+    Pu241: MinMax
+    Pu242: MinMax
+
+  target_delta_conc: False
+  train:
+    batch_size: 64
+  val:
+    batch_size: 128
+
+model:
+  name: NODE_FIXED_IMPORTANCE
+  matrix_ode: true
+  layers: [128, 128]
+  dropout_probability: 0.0
+  activation: gelu
+  output_activation: none
+  residual_connections: false
+
+  # Target order: U238(0), U239(1), Np239(2), Pu239(3), Pu240(4), Pu241(5), Pu242(6)
+  # Physical chain: U238 -> U239 -> Np239 -> Pu239 -> Pu240 -> Pu241 -> Pu242
+  # Only adjacent transitions allowed, so zero out all non-adjacent off-diagonals
+  # Allowed non-zero: diagonal (i,i), and (i+1,i) sub-diagonal feed terms, and (i,i+1) loss terms
+  matrix_zero_entries: [
+          [0,1],[0,2],[0,3],[0,4],[0,5],[0,6],
+                [1,2],[1,3],[1,4],[1,5],[1,6],
+    [2,0],            [2,3],[2,4],[2,5],[2,6],
+    [3,0],[3,1],            [3,4],[3,5],[3,6],
+    [4,0],[4,1],[4,2],            [4,5],[4,6],
+    [5,0],[5,1],[5,2],[5,3],            [5,6],
+    [6,0],[6,1],[6,2],[6,3],[6,4]
+  ]
+
+train:
+  loss: mse
+  learning_rate: 0.0
+  weight_decay: 0.0
+  lr_scheduler_patience: 50
+  num_epochs: 1000
+  early_stopping_patience: 100
+  grad_clip: 0.0
+  drop_last: false
+
+  solver: dopri5
+  rtol: 1e-6
+  atol: 1e-8
+  step_size: 0.01
+
+runtime:
+  mode: train
+  model: NODE
+  # Checkpoint to load for mode: train_from_ckp / inference. Resolved like the
+  # dataset paths above, so a relative value is taken from this file's directory.
+  ckp_path: ""
+  device: cuda
+  # Seeds weight init, the DataLoader shuffle and the train/val/test split.
+  # The chosen split is written to <output_dir>/<model.name>/split_indices.json.
+  seed: 42
+  num_workers: 12
+
+  # Both resolved relative to this file, so output lands in the same place no
+  # matter which directory the run was launched from.
+  output_dir: ../../results
+  model_database: ../../Chain_Model.db

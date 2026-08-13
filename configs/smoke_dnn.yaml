@@ -1,0 +1,67 @@
+# Smallest runnable DNN config — the single-step (state_t -> state_t+1)
+# surrogate, on the committed 10-run test fixture. See configs/smoke_node.yaml
+# for the rationale.
+#
+#   uv run nucml --config configs/smoke_dnn.yaml
+dataset:
+  # Paths are resolved relative to THIS FILE, not to the working directory.
+  path_to_data: ../tests/fixtures/mini_casl_10runs.h5
+  fraction_of_data: 1.0
+
+  # Fractions of whole runs, split sequentially in time.
+  split:
+    train: 0.8
+    val: 0.1
+    test: 0.1
+
+  inputs:
+    power_W_g: MinMax
+    U238: MinMax
+    U239: MinMax
+    Np239: MinMax
+    Pu239: MinMax
+    Pu240: MinMax
+    Pu241: MinMax
+    Pu242: MinMax
+  targets:
+    U238: MinMax
+    U239: MinMax
+    Np239: MinMax
+    Pu239: MinMax
+    Pu240: MinMax
+    Pu241: MinMax
+    Pu242: MinMax
+
+  target_delta_conc: true
+  train:
+    batch_size: 64
+  val:
+    batch_size: 128
+
+model:
+  name: smoke_dnn
+  layers: [16, 16]
+  dropout_probability: 0.0
+  activation: tanh
+  output_activation: none
+  residual_connections: true
+
+train:
+  loss: huber
+  learning_rate: 0.001
+  weight_decay: 0.0
+  lr_scheduler_patience: 5
+  num_epochs: 3
+  grad_clip: 0.0
+  drop_last: false
+
+runtime:
+  mode: train
+  model: DNN
+  ckp_path: ""
+  device: cpu
+  seed: 0
+  num_workers: 0
+  plots: false
+  output_dir: ../results
+  model_database: ../Chain_Model.db

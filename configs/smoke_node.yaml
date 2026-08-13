@@ -1,0 +1,86 @@
+# Smallest runnable NODE config: 10 trajectories from the committed test
+# fixture, CPU, a handful of epochs. Trains nothing useful — it exists so the
+# whole pipeline can be exercised in seconds, on a machine with no datasets and
+# no GPU.
+#
+#   uv run nucml --config configs/smoke_node.yaml
+#
+# The training regression tests drive this same file.
+dataset:
+  # Paths are resolved relative to THIS FILE, not to the working directory.
+  path_to_data: ../tests/fixtures/mini_casl_10runs.h5
+  path_to_inference_data: ../tests/fixtures/mini_casl_10runs.h5
+  # The fixture is only 10 runs; a fraction would leave too few to split.
+  fraction_of_data: 1.0
+
+  # Fractions of whole runs. The NODE partitions by a seeded random
+  # permutation of runs; the DNN splits sequentially in time.
+  split:
+    train: 0.6
+    val: 0.2
+    test: 0.2
+
+  inputs:
+    power_W_g: MinMax
+  targets:
+    U238: MinMax
+    U239: MinMax
+    Np239: MinMax
+    Pu239: MinMax
+    Pu240: MinMax
+    Pu241: MinMax
+    Pu242: MinMax
+
+  target_delta_conc: False
+  train:
+    batch_size: 2
+  val:
+    batch_size: 2
+
+model:
+  name: smoke_node
+  matrix_ode: true
+  layers: [16, 16]
+  dropout_probability: 0.0
+  activation: gelu
+  output_activation: none
+  residual_connections: false
+
+  # Same breeding-chain sparsity as the paper model, at toy width.
+  matrix_zero_entries: [
+          [0,1],[0,2],[0,3],[0,4],[0,5],[0,6],
+                [1,2],[1,3],[1,4],[1,5],[1,6],
+    [2,0],            [2,3],[2,4],[2,5],[2,6],
+    [3,0],[3,1],            [3,4],[3,5],[3,6],
+    [4,0],[4,1],[4,2],            [4,5],[4,6],
+    [5,0],[5,1],[5,2],[5,3],            [5,6],
+    [6,0],[6,1],[6,2],[6,3],[6,4]
+  ]
+
+train:
+  loss: mse
+  learning_rate: 0.01
+  weight_decay: 0.0
+  lr_scheduler_patience: 5
+  num_epochs: 3
+  grad_clip: 0.0
+  drop_last: false
+
+  # Fixed-step rk4 rather than adaptive dopri5: an adaptive solver can change
+  # its step sequence under floating-point noise, which makes a pinned loss
+  # trajectory flaky for reasons that have nothing to do with the code.
+  solver: rk4
+  rtol: 1e-6
+  atol: 1e-8
+  step_size: 0.05
+
+runtime:
+  mode: train
+  model: NODE
+  ckp_path: ""
+  device: cpu
+  seed: 0
+  num_workers: 0
+  plots: false
+  output_dir: ../results
+  model_database: ../Chain_Model.db

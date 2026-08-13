@@ -1,0 +1,23 @@
+{
+  "_generated_on": {
+    "platform": "win32",
+    "machine": "AMD64",
+    "python": "3.12.13",
+    "torch": "2.11.0+cu128"
+  },
+  "_note": "Per-epoch training loss on tests/fixtures/mini_casl_10runs.h5 at seed 0. Compared at rtol=1e-3, which absorbs BLAS-level differences but not a real change in the training path.",
+  "DNN": {
+    "train_losses": [
+      0.12183079123497009,
+      0.06928262859582901,
+      0.03948173299431801
+    ]
+  },
+  "NODE": {
+    "train_losses": [
+      0.21225152909755707,
+      0.2077673077583313,
+      0.20250916481018066
+    ]
+  }
+}

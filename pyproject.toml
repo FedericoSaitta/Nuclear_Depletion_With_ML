@@ -1,12 +1,183 @@
-[project]
-name = "Nuclear_Transport_With_ML"
-version = "0.1.0"
-description = "Nuclear Transport and ML package"
-authors = [{ name = "Abel Castaneda Rodriguez and Federico Saitta" }]
-requires-python = ">=3.9"
+# ============================================================================
+#  Nuclear_Transport_With_ML — single dependency source of truth.
+#
+#  The repo has two disjoint halves (verified: no shared imports):
+#     src/nuclear_surrogates/ → torch / lightning / torchdiffeq  [extra: ml]
+#     data_generation/, util/ → openmc                          [extra: sim]
+#
+#  They are NEVER installed together (see [tool.uv].conflicts). OpenMC is not
+#  on PyPI, so it is not listed as a dependency anywhere — it is injected into
+#  the `sim` environment by scripts/install_openmc.sh (see the README).
+# ============================================================================
+
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = ["ML"]
+[project]
+name = "nuclear-transport-with-ml"
+version = "0.1.0"
+description = "DNN and Neural-ODE surrogates for OpenMC depletion calculations"
+readme = "README.md"
+authors = [
+  { name = "Federico Saitta" },
+  { name = "Abel Castaneda Rodriguez" },
+]
+
+# 3.12 is the only version that satisfies BOTH halves:
+#   - OpenMC `develop` declares requires-python >= 3.12
+#   - PyTorch ships CUDA wheels for cp312 on linux-x86_64 AND win-amd64
+#     (cp314 is CPU-only today, so a 3.14 environment cannot use the GPU)
+requires-python = ">=3.12,<3.13"
+
+# Shared by both halves — verified by import, not by habit.
+dependencies = [
+  "numpy>=1.26,<3",
+  "polars>=1.0",
+  "h5py>=3.11",
+  "matplotlib>=3.8",
+  "loguru>=0.7",
+]
+
+[project.optional-dependencies]
+# ---- ML half -------------------------------------------------------------
+# Everything the ML package imports.
+ml = [
+  "torch>=2.6,<3",
+  "lightning>=2.4,<3",
+  "torchdiffeq>=0.2.4",
+  "scikit-learn>=1.5",
+  "omegaconf>=2.3",
+  "tqdm>=4.66",
+]
+
+# ---- Simulation half -----------------------------------------------------
+# NOTE: `openmc` is deliberately ABSENT — it does not exist on PyPI.
+# What IS listed is exactly OpenMC's own Python dependency set, so that
+# `uv pip install --no-deps <openmc-src>` in install_openmc.sh has nothing
+# left to resolve and cannot drag an unlocked package into the environment.
+sim = [
+  "scipy>=1.13",
+  "lxml>=5.0",
+  "uncertainties>=3.2",
+  "endf>=0.1",
+  "ipython>=8.0",
+  "setuptools>=68",
+  # Not an OpenMC dependency: data_generation/** and util/** import it directly.
+  # The ML half does not, so it stays out of the shared set.
+  "pandas>=2.2",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "pytest-cov",
+  "ruff==0.6.*",
+  # tests/test_configs.py parses the YAML directly rather than through
+  # OmegaConf, so the config checks do not depend on the loader under test.
+  "pyyaml>=6",
+]
+
+[project.scripts]
+nucml = "nuclear_surrogates.main:main"
+# Backfills a bundle (weights + fitted scalers + provenance) for a checkpoint
+# that predates the bundle format.
+nucml-package = "nuclear_surrogates.packaging:main"
+
+# ---- packaging -----------------------------------------------------------
+# src layout: everything under src/ is library code and nothing else is, so
+# `find` needs no exclusion list. Configs, notebooks, datasets and results all
+# live outside src/ and are therefore never packaged.
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# ============================================================================
+#  uv configuration
+# ============================================================================
+[tool.uv]
+# Lock for exactly the two machines this project runs on. Keeps uv.lock small
+# and guarantees `uv sync` resolves identically on desktop and cluster.
+environments = [
+  "sys_platform == 'win32' and platform_machine == 'AMD64'",
+  "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+# `ml` and `sim` are mutually exclusive by design. Declaring the conflict
+# makes uv lock them as separate resolutions AND makes
+# `uv sync --extra ml --extra sim` a hard error instead of a silent mess.
+conflicts = [
+  [
+    { extra = "ml" },
+    { extra = "sim" },
+  ],
+]
+
+# ---- PyTorch wheel index -------------------------------------------------
+# torch on PyPI is the CPU build. Point `torch` at PyTorch's own index to get
+# CUDA wheels. `explicit = true` means ONLY packages named in [tool.uv.sources]
+# are fetched from here; everything else still comes from PyPI.
+#
+# CUDA 12.8 wheels require driver >= 528.33 (Windows) / >= 525.60 (Linux) via
+# CUDA minor-version compatibility. This laptop reports driver 566.14 → fine.
+# >>> VERIFY THE CLUSTER'S GPU-NODE DRIVER BEFORE FIRST SYNC. <<<
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu128", marker = "sys_platform == 'win32'" },
+  { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+]
+
+# ============================================================================
+[tool.ruff]
+target-version = "py312"
+extend-exclude = ["notebooks"]   # learning-journey scripts, not library code
+
+[tool.ruff.lint]
+# Beyond the default (E4/E7/E9/F): import order, modern idioms, likely bugs, and
+# the comprehension/return simplifications. ARG is deliberately absent — it
+# flags Lightning's required hook signatures, which cannot be changed.
+extend-select = ["I", "UP", "B", "SIM", "C4", "RET"]
+
+[tool.ruff.lint.per-file-ignores]
+# E402 (import not at top of file) is load-bearing in the datagen entry points:
+# they must parse argv and set OMP_NUM_THREADS *before* `import openmc`, which
+# reads the variable at import time. Restructuring them would change how the
+# simulations are threaded, so the rule is scoped out instead.
+"data_generation/datagen.py" = ["E402"]
+"data_generation/quarter_datagen.py" = ["E402"]
+"data_generation/zoom_datagen.py" = ["E402"]
+
+# Same shape of problem on the ML side: both entry points must silence
+# import-time warnings *before* `import lightning`, which is what triggers them.
+"src/nuclear_surrogates/main.py" = ["E402"]
+"src/nuclear_surrogates/packaging.py" = ["E402"]
+
+# The OpenMC half is held to the default rule set only. It cannot be imported —
+# let alone exercised — from the ML environment, so a stylistic auto-fix there
+# would be an unverifiable change to code that produced published data.
+"data_generation/**" = ["I", "UP", "B", "SIM", "C4", "RET"]
+"util/**" = ["I", "UP", "B", "SIM", "C4", "RET"]
+
+# ============================================================================
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# pytest resets the warning filters around every test, so the ones
+# `nuclear_surrogates.utils.quiet` installs for normal runs do not survive here
+# and have to be declared again. (The logging-level change it makes does
+# survive, so the triton/flop-counter warning needs no entry.)
+filterwarnings = [
+  # lightning calls a torch pytree API that torch now deprecates — its fix, not ours.
+  "ignore:.*treespec, LeafSpec.*",
+]
+markers = [
+  "openmc: requires the OpenMC install and nuclear data (skipped in the ML env)",
+  "golden: pins published numbers against committed fixtures",
+  # Pinned training numbers are only reproducible on a fixed runner image and
+  # library set, so CI runs them in their own Linux-only job.
+  "golden_train: pins a training loss trajectory; regenerate deliberately",
+  "slow: takes more than a few seconds",
+]

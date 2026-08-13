@@ -4,6 +4,7 @@ import os
 import glob
 import pandas as pd
 
+
 def merge_csv_files(input_dir, output_file):
     # Ensure the directory exists
     if not os.path.isdir(input_dir):
@@ -11,7 +12,7 @@ def merge_csv_files(input_dir, output_file):
 
     # Find all CSV files in the directory
     csv_files = glob.glob(os.path.join(input_dir, "*.csv"))
-    
+
     if not csv_files:
         print("No CSV files found in the directory.")
         return
@@ -30,10 +31,11 @@ def merge_csv_files(input_dir, output_file):
             print(f"Failed to read {file}: {e}")
 
     merged_df = pd.concat(df_list, ignore_index=True)
-    
+
     # Save to output file
     merged_df.to_csv(output_file, index=False)
     print(f"All CSV files merged into: {output_file}")
+
 
 if __name__ == "__main__":
     import argparse
