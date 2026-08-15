@@ -281,7 +281,6 @@ train:
 | Train with overrides | `uv run nucml --config configs/main_config.yaml train.num_epochs=5 runtime.device=cpu` |
 | Run a trained model | `uv run nucml --bundle results/<name>/model-bundle --data <file.h5> --out predictions/` |
 | Redraw a run's figures | `uv run nucml --bundle results/<name>/model-bundle --regenerate-plots --data <training.h5> --out figures/` |
-| Bundle an old checkpoint | `uv run nucml-package --ckpt <ckpt> --config <cfg> --data <h5> --out bundles/<name>` |
 | Run datagen | `UV_PROJECT_ENVIRONMENT=.venv-sim uv run python data_generation/datagen.py -n 4 -c 16` |
 | Add an ML dependency | `uv add --optional ml <pkg>` (updates `pyproject.toml` **and** `uv.lock`) |
 | Add a sim dependency | `uv add --optional sim <pkg>` |

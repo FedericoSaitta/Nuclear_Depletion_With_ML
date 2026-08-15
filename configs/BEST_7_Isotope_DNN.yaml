@@ -1,12 +1,9 @@
-# Best 7-isotope DNN, reconstructed from Chain_Model.db row 20
-# (Best_Chain_Result, 2025-11-26) — the original YAML was lost.
-# Pairs with results/legacy_ML/Best_Chain_Result/best-Best_Chain_Result-epoch=176.ckpt.
-#
+# Best 7-isotope DNN
 # Paths are resolved relative to THIS FILE, not to the working directory.
 dataset:
   path_to_data: ../datasets/casl_3305_runs_inter.h5
   fraction_of_data: 1.0
-  # Fractions of whole runs, split sequentially in time.
+
   split:
     train: 0.8
     val: 0.1

@@ -28,7 +28,7 @@ keywords:
   - "OpenMC"
   - "nuclear engineering"
   - "neural networks"
-  - "neural ODE""
+  - "neural ODE"
 
 abstract: >
   Machine-learning methods for nuclear depletion calculations,

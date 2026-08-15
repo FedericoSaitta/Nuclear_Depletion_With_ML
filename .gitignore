@@ -58,5 +58,3 @@ util/results/
 
 # OpenMC source + build tree (rebuilt by scripts/install_openmc.sh)
 /external/
-.claude/
-

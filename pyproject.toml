@@ -80,9 +80,7 @@ dev = [
 
 [project.scripts]
 nucml = "nuclear_surrogates.main:main"
-# Backfills a bundle (weights + fitted scalers + provenance) for a checkpoint
-# that predates the bundle format.
-nucml-package = "nuclear_surrogates.packaging:main"
+
 
 # ---- packaging -----------------------------------------------------------
 # src layout: everything under src/ is library code and nothing else is, so

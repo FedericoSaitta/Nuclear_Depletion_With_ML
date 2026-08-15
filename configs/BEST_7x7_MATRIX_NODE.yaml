@@ -1,11 +1,4 @@
-# The paper's 7x7 matrix NODE, as it was actually trained.
-#
-# The train block below was recovered from the checkpoint's own embedded
-# hyperparameters (`hyper_parameters` in
-# best-matrix_ode_7x7_breeding_chain-epoch=2367.ckpt) — the values previously
-# committed here had drifted from the run they claimed to describe. The model
-# block was verified against the same source and matched exactly.
-#
+# The paper's 7x7 matrix NODE
 # Paths are resolved relative to THIS FILE, not to the working directory.
 dataset:
   path_to_data: ../datasets/casl_3305_runs_inter.h5   # training data (fits the scalers)
@@ -86,8 +79,5 @@ runtime:
   device: cpu
   seed: 42
   num_workers: 0
-
-  # Both resolved relative to this file, so output lands in the same place no
-  # matter which directory the run was launched from.
   output_dir: ../results
   model_database: ../Chain_Model.db
