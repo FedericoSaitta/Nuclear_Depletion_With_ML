@@ -1,4 +1,4 @@
-# Nuclear_Transport_With_ML
+# Nuclear_Depletion_With_ML
 
 Machine-learning surrogates for OpenMC fuel-depletion calculations. A Monte-Carlo
 depletion run of a PWR pin cell takes hours to weeks; a trained surrogate
@@ -310,3 +310,10 @@ $env:UV_PROJECT_ENVIRONMENT = $null      # back to .venv
 and make bash fail with `$'\r': command not found` under WSL and on the cluster.
 Nothing to configure — but if you have a clone predating that file, run
 `git add --renormalize .` once.
+
+## Acknowledgements
+
+Computational resources were provided by CSF3 at the University of Manchester.
+
+We thank Dr. Stuart Christie for supervision and guidance during the development
+of this work.

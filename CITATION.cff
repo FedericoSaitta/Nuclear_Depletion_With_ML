@@ -1,0 +1,35 @@
+cff-version: 1.2.0
+message: "If you use this software in your research, please cite it as follows."
+
+title: "Nuclear Depletion With Machine Learning"
+
+authors:
+  - family-names: "Castañeda Rodriguez"
+    given-names: "Abel"
+
+  - family-names: "Saitta"
+    given-names: "Federico"
+
+contributors:
+  - family-names: "Christie"
+    given-names: "Stuart"
+    affiliation: "The University of Manchester"
+    role: "lecturer"
+
+version: "0.1.0"
+date-released: "2026-08-15"
+
+repository-code: "https://github.com/FedericoSaitta/Nuclear_Depletion_With_ML"
+url: "https://github.com/FedericoSaitta/Nuclear_Depletion_With_ML.git"
+
+keywords:
+  - "nuclear depletion"
+  - "machine learning"
+  - "OpenMC"
+  - "nuclear engineering"
+  - "neural networks"
+  - "neural ODE""
+
+abstract: >
+  Machine-learning methods for nuclear depletion calculations,
+  including model training, evaluation, and OpenMC-based data generation.
