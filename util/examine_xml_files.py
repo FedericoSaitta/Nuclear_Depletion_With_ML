@@ -158,64 +158,59 @@ def find_production_pathways(chain_file, target_nuclide, mode="production"):
     return results
 
 
-# Usage examples
-chain_file = "data\chain_casl_pwr.xml"
-target = "Pu242"
+def _report(chain_file, target, mode):
+    """Print every pathway that produces or destroys *target*."""
+    verb = "CREATE" if mode == "production" else "DESTROY"
 
-# Find what PRODUCES Pu242
-print("=" * 60)
-print(f"PRODUCTION PATHWAYS FOR {target}")
-print("=" * 60)
-pathways_prod = find_production_pathways(chain_file, target, mode="production")
+    print("=" * 60)
+    print(f"{mode.upper()} PATHWAYS FOR {target}")
+    print("=" * 60)
+    pathways = find_production_pathways(chain_file, target, mode=mode)
 
-if pathways_prod["reactions"]:
-    print("\nREACTIONS THAT CREATE", target + ":")
-    for rxn in pathways_prod["reactions"]:
-        print(f"  {rxn['parent']} + n → {rxn['target']} (via {rxn['type']})")
-        print(f"    Q-value: {rxn['Q_value']} MeV, Branching: {rxn['branching_ratio']}")
-else:
-    print("\nREACTIONS: None found")
+    if pathways["reactions"]:
+        print(f"\nREACTIONS THAT {verb} {target}:")
+        for rxn in pathways["reactions"]:
+            product = rxn.get("product", rxn["target"])
+            print(f"  {rxn['parent']} + n → {product} (via {rxn['type']})")
+            print(
+                f"    Q-value: {rxn['Q_value']} MeV, "
+                f"Branching: {rxn['branching_ratio']}"
+            )
+    else:
+        print("\nREACTIONS: None found")
 
-if pathways_prod["decays"]:
-    print(f"\nDECAYS THAT CREATE {target}:")
-    for decay in pathways_prod["decays"]:
-        print(f"  {decay['parent']} → {decay['target']} (via {decay['type']})")
-        print(
-            f"    Half-life: {decay['half_life']} s, Branching: {decay['branching_ratio']}"
-        )
-else:
-    print("\nDECAYS: None found")
+    if pathways["decays"]:
+        print(f"\nDECAYS THAT {verb} {target}:")
+        for decay in pathways["decays"]:
+            product = decay.get("product", decay["target"])
+            print(f"  {decay['parent']} → {product} (via {decay['type']})")
+            print(
+                f"    Half-life: {decay['half_life']} s, "
+                f"Branching: {decay['branching_ratio']}"
+            )
+    else:
+        print("\nDECAYS: None found")
 
-print(
-    f"\nTotal production pathways: {len(pathways_prod['reactions']) + len(pathways_prod['decays'])}"
-)
+    total = len(pathways["reactions"]) + len(pathways["decays"])
+    print(f"\nTotal {mode} pathways: {total}")
 
-# Find what DESTROYS Pu242
-print("\n" + "=" * 60)
-print(f"DESTRUCTION PATHWAYS FOR {target}")
-print("=" * 60)
-pathways_dest = find_production_pathways(chain_file, target, mode="destruction")
 
-if pathways_dest["reactions"]:
-    print(f"\nREACTIONS THAT DESTROY {target}:")
-    for rxn in pathways_dest["reactions"]:
-        product = rxn.get("product", "unknown")
-        print(f"  {rxn['parent']} + n → {product} (via {rxn['type']})")
-        print(f"    Q-value: {rxn['Q_value']} MeV, Branching: {rxn['branching_ratio']}")
-else:
-    print("\nREACTIONS: None found")
+def main():
+    import argparse
 
-if pathways_dest["decays"]:
-    print(f"\nDECAYS THAT DESTROY {target}:")
-    for decay in pathways_dest["decays"]:
-        product = decay.get("product", "unknown")
-        print(f"  {decay['parent']} → {product} (via {decay['type']})")
-        print(
-            f"    Half-life: {decay['half_life']} s, Branching: {decay['branching_ratio']}"
-        )
-else:
-    print("\nDECAYS: None found")
+    parser = argparse.ArgumentParser(
+        description="List the reactions and decays that produce or destroy a nuclide"
+    )
+    parser.add_argument(
+        "chain_file", help="depletion chain XML, e.g. data/chain_casl_pwr.xml"
+    )
+    parser.add_argument("target", help="nuclide to trace, e.g. Pu242")
+    args = parser.parse_args()
 
-print(
-    f"\nTotal destruction pathways: {len(pathways_dest['reactions']) + len(pathways_dest['decays'])}"
-)
+    _report(args.chain_file, args.target, "production")
+    print()
+    _report(args.chain_file, args.target, "destruction")
+
+
+if __name__ == "__main__":
+    main()

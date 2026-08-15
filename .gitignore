@@ -49,6 +49,9 @@ util/results/
 # Test fixtures are deliberately tracked — they are the golden safety net
 !tests/fixtures/**
 
+# Documentation images are tracked
+!README_images/**
+
 # uv environments
 /.venv/
 /.venv-sim/

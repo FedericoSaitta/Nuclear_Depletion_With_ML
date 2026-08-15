@@ -5,9 +5,9 @@ import numpy as np
 import torch
 from loguru import logger
 from omegaconf import OmegaConf
-from sklearn.metrics import mean_absolute_error, r2_score
 
 from nuclear_surrogates import evaluation
+from nuclear_surrogates.datamodule.dataset_helper import ordered_names
 from nuclear_surrogates.models.model_architectures import Deep_Neural_Network
 from nuclear_surrogates.models.model_helper import get_loss_fn
 from nuclear_surrogates.utils import metrics, plot
@@ -112,11 +112,11 @@ class DNN_Model(L.LightningModule):
         all_preds = np.concatenate(self.val_preds_epoch, axis=0)
         all_targets = np.concatenate(self.val_targets_epoch, axis=0)
 
-        r2 = r2_score(all_targets, all_preds, multioutput="uniform_average")
+        r2 = float(metrics.r2(all_targets, all_preds).mean())
         self.log("val_r2", r2, prog_bar=True)
         self.val_r2_scores.append(r2)
 
-        mae = mean_absolute_error(all_targets, all_preds, multioutput="uniform_average")
+        mae = float(metrics.mae(all_targets, all_preds).mean())
         self.log("val_mae", mae, prog_bar=True)
         self.val_mae_scores.append(mae)
 
@@ -150,7 +150,11 @@ class DNN_Model(L.LightningModule):
 
     def on_test_epoch_end(self):
         datamodule = self.trainer.datamodule
-        target_names = list(datamodule.target.keys())
+        # Array order, not config-dict order: the prediction columns are laid
+        # out by target_index_map, and a config listing targets in a different
+        # order than they appear among the inputs would otherwise mislabel
+        # every per-target metric and figure.
+        target_names = ordered_names(datamodule.target_index_map)
 
         test_data = self._prepare_test_data()
         y_true_test = test_data["labels"]

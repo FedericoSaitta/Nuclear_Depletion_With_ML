@@ -298,13 +298,155 @@ def test_run_writes_split_indices_and_a_bundle(tmp_path):
     assert metadata["libraries"]["torch"]
 
 
-def test_dnn_inference_mode_fails_loudly(tmp_path):
-    """The DNN has no inference branch. It must raise rather than quietly
-    evaluate the training file's own test split."""
-    _, dm = build(load_cfg("DNN", tmp_path))
+@pytest.mark.parametrize("kind", ["DNN", "NODE"])
+def test_inference_without_fitted_scalers_is_refused(kind, tmp_path):
+    """A checkpoint without its scalers is half a model, and half a model does
+    not run.
+
+    Inference used to refit on `path_to_data` whenever `preprocessor_path` was
+    absent, behind a warning. There is now no fallback at all: evaluating a
+    checkpoint against scalers it was never trained with is worse than not
+    running, because the resulting numbers look fine.
+    """
+    cfg = load_cfg(kind, tmp_path)
+    cfg.dataset.path_to_inference_data = cfg.dataset.path_to_data
+    _, dm = build(cfg)
     dm.inference_mode = True
-    with pytest.raises(NotImplementedError, match="DNN inference mode"):
+    with pytest.raises(SystemExit, match="preprocessor_path"):
         dm.setup(stage="test")
+
+
+@pytest.mark.parametrize("kind", ["DNN", "NODE"])
+def test_inference_from_a_bundle_never_opens_the_training_file(kind, tmp_path):
+    """The point of a bundle: weights and scalers travel without the dataset.
+
+    Trains a tiny model, bundles it, then evaluates that bundle on a different
+    file and asserts the only file opened is the inference one. `test_golden`
+    pins the same property for the frozen NODE; this covers both models on a
+    bundle built end to end by the code under test.
+    """
+    import nuclear_surrogates.datamodule.dataset_helper as data_help
+    from nuclear_surrogates.bundle import read_bundle
+    from nuclear_surrogates.main import MODELS
+    from nuclear_surrogates.models import modes
+
+    cfg = load_cfg(kind, tmp_path, **{"train.num_epochs": 1})
+    _, dm, trainer = train(cfg)
+
+    ckpt = tmp_path / "trained.ckpt"
+    trainer.save_checkpoint(ckpt)
+    bundle = modes._write_run_bundle(dm, cfg, modes.result_dir(cfg), str(ckpt))
+
+    inference_cfg, metadata = read_bundle(
+        bundle,
+        inference_data=cfg.dataset.path_to_data,
+        output_dir=str(tmp_path / "served"),
+    )
+    assert metadata["model_kind"] == kind
+    assert inference_cfg.runtime.mode == "inference"
+    assert not inference_cfg.dataset.path_to_data, "training path must be cleared"
+    assert os.path.dirname(inference_cfg.runtime.ckp_path) == os.path.abspath(bundle)
+
+    opened = []
+    real_read = data_help.read_data
+
+    def spy(path, *args, **kwargs):
+        opened.append(path)
+        return real_read(path, *args, **kwargs)
+
+    data_help.read_data = spy
+    try:
+        model_cls, dm_cls = MODELS[kind]
+        served = dm_cls(inference_cfg)
+        served.inference_mode = True
+        served.setup(stage="test")
+    finally:
+        data_help.read_data = real_read
+
+    # Only one fixture exists, so the two paths name the same file — but the
+    # refit branch reads twice (training file, then inference file), so
+    # "exactly one open" is still what distinguishes the two paths.
+    assert opened == [inference_cfg.dataset.path_to_inference_data], (
+        f"inference opened {opened} — a bundle must not reach for the "
+        f"training dataset"
+    )
+    assert len(served.test_dataset) > 0
+    assert len(served.train_dataset) == 0, "inference must not build a train split"
+
+
+# ── regenerate_plots ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("kind", ["DNN", "NODE"])
+def test_regenerate_plots_replays_the_runs_own_test_split(kind, tmp_path):
+    """Redrawing a finished run's figures must use that run's own test runs.
+
+    The split is rebuilt from the seed rather than replayed from the recorded
+    indices, so this pins that the rebuild lands on exactly what the bundle
+    recorded — otherwise the figures would be of a different subset while
+    still being labelled as the published run's.
+    """
+    import json as _json
+
+    from nuclear_surrogates.bundle import read_bundle
+    from nuclear_surrogates.main import MODELS
+    from nuclear_surrogates.models import modes
+
+    cfg = load_cfg(kind, tmp_path, **{"train.num_epochs": 1})
+    _, dm, trainer = train(cfg)
+
+    ckpt = tmp_path / "trained.ckpt"
+    trainer.save_checkpoint(ckpt)
+    bundle = modes._write_run_bundle(dm, cfg, modes.result_dir(cfg), str(ckpt))
+
+    replay_cfg, _ = read_bundle(
+        bundle,
+        mode="regenerate_plots",
+        training_data=cfg.dataset.path_to_data,
+        output_dir=str(tmp_path / "redrawn"),
+    )
+    assert replay_cfg.runtime.mode == "regenerate_plots"
+    assert replay_cfg.runtime.bundle_path == os.path.abspath(bundle)
+
+    _, dm_cls = MODELS[kind]
+    replayed = dm_cls(replay_cfg)
+    replayed.setup(stage="fit")
+
+    with open(os.path.join(bundle, "split_indices.json")) as f:
+        recorded = _json.load(f)
+    for key in ("train", "val", "test"):
+        assert list(replayed.split_info[key]) == list(
+            recorded[key]
+        ), f"{key} split drifted from the bundle's record"
+
+    # And the replay must use the run's scalers, not a fresh fit of its own.
+    modes._verify_split_matches_bundle(replayed, replay_cfg)
+    assert replayed.preprocessor.to_dict() == dm.preprocessor.to_dict()
+
+
+def test_regenerate_plots_refuses_a_split_that_does_not_match(tmp_path):
+    """A mismatch means these are not the published run's runs. Fail, don't draw."""
+    from nuclear_surrogates.models import modes
+
+    cfg = load_cfg("NODE", tmp_path, **{"train.num_epochs": 1})
+    _, dm = build(cfg)
+    dm.setup(stage="fit")
+    bundle = modes._write_run_bundle(dm, cfg, modes.result_dir(cfg), ckpt_path=None)
+
+    cfg.runtime.bundle_path = bundle
+    dm.split_info = {**dm.split_info, "test": [999]}
+    with pytest.raises(SystemExit, match="split_indices.json"):
+        modes._verify_split_matches_bundle(dm, cfg)
+
+
+def test_regenerate_plots_needs_the_training_dataset(tmp_path):
+    """It carves the test split out of the training file, so it cannot run
+    without it — unlike inference, which needs only the bundle."""
+    from nuclear_surrogates.main import _build_parser, build_config
+
+    args = _build_parser().parse_args(["--bundle", str(tmp_path), "--regenerate-plots"])
+    with pytest.raises(SystemExit):
+        build_config(args)
 
 
 # ── evaluation epoch ─────────────────────────────────────────────────────────

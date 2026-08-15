@@ -72,7 +72,7 @@ VALID_ACTIVATIONS = {
     "none",
 }
 VALID_LOSSES = {"mse", "mae", "huber", "smooth_l1"}
-VALID_MODES = {"train", "train_from_ckp", "inference"}
+VALID_MODES = {"train", "train_from_ckp", "inference", "regenerate_plots"}
 VALID_MODELS = {"DNN", "NODE"}
 
 
@@ -141,8 +141,13 @@ def test_node_configs_carry_solver_settings(name):
     if cfg["runtime"]["model"] != "NODE":
         pytest.skip("DNN config")
 
-    for key in ("solver", "rtol", "atol", "step_size"):
+    for key in ("solver", "rtol", "atol"):
         assert key in cfg["train"], f"{name}: NODE needs train.{key}"
+
+    # Only fixed-step solvers read `step_size`; requiring it everywhere used to
+    # enshrine a dead key in every adaptive-solver config.
+    if cfg["train"]["solver"] == "rk4":
+        assert "step_size" in cfg["train"], f"{name}: rk4 needs train.step_size"
 
     if cfg["model"].get("matrix_ode"):
         entries = cfg["model"].get("matrix_zero_entries")

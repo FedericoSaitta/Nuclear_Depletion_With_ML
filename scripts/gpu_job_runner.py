@@ -29,7 +29,8 @@ def create_slurm_script(output_file="submit_gpu_job.sh"):
     slurm_script = f"""#!/bin/bash --login
 #SBATCH -p {PARTITION}                    # GPU partition
 #SBATCH --gres=gpu:{GPUS}                 # Request {GPUS} GPU(s)
-#SBATCH --ntasks-per-node={CPUS}          # Number of tasks per node
+#SBATCH -n 1                              # One task: a single training process
+#SBATCH -c {CPUS}                         # CPU cores for that task (dataloader workers)
 #SBATCH -t {WALLTIME}                     # Wallclock time limit
 #SBATCH --mail-type=ALL                   # Email notifications{mail_user}
 #SBATCH -J {JOB_NAME}                     # Job name
@@ -41,8 +42,6 @@ cd "$SLURM_SUBMIT_DIR"
 
 # torch wheels bundle their own CUDA runtime, so no `module load cuda` is needed.
 uv run --extra ml --no-dev --locked nucml --config {CONFIG}
-
-kill %1
 """
 
     # Create logs directory if it doesn't exist

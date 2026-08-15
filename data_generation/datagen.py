@@ -1,6 +1,16 @@
+"""Random-history pin-cell depletion — the pipeline behind the CASL datasets.
+
+Each worker builds one fuel pin, draws a fresh 100-step operating history
+(power, temperatures, moderator density, boron) from the configured ranges,
+depletes it step by step, and appends the resulting concentrations to its own
+CSV in data_generation/data/.
+"""
+
 import argparse
 
-# Parse arguments FIRST, before any other imports
+# Parse argv and set OMP_NUM_THREADS BEFORE importing OpenMC, which reads the
+# variable at import time. This ordering is why E402 is scoped off for this
+# file in pyproject.toml.
 parser = argparse.ArgumentParser(description="Run parallel depletion simulations")
 parser.add_argument(
     "-n",
@@ -51,41 +61,26 @@ parser.add_argument(
     action="store_true",
     help="Use Windowed Multipole for on-the-fly Doppler broadening (overrides temp-method)",
 )
+args = parser.parse_args()
 
-# Only parse args if this is the main script
-if __name__ == "__main__":
-    args = parser.parse_args()
-else:
-    # Default values if imported as module
-    class DefaultArgs:
-        threads = 1
-        runs = 4
-        cores = 16
-        file = "chain_casl_pwr.xml"
-        seed = None
-        temp_method = "interpolation"
-        use_wmp = False
-
-    args = DefaultArgs()
-
-# Set environment variable BEFORE importing OpenMC
 import os
 
 os.environ["OMP_NUM_THREADS"] = str(args.threads)
 
-HOUR_IN_SECONDS = 3600
-DAY_IN_SECONDS = 24 * HOUR_IN_SECONDS
-
-import openmc
-import openmc.deplete
 import time
 from datetime import datetime
+
 import numpy as np
-import pandas as pd
-import random
-import multiprocessing as mp
+import openmc
+import openmc.deplete
 
-
+from common import (
+    DAY_IN_SECONDS,
+    create_worker_configs,
+    run_parallel_simulations,
+    save_results,
+    setup_paths,
+)
 from reactor_sim import (
     create_materials,
     set_material_volumes,
@@ -93,38 +88,6 @@ from reactor_sim import (
     create_settings,
     update_water_composition,
 )
-
-
-def setup_paths(script_dir, worker_id, chain_filename, use_wmp=False):
-    results_dir = os.path.abspath(
-        os.path.join(script_dir, "results", f"worker_{worker_id}")
-    )
-    os.makedirs(results_dir, exist_ok=True)
-
-    openmc.config["cross_sections"] = os.path.join(
-        script_dir, "../data/cross_sections.xml"
-    )
-    os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
-    os.environ["OPENMC_CROSS_SECTIONS"] = str(openmc.config["cross_sections"])
-
-    # Set up WMP library if enabled
-    if use_wmp:
-        wmp_path = os.path.join(script_dir, "../data/wmp")
-        if os.path.exists(wmp_path):
-            os.environ["OPENMC_MULTIPOLE_LIBRARY"] = wmp_path
-            print(f"Worker {worker_id}** Using WMP library from: {wmp_path}")
-        else:
-            print(
-                f"Worker {worker_id}** WARNING: WMP enabled but library not found at {wmp_path}"
-            )
-
-    chain_file = os.path.join(script_dir, "../data", chain_filename)
-    # Parse once so a missing or malformed chain fails here rather than deep
-    # inside the first depletion step. CoupledOperator wants the *path*, not the
-    # parsed Chain, so that is what gets handed onward.
-    openmc.deplete.Chain.from_xml(chain_file)
-
-    return results_dir, chain_file
 
 
 def setup_reactor_model(config, results_dir):
@@ -144,11 +107,6 @@ def setup_reactor_model(config, results_dir):
     settings = create_settings(config)
     settings.verbosity = 1
     settings.output = {"tallies": False}
-
-    # Set temperature method only if not using WMP
-    if not config.get("use_wmp", False):
-        # Temperature method is only relevant when using tabulated cross sections
-        pass  # temp_method is already set in create_settings
 
     geometry.export_to_xml(path=results_dir)
     settings.export_to_xml(path=results_dir)
@@ -239,27 +197,36 @@ def run_depletion_simulation(
         )
 
 
-def extract_results_data(results, conditions):
+def extract_results_data(results, conditions, worker_id):
     time, k = results.get_keff()
     time /= DAY_IN_SECONDS
 
+    # Label the run by timestamp plus the worker's unique tag. The uuid suffix
+    # in worker_id is what keeps labels distinct when several workers start
+    # within the same second.
     current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-    home_dir = os.path.expanduser("~")
-    label = f"run_{current_time}_{home_dir}"
-    integrated_power = list(np.cumsum(np.array(conditions["power"])))
+    label = f"run_{current_time}_{worker_id}"
 
+    # Specific burnup: cumulative energy released per unit fuel mass.
+    # power [W/g] x step [d] gives W*d/g, and 1 W*d/g = 1e-3 MWd/kg.
+    dt_days = np.asarray(conditions["time_steps"]) / DAY_IN_SECONDS
+    burnup_MWd_kg = np.cumsum(np.asarray(conditions["power"]) * dt_days) / 1000.0
+
+    # Operating-state columns have one value per step; the results grid has one
+    # extra point (the state after the final step), padded with NaN.
+    nan = float("nan")
     data = {
         "run_label": [label] * len(time),
         "time_days": time,
         "k_eff": k[:, 0],
         "k_eff_std": k[:, 1],
-        "power_W_g": conditions["power"] + ["NaN"],
-        "int_p_W": integrated_power + ["NaN"],
-        "fuel_temp_K": conditions["fuel_temps"] + ["NaN"],
-        "mod_temp_K": conditions["mod_temps"] + ["NaN"],
-        "clad_temp_K": conditions["clad_temps"] + ["NaN"],
-        "mod_density_g_cm3": conditions["mod_densities"] + ["NaN"],
-        "boron_ppm": conditions["boron_ppm"] + ["NaN"],
+        "power_W_g": conditions["power"] + [nan],
+        "burnup_MWd_kg": list(burnup_MWd_kg) + [nan],
+        "fuel_temp_K": conditions["fuel_temps"] + [nan],
+        "mod_temp_K": conditions["mod_temps"] + [nan],
+        "clad_temp_K": conditions["clad_temps"] + [nan],
+        "mod_density_g_cm3": conditions["mod_densities"] + [nan],
+        "boron_ppm": conditions["boron_ppm"] + [nan],
     }
 
     nuclides = results[0].index_nuc.keys()
@@ -268,16 +235,6 @@ def extract_results_data(results, conditions):
         data[nuclide] = concentration
 
     return data, nuclides
-
-
-def save_results(data, script_dir, worker_id):
-    os.makedirs(os.path.join(script_dir, "data"), exist_ok=True)
-    df = pd.DataFrame(data)
-    file_path = os.path.join(
-        script_dir, "data", f"worker_{worker_id}_nuclide_concentrations.csv"
-    )
-    file_exists = os.path.isfile(file_path)
-    df.to_csv(file_path, mode="a", index=False, header=not file_exists)
 
 
 def generate_data(config):
@@ -324,53 +281,8 @@ def generate_data(config):
     )
 
     results = openmc.deplete.Results("depletion_results.h5")
-    data, nuclides = extract_results_data(results, conditions)
+    data, nuclides = extract_results_data(results, conditions, worker_id)
     save_results(data, script_dir, worker_id)
-
-    # Ensure to disable plotting for runs with huge number of tracked isotopes as these will overflow diagram
-    # plot_helper.plot_generated_data(nuclides, data, save_folder=script_dir, worker_id=worker_id)
-
-
-import uuid
-
-
-def create_worker_configs(base_config, num_workers, master_seed=None):
-    if master_seed is not None:
-        random.seed(master_seed)
-        print(f"Using master seed: {master_seed}")
-    else:
-        random.seed()
-        print("Using random seed (no master seed specified)")
-
-    configs = []
-
-    for i in range(1, num_workers + 1):
-        config = base_config.copy()
-        # Create absolutely unique worker ID
-        config["worker_id"] = f"{i}_{uuid.uuid4().hex[:8]}"
-        config["seed"] = random.randint(1, 2**31 - 1)
-        configs.append(config)
-    return configs
-
-
-def run_parallel_simulations(configs):
-    processes = []
-
-    try:
-        for config in configs:
-            process = mp.Process(target=generate_data, args=(config,))
-            process.start()
-            processes.append(process)
-
-        for process in processes:
-            process.join()
-
-    except Exception as e:
-        print(f"Error during parallel data generation: {e}")
-        for process in processes:
-            if process.is_alive():
-                process.terminate()
-        raise
 
 
 if __name__ == "__main__":
@@ -409,7 +321,7 @@ if __name__ == "__main__":
         configs = create_worker_configs(base_config, NUM_WORKERS, master_seed=run_seed)
 
         start_time = time.perf_counter()
-        run_parallel_simulations(configs)
+        run_parallel_simulations(generate_data, configs)
         elapsed = time.perf_counter() - start_time
 
         print(

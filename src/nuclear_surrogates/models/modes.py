@@ -1,3 +1,4 @@
+import json
 import os
 
 import lightning as L
@@ -6,7 +7,7 @@ import torch.multiprocessing as mp
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from loguru import logger
 
-from nuclear_surrogates.bundle import BUNDLE_DIRNAME, write_bundle
+from nuclear_surrogates.bundle import BUNDLE_DIRNAME, SPLIT_NAME, write_bundle
 from nuclear_surrogates.utils.paths import result_dir
 from nuclear_surrogates.utils.sql_lite_logger import SQLiteLogger
 
@@ -193,7 +194,11 @@ def train_from_checkpoint_and_test(datamodule, model_class, cfg):
 
 
 def inference(datamodule, model_class, cfg):
-    """Load a checkpoint, fit scalers on training data, test on inference data."""
+    """Evaluate a frozen checkpoint on `dataset.path_to_inference_data`.
+
+    The scalers come from `dataset.preprocessor_path`; the training dataset is
+    never opened.
+    """
     logger.info(f"Inference mode — loading checkpoint: {cfg.runtime.ckp_path}")
 
     model = model_class(cfg)
@@ -208,3 +213,91 @@ def inference(datamodule, model_class, cfg):
     )
 
     trainer.test(model=model, datamodule=datamodule)
+
+
+def _verify_split_matches_bundle(datamodule, cfg):
+    """Check the reproduced split against the one the bundle recorded.
+
+    `regenerate_plots` rebuilds the split from `runtime.seed` and
+    `dataset.split` rather than replaying indices, so the figures it produces
+    are only the original run's if that rebuild lands on the same runs. A
+    different dataset, a different `fraction_of_data`, or a change to the
+    splitting code all move it, and every one of them would otherwise produce
+    plausible-looking figures labelled as the published run's.
+
+    So it is checked, not assumed. `split_indices.json` is the recorded truth.
+    """
+    bundle_path = cfg.runtime.get("bundle_path")
+    reproduced = getattr(datamodule, "split_info", None)
+    if not bundle_path or reproduced is None:
+        logger.warning(
+            "No bundle_path in the config — cannot verify the split against "
+            "split_indices.json. These figures may not be the original run's."
+        )
+        return
+
+    split_file = os.path.join(bundle_path, SPLIT_NAME)
+    if not os.path.isfile(split_file):
+        logger.warning(
+            f"{split_file} is missing — the bundle predates split recording, "
+            f"so the reproduced split cannot be verified against it."
+        )
+        return
+
+    with open(split_file) as f:
+        recorded = json.load(f)
+
+    for key in ("train", "val", "test"):
+        if list(recorded.get(key, [])) != list(reproduced.get(key, [])):
+            raise SystemExit(
+                f"The reproduced {key} split does not match the bundle's "
+                f"split_indices.json ({len(recorded.get(key, []))} runs "
+                f"recorded, {len(reproduced.get(key, []))} reproduced).\n\n"
+                f"These figures would not be the run the bundle describes. "
+                f"Check that --data is the dataset it was trained on "
+                f"(metadata.json records its sha256), and that "
+                f"dataset.fraction_of_data and runtime.seed still match "
+                f"config.resolved.yaml."
+            )
+    logger.info("Reproduced split matches the bundle's split_indices.json")
+
+
+def regenerate_plots(datamodule, model_class, cfg):
+    """Redraw a finished run's figures from its bundle, changing no numbers.
+
+    Rebuilds the original train/val/test split over `dataset.path_to_data`,
+    loads the bundle's scalers rather than fitting fresh ones, and runs the
+    evaluation epoch on the test split alone — the same runs, the same weights
+    and the same scalers the published figures came from. Nothing is trained
+    and no checkpoint is written.
+
+    Unlike `inference`, this needs the training dataset: the split is recorded
+    as indices into that file, and the test portion is a share of it rather
+    than a separate file.
+    """
+    logger.info(f"Regenerating plots from checkpoint: {cfg.runtime.ckp_path}")
+
+    dataset = cfg.dataset.get("path_to_data")
+    if not dataset or not os.path.isfile(dataset):
+        raise SystemExit(
+            f"regenerate_plots needs the dataset the run was trained on, to "
+            f"carve out the same test split; dataset.path_to_data is "
+            f"{dataset!r}.\n\nPass --data <the training HDF5>."
+        )
+
+    # stage="fit" is the split-building path — the test split it produces is
+    # the run's own, not a fresh one.
+    datamodule.setup(stage="fit")
+    _verify_split_matches_bundle(datamodule, cfg)
+
+    model = model_class(cfg)
+    model = load_checkpoint_into_model(model, cfg.runtime.ckp_path)
+
+    trainer = L.Trainer(
+        accelerator=cfg.runtime.device,
+        devices="auto",
+        logger=False,
+        enable_checkpointing=False,
+    )
+    trainer.test(model=model, datamodule=datamodule)
+    logger.info(f"Figures written to {result_dir(cfg)}")

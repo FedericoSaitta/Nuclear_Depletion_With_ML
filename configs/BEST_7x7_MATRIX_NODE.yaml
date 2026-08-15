@@ -12,6 +12,7 @@ dataset:
   path_to_inference_data: ../datasets/casl_3305_runs_inter.h5
   fraction_of_data: 0.1
 
+  preprocessor_path: results/matrix_ode_7x7_breeding_chain/model-bundle/preprocessor.json
   # Fractions of whole runs. The NODE partitions by a seeded random
   # permutation of runs; the DNN splits sequentially in time.
   split:
@@ -69,17 +70,19 @@ train:
   grad_clip: 0.0
   drop_last: false
 
+  # `step_size` is read only by fixed-step solvers (rk4); dopri5 chooses its
+  # own steps from the error estimate. The published run carried the key with
+  # no effect, so dropping it changes nothing about the model this describes.
   solver: dopri5
   rtol: 1e-5
   atol: 1e-7
-  step_size: 0.01
 
 runtime:
-  mode: train
+  mode: inference
   model: NODE
   # Checkpoint to load for mode: train_from_ckp / inference. Resolved like the
   # dataset paths above, so a relative value is taken from this file's directory.
-  ckp_path: ""
+  ckp_path: "../results/matrix_ode_7x7_breeding_chain/best-matrix_ode_7x7_breeding_chain-epoch=2274.ckpt"
   device: cpu
   seed: 42
   num_workers: 0

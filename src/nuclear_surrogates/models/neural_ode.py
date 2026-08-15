@@ -1,6 +1,13 @@
-import csv
+"""The Neural-ODE surrogate: integrate dy/dt = f(forcing(t), y) over a whole run.
+
+This module is the model — construction, the solver call, the Lightning training
+and evaluation hooks. The post-hoc analysis passes that run once at test time
+(teacher-forced rollout, Jacobians, the depletion matrix, permutation
+importance) live in `nuclear_surrogates.analysis`, and the metric maths shared
+with the DNN lives in `nuclear_surrogates.evaluation`.
+"""
+
 import os
-import sys
 
 import lightning as L
 import numpy as np
@@ -9,31 +16,12 @@ from loguru import logger
 from omegaconf import OmegaConf
 from torchdiffeq import odeint, odeint_adjoint
 
-from nuclear_surrogates import evaluation
+from nuclear_surrogates import analysis, evaluation
+from nuclear_surrogates.datamodule.dataset_helper import ordered_names
 from nuclear_surrogates.models.model_architectures import ODEFuncForced, ODEFuncMatrix
 from nuclear_surrogates.models.model_helper import get_loss_fn
 from nuclear_surrogates.utils import metrics, plot
 from nuclear_surrogates.utils.paths import result_dir
-
-# Batch sizes for the analysis passes. The single-step ones can be larger
-# because they integrate one interval rather than a whole trajectory.
-TRAJECTORY_BATCH = 64
-JACOBIAN_BATCH = 32
-SINGLE_STEP_BATCH = 128
-
-
-def _print_unicode_safe(line=""):
-    """print() that degrades instead of crashing on a non-UTF-8 stdout.
-
-    The markdown dump below contains Δ and ±. A Windows console running cp1252
-    can encode ± but not Δ, so a plain print() raises UnicodeEncodeError
-    part-way through the table and aborts the whole test epoch.
-    """
-    try:
-        print(line)
-    except UnicodeEncodeError:
-        encoding = sys.stdout.encoding or "ascii"
-        print(line.encode(encoding, errors="replace").decode(encoding))
 
 
 class NODE_Model(L.LightningModule):
@@ -165,6 +153,23 @@ class NODE_Model(L.LightningModule):
         """(N, n_input) model units -> physical units."""
         return self.trainer.datamodule.input_scaler.inverse_transform(scaled_2d)
 
+    def solve_context(self):
+        """Bundle what the analysis passes need — see `nuclear_surrogates.analysis`."""
+        return analysis.SolveContext(
+            func=self.func,
+            odeint=self._odeint,
+            t_span=self.t_span,
+            device=self.device,
+            unscale_targets=self._unscale_targets,
+            result_dir=self.result_dir,
+        )
+
+    def _teacher_forced_predictions(self, all_inputs_scaled, all_trues_scaled):
+        """Single-step predictions from the true y(t) — see `analysis.rollout`."""
+        return analysis.teacher_forced_predictions(
+            self.solve_context(), all_inputs_scaled, all_trues_scaled
+        )
+
     # ── Training ─────────────────────────────────────────────────────────────
 
     def training_step(self, batch, batch_idx):
@@ -241,11 +246,11 @@ class NODE_Model(L.LightningModule):
             n_target,
         )
 
-        target_names = list(datamodule.target.keys())
-        forcing_names = [
-            key
-            for key, _ in sorted(datamodule.col_index_map.items(), key=lambda x: x[1])
-        ]
+        # Array order, not config-dict order — a config listing targets in a
+        # different order than they appear among the inputs would otherwise
+        # mislabel every per-target metric, figure and CSV.
+        target_names = ordered_names(datamodule.target_index_map)
+        forcing_names = ordered_names(datamodule.col_index_map)
         logger.info(
             f"Test set: {num_runs} trajectories, {steps} steps, {n_target} targets"
         )
@@ -263,15 +268,21 @@ class NODE_Model(L.LightningModule):
             per_target_metrics,
         )
 
-        self._compute_jacobian_analysis(
-            all_inputs_scaled, all_trues_scaled, target_names, forcing_names
+        ctx = self.solve_context()
+        analysis.jacobian_analysis(
+            ctx, all_inputs_scaled, all_trues_scaled, target_names, forcing_names
         )
-        self._compute_stepwise_importance(
-            all_inputs_scaled, all_trues_scaled, target_names, forcing_names
+        analysis.stepwise_importance(
+            ctx,
+            all_inputs_scaled,
+            all_trues_scaled,
+            target_names,
+            forcing_names,
+            self.log,
         )
         if self.matrix_ode:
-            self._compute_depletion_matrix_analysis(
-                all_inputs_scaled, all_trues_scaled, target_names
+            analysis.depletion_matrix_analysis(
+                ctx, all_inputs_scaled, all_trues_scaled, target_names
             )
 
         evaluation.report_prediction_comparisons(
@@ -387,621 +398,11 @@ class NODE_Model(L.LightningModule):
             test_metrics={**averages, "per_target": per_target_metrics},
         )
 
-    # ── Teacher-forced predictions ───────────────────────────────────────────
-
-    def _teacher_forced_predictions(self, all_inputs_scaled, all_trues_scaled):
-        """Single-step predictions: integrate one dt from the true y(t).
-
-        The DNN's teacher-forcing analogue. y(t) is the full state vector, so
-        every isotope is fed ground truth at every step. The first timestep has
-        no predecessor and is copied from the truth.
-
-        Returns (num_runs, steps, n_target), in model units.
-        """
-        num_runs, steps, _ = all_trues_scaled.shape
-        tf_preds = np.zeros_like(all_trues_scaled)
-        tf_preds[:, 0, :] = all_trues_scaled[:, 0, :]
-
-        device = self.device
-        t_span = self.t_span.to(device)
-
-        for start in range(0, num_runs, TRAJECTORY_BATCH):
-            end = min(start + TRAJECTORY_BATCH, num_runs)
-
-            inputs_batch = torch.tensor(
-                all_inputs_scaled[start:end], dtype=torch.float32, device=device
-            )
-            trues_batch = torch.tensor(
-                all_trues_scaled[start:end], dtype=torch.float32, device=device
-            )
-            self.func.set_forcing(t_span, inputs_batch)
-
-            for t in range(steps - 1):
-                with torch.no_grad():
-                    pred = self._odeint(trues_batch[:, t, :], t_span[t : t + 2])[-1]
-                tf_preds[start:end, t + 1, :] = pred.cpu().numpy()
-
-        return tf_preds
-
-    # ── Jacobian sensitivity ─────────────────────────────────────────────────
-
-    def compute_state_jacobian(self, t_eval, y_eval, forcing_eval, t_idx):
-        """∂f/∂y at one timestep, for every trajectory in the batch."""
-        with torch.inference_mode(False):
-            # Cloning escapes inference-mode tracking, which forbids autograd.
-            t_eval = t_eval.clone()
-            forcing_eval = forcing_eval.clone()
-            y_eval = y_eval.clone().requires_grad_(True)
-
-            was_training = self.func.training
-            self.func.train()
-            self.func.set_forcing(t_eval, forcing_eval)
-
-            dydt = self.func(t_eval[t_idx], y_eval)
-            jacobians = [
-                torch.autograd.grad(dydt[:, i].sum(), y_eval, retain_graph=True)[0]
-                for i in range(dydt.shape[-1])
-            ]
-
-            self.func.train(was_training)
-            return torch.stack(jacobians, dim=1)
-
-    def compute_forcing_jacobian(self, t_eval, y_eval, forcing_eval, t_idx):
-        """∂f/∂u at one timestep, attributed to the forcing interval actually read."""
-        with torch.inference_mode(False):
-            t_eval = t_eval.clone()
-            y_eval = y_eval.clone().detach()
-            forcing_eval = forcing_eval.clone().requires_grad_(True)
-
-            was_training = self.func.training
-            self.func.train()
-            self.func.set_forcing(t_eval, forcing_eval)
-
-            dydt = self.func(t_eval[t_idx], y_eval)
-            with torch.no_grad():
-                interp_idx = self.func.forcing_index(t_eval[t_idx])
-
-            jacobians = [
-                torch.autograd.grad(dydt[:, i].sum(), forcing_eval, retain_graph=True)[
-                    0
-                ][:, interp_idx, :]
-                for i in range(dydt.shape[-1])
-            ]
-
-            self.func.train(was_training)
-            return torch.stack(jacobians, dim=1)
-
-    def _compute_jacobian_analysis(
-        self, all_inputs_scaled, all_trues_scaled, target_names, forcing_names
-    ):
-        """State and forcing Jacobians across the test set.
-
-        Produces mean |∂f/∂y| and |∂f/∂u| heatmaps, a per-target sensitivity bar
-        chart, and the evolution of both along the trajectory.
-        """
-        logger.info(f"\n{'=' * 20}")
-        logger.info("JACOBIAN SENSITIVITY ANALYSIS")
-        logger.info(f"{'=' * 20}")
-
-        num_runs, steps, _ = all_inputs_scaled.shape
-        device = self.device
-        t_span = self.t_span.to(device)
-
-        # Evenly spaced timesteps, skipping the first and last.
-        timestep_indices = np.linspace(1, steps - 2, min(20, steps - 2), dtype=int)
-        logger.info(
-            f"Evaluating Jacobians: {num_runs} runs × {len(timestep_indices)} timesteps"
-        )
-
-        all_state_jacs, all_forcing_jacs = [], []
-        state_jacs_by_time = {t: [] for t in timestep_indices}
-        forcing_jacs_by_time = {t: [] for t in timestep_indices}
-
-        for start in range(0, num_runs, JACOBIAN_BATCH):
-            end = min(start + JACOBIAN_BATCH, num_runs)
-
-            inputs_batch = torch.tensor(
-                all_inputs_scaled[start:end], dtype=torch.float32, device=device
-            )
-            trues_batch = torch.tensor(
-                all_trues_scaled[start:end], dtype=torch.float32, device=device
-            )
-
-            for t_idx in timestep_indices:
-                y_t = trues_batch[:, t_idx, :]
-                abs_state_jac = (
-                    self.compute_state_jacobian(t_span, y_t, inputs_batch, int(t_idx))
-                    .abs()
-                    .cpu()
-                    .numpy()
-                )
-                abs_forcing_jac = (
-                    self.compute_forcing_jacobian(t_span, y_t, inputs_batch, int(t_idx))
-                    .abs()
-                    .cpu()
-                    .numpy()
-                )
-
-                for b in range(abs_state_jac.shape[0]):
-                    all_state_jacs.append(abs_state_jac[b])
-                    all_forcing_jacs.append(abs_forcing_jac[b])
-                    state_jacs_by_time[t_idx].append(abs_state_jac[b])
-                    forcing_jacs_by_time[t_idx].append(abs_forcing_jac[b])
-
-        mean_state_jac = np.mean(all_state_jacs, axis=0)
-        mean_forcing_jac = np.mean(all_forcing_jacs, axis=0)
-        std_state_jac = np.std(all_state_jacs, axis=0)
-        std_forcing_jac = np.std(all_forcing_jacs, axis=0)
-
-        logger.info("\nMean |∂f/∂y| (state sensitivities):")
-        for i, t_name in enumerate(target_names):
-            for j, s_name in enumerate(target_names):
-                logger.info(
-                    f"  ∂(d{t_name}/dt)/∂{s_name}: "
-                    f"{mean_state_jac[i, j]:.6f} ± {std_state_jac[i, j]:.6f}"
-                )
-
-        logger.info("\nMean |∂f/∂u| (forcing sensitivities):")
-        for i, t_name in enumerate(target_names):
-            for j, f_name in enumerate(forcing_names):
-                logger.info(
-                    f"  ∂(d{t_name}/dt)/∂{f_name}: "
-                    f"{mean_forcing_jac[i, j]:.6f} ± {std_forcing_jac[i, j]:.6f}"
-                )
-
-        plot.plot_jacobian_heatmap(
-            mean_state_jac,
-            target_names,
-            target_names,
-            title="State Sensitivity: Mean |∂f/∂y|",
-            xlabel="State variable (y_j)",
-            ylabel="Derivative (dy_i/dt)",
-            save_path=os.path.join(self.result_dir, "jacobian_state_heatmap.png"),
-        )
-        plot.plot_jacobian_heatmap(
-            mean_forcing_jac,
-            forcing_names,
-            target_names,
-            title="Forcing Sensitivity: Mean |∂f/∂u|",
-            xlabel="Forcing input (u_j)",
-            ylabel="Derivative (dy_i/dt)",
-            save_path=os.path.join(self.result_dir, "jacobian_forcing_heatmap.png"),
-        )
-
-        all_names = target_names + forcing_names
-        combined_jac = np.concatenate([mean_state_jac, mean_forcing_jac], axis=1)
-        combined_std = np.concatenate([std_state_jac, std_forcing_jac], axis=1)
-
-        sorted_timesteps = sorted(timestep_indices)
-        time_fractions = self.t_span.cpu().numpy()[sorted_timesteps]
-
-        for idx, t_name in enumerate(target_names):
-            output_dir = os.path.join(self.result_dir, t_name)
-            os.makedirs(output_dir, exist_ok=True)
-
-            plot.plot_combined_sensitivity(
-                combined_jac[idx],
-                combined_std[idx],
-                all_names,
-                len(target_names),
-                len(forcing_names),
-                title=f"Sensitivity of d{t_name}/dt",
-                save_path=os.path.join(output_dir, "jacobian_combined_sensitivity.png"),
-            )
-            plot.plot_jacobian_over_time(
-                time_fractions,
-                np.array(
-                    [
-                        np.mean([j[idx, :] for j in state_jacs_by_time[t]], axis=0)
-                        for t in sorted_timesteps
-                    ]
-                ),
-                np.array(
-                    [
-                        np.mean([j[idx, :] for j in forcing_jacs_by_time[t]], axis=0)
-                        for t in sorted_timesteps
-                    ]
-                ),
-                target_names,
-                forcing_names,
-                title=f"Sensitivity evolution: d{t_name}/dt",
-                save_path=os.path.join(output_dir, "jacobian_time_evolution.png"),
-            )
-
-        logger.info(f"\n  Jacobian analysis plots saved to: {self.result_dir}")
-
-    # ── Depletion matrix (matrix ODE only) ───────────────────────────────────
-
-    def _get_unscaling_matrix(self, target_names):
-        """Elementwise factors converting the scaled matrix to units of 1/day.
-
-        In scaled space dy_s/dt_n = A_s @ y_s; in physical space
-        A_phys[i,j] = A_s[i,j] * (range_i / range_j) / T_total_days. This ignores
-        the MinMax offset, which is exact only where a target's minimum is zero —
-        see AUDIT.md for why that matters for U238.
-
-        Returns (scale_matrix, T_total_days, time_unit).
-        """
-        dm = self.trainer.datamodule
-        n_target = len(target_names)
-
-        # Scaled 0 and 1 invert to the physical min and max, so their difference
-        # is the per-feature range without reaching into the scaler's internals.
-        phys_min = dm.target_scaler.inverse_transform(np.zeros((1, n_target)))[0]
-        phys_max = dm.target_scaler.inverse_transform(np.ones((1, n_target)))[0]
-        ranges = phys_max - phys_min
-
-        # Hardcoded: the training data actually spans 990 days, so every
-        # coefficient below is ~1% low. Left as-is deliberately — changing it
-        # moves the published depletion-matrix figure. See AUDIT.md.
-        T_total_days = 1000
-
-        logger.info(f"  Physical time span: {T_total_days:.2f} days")
-        for idx, name in enumerate(target_names):
-            logger.info(f"  {name} range: {ranges[idx]:.6e}")
-
-        return np.outer(ranges, 1.0 / ranges) / T_total_days, T_total_days, "days"
-
-    def _compute_depletion_matrix_analysis(
-        self, all_inputs_scaled, all_trues_scaled, target_names, max_runs=20
-    ):
-        """Extract and visualise the learned depletion matrix A(t) over time."""
-        logger.info(f"\n{'=' * 20}")
-        logger.info("DEPLETION MATRIX ANALYSIS")
-        logger.info(f"{'=' * 20}")
-
-        num_runs, steps, _ = all_inputs_scaled.shape
-        device = self.device
-        t_span = self.t_span.to(device)
-
-        scale_matrix, _, time_unit = self._get_unscaling_matrix(target_names)
-
-        max_runs = min(max_runs, num_runs)
-        timestep_indices = np.linspace(0, steps - 1, min(30, steps), dtype=int)
-        matrices_by_time = {t: [] for t in timestep_indices}
-
-        for start in range(0, max_runs, JACOBIAN_BATCH):
-            end = min(start + JACOBIAN_BATCH, max_runs)
-
-            inputs_batch = torch.tensor(
-                all_inputs_scaled[start:end], dtype=torch.float32, device=device
-            )
-            trues_batch = torch.tensor(
-                all_trues_scaled[start:end], dtype=torch.float32, device=device
-            )
-            self.func.set_forcing(t_span, inputs_batch)
-
-            for t_idx in timestep_indices:
-                with torch.no_grad():
-                    forcing_t = self.func._interpolate_forcing(t_span[int(t_idx)])
-                    A = self.func._build_matrix(
-                        forcing_t, trues_batch[:, int(t_idx), :]
-                    )
-
-                for b in range(A.shape[0]):
-                    matrices_by_time[t_idx].append(A[b].cpu().numpy() * scale_matrix)
-
-        all_matrices = [m for t in timestep_indices for m in matrices_by_time[t]]
-        plot.plot_depletion_matrix_mean(
-            np.mean(all_matrices, axis=0),
-            np.std(all_matrices, axis=0),
-            target_names,
-            time_unit,
-            os.path.join(self.result_dir, "depletion_matrix_mean.png"),
-        )
-
-        sorted_ts = sorted(timestep_indices)
-        plot.plot_depletion_matrix_evolution(
-            self.t_span.cpu().numpy()[sorted_ts],
-            np.array([np.mean(matrices_by_time[t], axis=0) for t in sorted_ts]),
-            np.array([np.std(matrices_by_time[t], axis=0) for t in sorted_ts]),
-            target_names,
-            time_unit,
-            max_runs,
-            os.path.join(self.result_dir, "depletion_matrix_evolution.png"),
-        )
-
-    # ── Per-step teacher-forced importance ───────────────────────────────────
-
-    def _compute_stepwise_importance(
-        self,
-        all_inputs_scaled,
-        all_trues_scaled,
-        target_names,
-        forcing_names,
-        n_permutations=5,
-        seed=0,
-        max_timesteps=50,
-    ):
-        """Per-step teacher-forced permutation importance.
-
-        At each sampled timestep t the true y(t) is the initial condition; one
-        feature is replaced with values from a randomly chosen donor run; the
-        model integrates one step; and the change in |error| at t+1 is the
-        feature's importance there.
-
-        Sampling per step is what makes the zero-start isotopes measurable: at
-        t=0 U239 is zero in every run so permuting it does nothing, but by t=5 it
-        has built up and permuting it registers. The time-evolution plot shows
-        exactly when each isotope starts mattering.
-
-        Returns (mean_delta, sem_delta, mean_pct, sem_pct, mean_by_time).
-        """
-        logger.info(f"\n{'=' * 20}")
-        logger.info(f"PER-STEP TEACHER-FORCED IMPORTANCE (K={n_permutations})")
-        logger.info(f"{'=' * 20}")
-
-        num_runs, steps, n_input = all_inputs_scaled.shape
-        n_state = all_trues_scaled.shape[2]
-        n_features = n_input + n_state
-        rng = np.random.default_rng(seed)
-
-        all_feature_names = list(forcing_names) + list(target_names)
-        feature_types = ["Forcing"] * n_input + ["State"] * n_state
-
-        # Stop at steps-2 so that t+1 always exists.
-        timestep_indices = np.linspace(
-            0, steps - 2, min(max_timesteps, steps - 1), dtype=int
-        )
-        n_sampled = len(timestep_indices)
-        t_fractions = self.t_span.cpu().numpy()[timestep_indices]
-
-        logger.info(
-            f"  {num_runs} runs × {n_sampled} sampled steps × "
-            f"{n_features} features × {n_permutations} permutations"
-        )
-
-        # per_run_avg:  (runs, features, states)   time-averaged ΔMAE per run
-        # mean_by_time: (sampled, features, states) mean ΔMAE at each timestep
-        per_run_avg = np.zeros((num_runs, n_features, n_state))
-        mean_by_time = np.zeros((n_sampled, n_features, n_state))
-
-        # The unperturbed forcing is reused by the baseline and by every state
-        # permutation — the large majority of the thousands of solves below — so
-        # it is converted once instead of on each call.
-        inputs_tensor = torch.tensor(
-            all_inputs_scaled, dtype=torch.float32, device=self.device
-        )
-
-        for t_enum, t_idx in enumerate(timestep_indices):
-            if t_enum % 10 == 0:
-                logger.info(f"  Timestep {t_enum + 1}/{n_sampled} (idx={t_idx})")
-
-            y_t = all_trues_scaled[:, t_idx, :]
-            y_tp1_unscaled = self._unscale_targets(all_trues_scaled[:, t_idx + 1, :])
-
-            base_pred = self._single_step_batch(y_t, t_idx, inputs_tensor)
-            base_ae = np.abs(self._unscale_targets(base_pred) - y_tp1_unscaled)
-
-            for j in range(n_features):
-                deltas_k = np.zeros((n_permutations, num_runs, n_state))
-
-                for k in range(n_permutations):
-                    perm = rng.permutation(num_runs)
-
-                    if j < n_input:
-                        # Forcing: swap column j at this timestep only. ZOH means
-                        # forcing[:, t_idx, :] governs the whole interval.
-                        perturbed_forcing = all_inputs_scaled.copy()
-                        perturbed_forcing[:, t_idx, j] = all_inputs_scaled[
-                            perm, t_idx, j
-                        ]
-                        pert_pred = self._single_step_batch(
-                            y_t, t_idx, perturbed_forcing
-                        )
-                    else:
-                        # State: swap one isotope in y(t); everything else stays
-                        # at ground truth.
-                        j_s = j - n_input
-                        perturbed_y_t = y_t.copy()
-                        perturbed_y_t[:, j_s] = y_t[perm, j_s]
-                        pert_pred = self._single_step_batch(
-                            perturbed_y_t, t_idx, inputs_tensor
-                        )
-
-                    pert_ae = np.abs(self._unscale_targets(pert_pred) - y_tp1_unscaled)
-                    deltas_k[k] = pert_ae - base_ae
-
-                delta_at_step = deltas_k.mean(axis=0)
-                per_run_avg[:, j, :] += delta_at_step / n_sampled
-                mean_by_time[t_enum, j, :] = delta_at_step.mean(axis=0)
-
-        mean_delta = per_run_avg.mean(axis=0)
-        sem_delta = per_run_avg.std(axis=0, ddof=1) / np.sqrt(num_runs)
-
-        # Normalise to percentages per run, then average, so the spread reflects
-        # run-to-run variation rather than the magnitude of the errors.
-        delta_clipped = np.clip(per_run_avg, 0.0, None)
-        totals = delta_clipped.sum(axis=1, keepdims=True)
-        pct_per_run = np.where(
-            totals > 0, 100.0 * delta_clipped / np.maximum(totals, 1e-30), 0.0
-        )
-        mean_pct = pct_per_run.mean(axis=0)
-        sem_pct = pct_per_run.std(axis=0, ddof=1) / np.sqrt(num_runs)
-
-        self._log_stepwise_importance(
-            mean_delta,
-            sem_delta,
-            mean_pct,
-            sem_pct,
-            all_feature_names,
-            feature_types,
-            target_names,
-            n_features,
-        )
-        self._write_stepwise_importance_tables(
-            mean_delta,
-            sem_delta,
-            mean_pct,
-            sem_pct,
-            all_feature_names,
-            feature_types,
-            target_names,
-            num_runs,
-            n_sampled,
-            n_permutations,
-        )
-
-        plot.plot_stepwise_importance_bar(
-            mean_pct,
-            sem_pct,
-            all_feature_names,
-            feature_types,
-            target_names,
-            num_runs,
-            self.result_dir,
-        )
-        plot.plot_stepwise_importance_over_time(
-            mean_by_time,
-            t_fractions,
-            all_feature_names,
-            feature_types,
-            target_names,
-            self.result_dir,
-        )
-
-        return mean_delta, sem_delta, mean_pct, sem_pct, mean_by_time
-
-    def _log_stepwise_importance(
-        self,
-        mean_delta,
-        sem_delta,
-        mean_pct,
-        sem_pct,
-        feature_names,
-        feature_types,
-        target_names,
-        n_features,
-    ):
-        for k, tname in enumerate(target_names):
-            logger.info(f"\n  Per-step importance — target: {tname}")
-            logger.info(
-                f"    {'Feature':<28} {'Type':<10} "
-                f"{'ΔMAE (mean±SEM)':>28} {'Imp. [%]':>18}"
-            )
-            for j in np.argsort(mean_pct[:, k])[::-1]:
-                logger.info(
-                    f"    {feature_names[j]:<28} {feature_types[j]:<10} "
-                    f"{mean_delta[j, k]:>10.4e} ± {sem_delta[j, k]:.2e}   "
-                    f"{mean_pct[j, k]:>7.2f} ± {sem_pct[j, k]:.2f}"
-                )
-            for j in range(n_features):
-                safe = feature_names[j].replace(" ", "_")
-                self.log(f"{tname}/stepwise_pct/{safe}", float(mean_pct[j, k]))
-                self.log(f"{tname}/stepwise_dMAE/{safe}", float(mean_delta[j, k]))
-
-    def _write_stepwise_importance_tables(
-        self,
-        mean_delta,
-        sem_delta,
-        mean_pct,
-        sem_pct,
-        feature_names,
-        feature_types,
-        target_names,
-        num_runs,
-        n_sampled,
-        n_permutations,
-    ):
-        """One CSV per target, plus a markdown dump for pasting into the write-up."""
-        _print_unicode_safe("\n" + "=" * 70)
-        _print_unicode_safe(
-            "PER-STEP IMPORTANCE TABLES — paste everything between the markers"
-        )
-        _print_unicode_safe("=" * 70)
-        _print_unicode_safe("<<<BEGIN_STEPWISE_IMPORTANCE_TABLES>>>")
-        _print_unicode_safe(
-            f"\n_Per-step teacher-forced permutation importance — "
-            f"mean ± SEM across {num_runs} runs, "
-            f"{n_sampled} sampled timesteps, K={n_permutations}_\n"
-        )
-
-        for k, tname in enumerate(target_names):
-            order = np.argsort(mean_pct[:, k])[::-1]
-
-            _print_unicode_safe(f"#### Target: `{tname}`\n")
-            _print_unicode_safe("| Feature | Type | ΔMAE | MAE Imp. [%] |")
-            _print_unicode_safe("|---|---|---|---|")
-            for j in order:
-                _print_unicode_safe(
-                    f"| {feature_names[j]} | {feature_types[j]} | "
-                    f"{mean_delta[j, k]:.4e} ± {sem_delta[j, k]:.2e} | "
-                    f"{mean_pct[j, k]:.2f} ± {sem_pct[j, k]:.2f} |"
-                )
-            _print_unicode_safe()
-
-            output_dir = os.path.join(self.result_dir, tname)
-            os.makedirs(output_dir, exist_ok=True)
-            csv_path = os.path.join(output_dir, "stepwise_importance.csv")
-            with open(csv_path, "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(
-                    [
-                        "Feature",
-                        "Type",
-                        "dMAE_mean",
-                        "dMAE_SEM",
-                        "MAE_Imp_pct_mean",
-                        "MAE_Imp_pct_SEM",
-                    ]
-                )
-                writer.writerows(
-                    [
-                        feature_names[j],
-                        feature_types[j],
-                        f"{mean_delta[j, k]:.6e}",
-                        f"{sem_delta[j, k]:.6e}",
-                        f"{mean_pct[j, k]:.4f}",
-                        f"{sem_pct[j, k]:.4f}",
-                    ]
-                    for j in order
-                )
-            logger.info(f"  Stepwise importance CSV: {csv_path}")
-
-        _print_unicode_safe("<<<END_STEPWISE_IMPORTANCE_TABLES>>>")
-        _print_unicode_safe("=" * 70 + "\n")
-
-    def _single_step_batch(self, y_t_np, t_idx, forcing_profiles):
-        """Integrate one teacher-forced step for every run, in batches.
-
-        y_t_np is (runs, n_state); *forcing_profiles* is (runs, steps, n_input),
-        either numpy or an already-built tensor. The importance sweep calls this
-        thousands of times with the same unperturbed forcing, so passing the
-        tensor lets the caller convert it once.
-
-        Returns (runs, n_state) in model units.
-        """
-        num_runs, n_state = y_t_np.shape
-        device = self.device
-        t_span = self.t_span.to(device)
-        t_short = t_span[t_idx : t_idx + 2]
-
-        forcing = (
-            forcing_profiles
-            if torch.is_tensor(forcing_profiles)
-            else torch.tensor(forcing_profiles, dtype=torch.float32, device=device)
-        )
-
-        preds = np.zeros((num_runs, n_state))
-        with torch.no_grad():
-            for start in range(0, num_runs, SINGLE_STEP_BATCH):
-                end = min(start + SINGLE_STEP_BATCH, num_runs)
-                y_batch = torch.tensor(
-                    y_t_np[start:end], dtype=torch.float32, device=device
-                )
-                self.func.set_forcing(t_span, forcing[start:end])
-                preds[start:end] = self._odeint(y_batch, t_short)[-1].cpu().numpy()
-
-        return preds
-
     # ── Predict / optimiser ──────────────────────────────────────────────────
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         target_pred, target_true = self._forward_batch(batch)
-        return {
-            "pred": target_pred.squeeze(-1).cpu(),
-            "true": target_true.squeeze(-1).cpu(),
-        }
+        return {"pred": target_pred.cpu(), "true": target_true.cpu()}
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(

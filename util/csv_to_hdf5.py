@@ -1,122 +1,97 @@
-import polars as pl
+"""Convert a combined datagen CSV into the HDF5 layout the ML pipeline reads.
+
+The layout is matched by `nuclear_surrogates.datamodule.dataset_helper.read_h5_file`:
+
+    numeric_data      (rows, n_numeric) float64, gzip-compressed
+    numeric_columns   names of the numeric columns, in order
+    string_<col>      one dataset per non-numeric column
+    string_columns    names of the non-numeric columns
+    all_columns       every column name, in the CSV's original order
+
+Usage:
+    python util/csv_to_hdf5.py data.csv output.h5
+    python util/csv_to_hdf5.py data.csv output.h5 --inspect
+"""
+
+import argparse
+
 import h5py
 import numpy as np
+import polars as pl
 
-# Read the CSV
-print("Reading CSV...")
-df = pl.read_csv("data.csv")
 
-# Remove run_label column if it exists
-if "run_label" in df.columns:
-    print("Removing 'run_label' column...")
-    df = df.drop("run_label")
+def convert(input_csv, output_h5):
+    print(f"Reading {input_csv}...")
+    df = pl.read_csv(input_csv)
 
-print(f"Total columns: {len(df.columns)}")
-print(f"Total rows: {len(df)}")
+    # run_label only identifies the generating worker; the ML side drops it and
+    # detects run boundaries from time resets instead.
+    if "run_label" in df.columns:
+        df = df.drop("run_label")
 
-# Separate numeric and non-numeric columns
-numeric_cols = [col for col in df.columns if df[col].dtype.is_numeric()]
-string_cols = [col for col in df.columns if not df[col].dtype.is_numeric()]
+    numeric_cols = [col for col in df.columns if df[col].dtype.is_numeric()]
+    string_cols = [col for col in df.columns if not df[col].dtype.is_numeric()]
+    string_dt = h5py.string_dtype(encoding="utf-8")
 
-print(f"\nNumeric columns: {len(numeric_cols)}")
-print(f"Non-numeric columns: {len(string_cols)}")
+    with h5py.File(output_h5, "w") as f:
+        if numeric_cols:
+            f.create_dataset(
+                "numeric_data",
+                data=df.select(numeric_cols).to_numpy().astype(np.float64),
+                compression="gzip",
+                compression_opts=9,
+            )
+            f.create_dataset("numeric_columns", data=numeric_cols, dtype=string_dt)
 
-# Create HDF5 file
-print("\nWriting to HDF5...")
-with h5py.File("output.h5", "w") as f:
-    # Store numeric data
-    if numeric_cols:
-        numeric_data = df.select(numeric_cols).to_numpy().astype(np.float64)
-        f.create_dataset(
-            "numeric_data", data=numeric_data, compression="gzip", compression_opts=9
-        )
-
-        # Store numeric column names
-        dt = h5py.string_dtype(encoding="utf-8")
-        f.create_dataset("numeric_columns", data=numeric_cols, dtype=dt)
-
-    # Store string data (if any)
-    if string_cols:
-        for col in string_cols:
-            # Convert to list of strings to handle encoding properly
-            string_list = [
-                str(val) if val is not None else "" for val in df[col].to_list()
-            ]
-            dt = h5py.string_dtype(encoding="utf-8")
-            f.create_dataset(f"string_{col}", data=string_list, dtype=dt)
-
-        # Store string column names
-        dt = h5py.string_dtype(encoding="utf-8")
-        f.create_dataset("string_columns", data=string_cols, dtype=dt)
-
-    # Store all column names in order
-    dt = h5py.string_dtype(encoding="utf-8")
-    f.create_dataset("all_columns", data=df.columns, dtype=dt)
-
-print("Done!")
-
-# Detailed inspection of the HDF5 file
-print("\n" + "=" * 60)
-print("DETAILED HDF5 FILE INSPECTION")
-print("=" * 60)
-
-with h5py.File("output.h5", "r") as f:
-    # Show all datasets in the file
-    print("\nDatasets in file:")
-    for key in f.keys():
-        dataset = f[key]
-        if hasattr(dataset, "shape"):
-            print(f"  - {key}: shape={dataset.shape}, dtype={dataset.dtype}")
-        else:
-            print(f"  - {key}")
-
-    # Get all column names
-    all_columns = [col for col in f["all_columns"][:]]
-
-    print(f"\nTotal number of columns: {len(all_columns)}")
-
-    # Get numeric data
-    if "numeric_data" in f:
-        numeric_data = f["numeric_data"][:]
-        numeric_columns = [col for col in f["numeric_columns"][:]]
-
-        print(f"\nNumeric data shape: {numeric_data.shape}")
-        print(f"Number of numeric columns: {len(numeric_columns)}")
-        print(f"Total number of rows: {numeric_data.shape[0]}")
-
-        print("\nNumeric column names:")
-        for i, col in enumerate(numeric_columns):
-            print(f"  {i}: {col}")
-
-        print("\nFirst 5 rows of numeric data:")
-        print(numeric_data[:5])
-
-        print("\nSample values for each numeric column (first row):")
-        for i, col in enumerate(numeric_columns[:10]):  # Show first 10
-            print(f"  {col}: {numeric_data[0, i]}")
-
-        print("\nBasic statistics for first 5 numeric columns:")
-        for i in range(min(5, len(numeric_columns))):
-            col_data = numeric_data[:, i]
-            print(f"\n  Column: {numeric_columns[i]}")
-            print(f"    Min: {np.min(col_data)}")
-            print(f"    Max: {np.max(col_data)}")
-            print(f"    Mean: {np.mean(col_data)}")
-            print(f"    Std: {np.std(col_data)}")
-
-    # Get string data
-    if "string_columns" in f:
-        string_columns = [col for col in f["string_columns"][:]]
-
-        print(f"\n\nString columns ({len(string_columns)}):")
-        for col in string_columns:
-            string_data = f[f"string_{col}"][:]
-            # Decode if necessary
-            if string_data.dtype.kind == "S":
-                string_data = [
-                    s.decode("utf-8") if isinstance(s, bytes) else s
-                    for s in string_data
+        if string_cols:
+            for col in string_cols:
+                values = [
+                    str(val) if val is not None else "" for val in df[col].to_list()
                 ]
-            print(f"\n  Column: {col}")
-            print(f"    First 5 values: {string_data[:5]}")
-            print(f"    Unique values: {len(np.unique(string_data))}")
+                f.create_dataset(f"string_{col}", data=values, dtype=string_dt)
+            f.create_dataset("string_columns", data=string_cols, dtype=string_dt)
+
+        f.create_dataset("all_columns", data=df.columns, dtype=string_dt)
+
+    print(
+        f"Wrote {output_h5}: {df.shape[0]} rows, "
+        f"{len(numeric_cols)} numeric + {len(string_cols)} string columns"
+    )
+
+
+def inspect(path):
+    """Print a compact summary of the file just written."""
+    with h5py.File(path, "r") as f:
+        print(f"\nDatasets in {path}:")
+        for key in f:
+            print(f"  {key}: shape={f[key].shape}, dtype={f[key].dtype}")
+
+        columns = [
+            col.decode() if isinstance(col, bytes) else col
+            for col in f["all_columns"][:]
+        ]
+        preview = ", ".join(columns[:10])
+        suffix = ", ..." if len(columns) > 10 else ""
+        print(f"  {len(columns)} columns: {preview}{suffix}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Convert a datagen CSV to the HDF5 layout the ML pipeline reads"
+    )
+    parser.add_argument("input_csv", help="combined CSV (see util/combine_data.py)")
+    parser.add_argument("output_h5", help="where to write the HDF5 file")
+    parser.add_argument(
+        "--inspect",
+        action="store_true",
+        help="print a summary of the written file",
+    )
+    args = parser.parse_args()
+
+    convert(args.input_csv, args.output_h5)
+    if args.inspect:
+        inspect(args.output_h5)
+
+
+if __name__ == "__main__":
+    main()

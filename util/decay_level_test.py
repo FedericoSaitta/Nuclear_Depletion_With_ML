@@ -1,4 +1,5 @@
-# file: trim_chain_loop.py  (or paste into a notebook cell)
+# Sweep the decay-chain truncation level 0..90 and record how many nuclides
+# survive `Chain.reduce` at each level, as a table and a plot.
 
 import os
 import openmc.deplete
@@ -151,4 +152,6 @@ plt.ylabel("number of nuclides tracked after trimming")
 plt.title("Nuclides Tracked vs. Decay Levels")
 plt.grid(True)
 plt.tight_layout()
-plt.savefig()
+plot_path = os.path.join(results_dir, "nuclide_counts_vs_level.png")
+plt.savefig(plot_path, dpi=300)
+print(f"Plot saved to: {plot_path}")

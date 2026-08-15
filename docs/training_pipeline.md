@@ -126,10 +126,10 @@ obtains states by integrating it:
 
 with `y` the seven scaled concentrations and `u(t)` the power, held
 piecewise-constant between grid points (zero-order hold,
-`ForcedODEFunc._interpolate_forcing`).
+`ForcedODEFunc.interpolate_forcing`).
 
 `A` is not a free 7×7 matrix. It is produced by an MLP and then **constrained**
-(`ODEFuncMatrix._build_matrix`):
+(`ODEFuncMatrix.build_matrix`):
 
 - **Sparsity.** 36 of the 49 entries are forced to zero by
   `model.matrix_zero_entries`, leaving only the physically allowed transitions —
@@ -367,6 +367,7 @@ model-bundle/                    the run's record — see below
   jacobian_*                     sensitivity analysis (NODE)
   stepwise_importance*           per-step permutation importance (NODE)
 depletion_matrix_{mean,evolution}.png   the learned A, in physical units (NODE)
+stepwise_importance.md           importance tables, ready to paste (NODE)
 training_loss_log.png            loss curves, plus NFE for the NODE
 ```
 
@@ -386,6 +387,27 @@ model-bundle/
 A row in `Chain_Model.db` records the run's identity and results and points at
 this directory via `bundle_path`; the configuration itself is read from
 `config.resolved.yaml` rather than duplicated into columns.
+
+To run the model again, point `nucml` at the directory:
+
+```bash
+uv run nucml --bundle results/<model_name>/model-bundle \
+             --data   datasets/new_runs.h5 \
+             --out    predictions/
+```
+
+To redraw this run's own figures instead of evaluating new data, add
+`--regenerate-plots` and pass the dataset it was trained on. That rebuilds the
+run's train/val/test split, keeps only the test share, and replays it with the
+bundle's weights and scalers — the same runs the published figures came from,
+verified against `split_indices.json` before anything is drawn.
+
+`read_bundle` repoints the bundle's config at the bundle's own weights and
+scalers and clears `dataset.path_to_data`, so the run cannot fall back on a
+training file the bundle does not ship. The config is needed alongside the
+weights because both models build their architecture from it — and for the NODE
+the solver and its tolerances change the numbers, not just the runtime — which
+is why `config.resolved.yaml` is in the bundle rather than assumed.
 
 ---
 

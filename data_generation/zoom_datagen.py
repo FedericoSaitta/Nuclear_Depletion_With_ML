@@ -8,6 +8,11 @@ Workflow:
   3. Slice the BEAVRS power history for [start_day, end_day]
   4. Run a fresh hourly depletion from those initial conditions
 
+Unlike quarter_datagen.py this driver steps one integrate() call per timestep,
+which is what lets it swap in reduced-fidelity transport settings
+(--decay-particles/--decay-batches/--decay-inactive) for steps below
+--power-threshold, where transport statistics do not matter.
+
 Usage:
   python zoom_datagen.py \\
       --daily-results path/to/daily/depletion_results.h5 \\
@@ -21,6 +26,9 @@ covering only the zoomed window at hourly resolution.
 
 import argparse
 
+# Parse argv and set OMP_NUM_THREADS BEFORE importing OpenMC, which reads the
+# variable at import time. This ordering is why E402 is scoped off for this
+# file in pyproject.toml.
 parser = argparse.ArgumentParser(
     description="Zoom-in hourly depletion from a daily run",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -110,37 +118,31 @@ parser.add_argument("--power-threshold", type=float, default=0.01)
 parser.add_argument("--decay-particles", type=int, default=100)
 parser.add_argument("--decay-batches", type=int, default=10)
 parser.add_argument("--decay-inactive", type=int, default=3)
-
-
-if __name__ == "__main__":
-    args = parser.parse_args()
-else:
-    args = None
+args = parser.parse_args()
 
 import os
 
-os.environ["OMP_NUM_THREADS"] = str(args.threads if args else 1)
+os.environ["OMP_NUM_THREADS"] = str(args.threads)
 
-import openmc
-import openmc.deplete
-import time
 import glob
-import numpy as np
-import pandas as pd
+import time
 from datetime import datetime
 
+import numpy as np
+import openmc
+import openmc.deplete
+import pandas as pd
+
+import tally_io
+from common import DAY_IN_SECONDS, parse_power_history
 from quarter_sim import (
     set_material_volumes_quarter,
     create_quarter_geometry,
     create_settings,
     create_tallies,
-    FISSION_NUCLIDES,
     CAPTURE_NUCLIDES,
-    FISSION_Q_VALUES,
+    FISSION_NUCLIDES,
 )
-
-HOUR_IN_SECONDS = 3600
-DAY_IN_SECONDS = 24 * HOUR_IN_SECONDS
 
 GEOMETRY_RADII = [0.39218, 0.40005, 0.45720]
 GEOMETRY_PITCH = 1.25984
@@ -208,37 +210,9 @@ def load_depleted_materials(daily_results_path, start_day, daily_dt):
 
 
 def load_power_window(filepath, start_day, end_day, dt_days, rated_power):
-    """Load BEAVRS power history and extract the window [start_day, end_day]
-    at hourly resolution.
-    """
-    filepath = os.path.abspath(filepath)
-    days = []
-    percents = []
-    header_found = False
-
-    with open(filepath) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                if header_found:
-                    break
-                continue
-            if line.lower().startswith("cycle 1"):
-                continue
-            if line.lower().startswith("day"):
-                header_found = True
-                continue
-            if line.lower().startswith("cycle") or line[0].isalpha():
-                break
-            try:
-                parts = line.split(",")
-                days.append(float(parts[0]))
-                percents.append(float(parts[1]))
-            except (ValueError, IndexError):
-                break
-
-    days = np.array(days)
-    powers_raw = np.array(percents) / 100.0 * rated_power
+    """Slice the BEAVRS power history to [start_day, end_day] at *dt_days*."""
+    days, percents = parse_power_history(filepath)
+    powers_raw = percents / 100.0 * rated_power
 
     # Interpolate onto hourly grid for the window
     duration = end_day - start_day
@@ -315,90 +289,19 @@ def build_model_from_exported(materials_path, config):
 
 
 # ---------------------------------------------------------------------------
-# Tally extraction (same as quarter_datagen.py)
+# Tally extraction
 # ---------------------------------------------------------------------------
 
 
 def extract_tallies_from_statepoint(batches):
+    """Read the current step's statepoint, falling back to the newest one."""
     sp_file = f"statepoint.{batches}.h5"
-    result = {"flux": float("nan"), "flux_std": float("nan")}
-    for nuc in FISSION_NUCLIDES:
-        result[f"{nuc}_fission"] = float("nan")
-        result[f"{nuc}_fission_std"] = float("nan")
-    for nuc in CAPTURE_NUCLIDES:
-        result[f"{nuc}_capture"] = float("nan")
-        result[f"{nuc}_capture_std"] = float("nan")
-
     if not os.path.exists(sp_file):
         sp_files = sorted(glob.glob("statepoint.*.h5"))
-        if sp_files:
-            sp_file = sp_files[-1]
-        else:
-            return result
-
-    try:
-        sp = openmc.StatePoint(sp_file)
-        try:
-            t = sp.get_tally(id=9001)
-            result["flux"] = t.mean.flatten()[0]
-            result["flux_std"] = t.std_dev.flatten()[0]
-        except Exception:
-            pass
-        try:
-            t = sp.get_tally(id=9002)
-            means = t.mean.flatten()
-            stds = t.std_dev.flatten()
-            for j, nuc in enumerate(FISSION_NUCLIDES):
-                result[f"{nuc}_fission"] = means[j]
-                result[f"{nuc}_fission_std"] = stds[j]
-        except Exception:
-            pass
-        try:
-            t = sp.get_tally(id=9003)
-            means = t.mean.flatten()
-            stds = t.std_dev.flatten()
-            for j, nuc in enumerate(CAPTURE_NUCLIDES):
-                result[f"{nuc}_capture"] = means[j]
-                result[f"{nuc}_capture_std"] = stds[j]
-        except Exception:
-            pass
-        sp.close()
-    except Exception:
-        pass
-
-    return result
-
-
-def make_zero_tally_data():
-    result = {"flux": 0.0, "flux_std": 0.0}
-    for nuc in FISSION_NUCLIDES:
-        result[f"{nuc}_fission"] = 0.0
-        result[f"{nuc}_fission_std"] = 0.0
-    for nuc in CAPTURE_NUCLIDES:
-        result[f"{nuc}_capture"] = 0.0
-        result[f"{nuc}_capture_std"] = 0.0
-    return result
-
-
-def compute_fission_power_fractions(tally_data):
-    fracs = {}
-    total_power = 0.0
-    for nuc in FISSION_NUCLIDES:
-        rate = tally_data.get(f"{nuc}_fission", 0.0)
-        if np.isnan(rate):
-            rate = 0.0
-        total_power += rate * FISSION_Q_VALUES[nuc]
-    for nuc in FISSION_NUCLIDES:
-        rate = tally_data.get(f"{nuc}_fission", 0.0)
-        if np.isnan(rate):
-            rate = 0.0
-        if total_power > 0:
-            fracs[f"{nuc}_fission_power_frac"] = (
-                rate * FISSION_Q_VALUES[nuc]
-            ) / total_power
-        else:
-            fracs[f"{nuc}_fission_power_frac"] = 0.0
-    return fracs
+        if not sp_files:
+            return tally_io.nan_tally()
+        sp_file = sp_files[-1]
+    return tally_io.read_statepoint_tallies(sp_file)
 
 
 # ---------------------------------------------------------------------------
@@ -427,15 +330,7 @@ def run_zoom_depletion(
     decay_batches = config.get("decay_batches", 10)
     decay_inactive = config.get("decay_inactive", 3)
 
-    step_keys = ["flux", "flux_std"]
-    for nuc in FISSION_NUCLIDES:
-        step_keys.extend(
-            [f"{nuc}_fission", f"{nuc}_fission_std", f"{nuc}_fission_power_frac"]
-        )
-    for nuc in CAPTURE_NUCLIDES:
-        step_keys.extend([f"{nuc}_capture", f"{nuc}_capture_std"])
-
-    step_data = {k: [] for k in step_keys}
+    step_data = {k: [] for k in tally_io.step_keys()}
 
     for i in range(num_steps):
         step_power_W = powers[i] * fuel_mass_g
@@ -481,7 +376,7 @@ def run_zoom_depletion(
 
         # Extract tallies
         if is_decay_only:
-            tally_data = make_zero_tally_data()
+            tally_data = tally_io.zero_tally()
         else:
             tally_data = extract_tallies_from_statepoint(batches)
 
@@ -495,7 +390,7 @@ def run_zoom_depletion(
             step_data[f"{nuc}_capture"].append(tally_data[f"{nuc}_capture"])
             step_data[f"{nuc}_capture_std"].append(tally_data[f"{nuc}_capture_std"])
 
-        fracs = compute_fission_power_fractions(tally_data)
+        fracs = tally_io.compute_fission_power_fractions(tally_data)
         for nuc in FISSION_NUCLIDES:
             step_data[f"{nuc}_fission_power_frac"].append(
                 fracs[f"{nuc}_fission_power_frac"]
@@ -524,7 +419,7 @@ def run_zoom_depletion(
 # ---------------------------------------------------------------------------
 
 
-def extract_and_save(results, powers, dt_seconds, step_data, start_day, script_dir):
+def extract_and_save(results, powers, step_data, start_day, script_dir):
     """Extract results and save to CSV."""
     time_arr, k = results.get_keff()
     # Shift times to absolute days (relative to BOC, not zoom start)
@@ -667,7 +562,7 @@ if __name__ == "__main__":
 
     # --- 6. Extract and save ---
     results = openmc.deplete.Results("depletion_results.h5")
-    extract_and_save(results, powers, dt_seconds, step_data, args.start_day, script_dir)
+    extract_and_save(results, powers, step_data, args.start_day, script_dir)
 
     elapsed = time.perf_counter() - t_start
     print(f"\nTotal runtime: {elapsed/3600:.1f} hours")

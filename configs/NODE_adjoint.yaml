@@ -91,10 +91,11 @@ train:
   grad_clip: 0.0
   drop_last: false
 
+  # `step_size` is read only by fixed-step solvers (rk4); dopri5 chooses its
+  # own steps from the error estimate.
   solver: dopri5
   rtol: 1e-5
   atol: 1e-7
-  step_size: 0.01
 
   # Gradients from a backward adjoint solve rather than a stored forward graph.
   use_adjoint: true

@@ -1,5 +1,28 @@
 # Nuclear_Transport_With_ML
 
+Machine-learning surrogates for OpenMC fuel-depletion calculations. A Monte-Carlo
+depletion run of a PWR pin cell takes hours to weeks; a trained surrogate
+reproduces the isotope trajectories in seconds.
+
+<p align="center">
+    <img src="README_images/motivation_tracking_pu239.png" height="260"
+       alt="Tracking Pu-239 through the breeding chain is the hard part"><!--
+  --><img src="README_images/motivation_simulation_vs_surrogate.png" height="260"
+       alt="Choosing between an accurate MC simulation taking weeks and a neural network taking seconds">
+</p>
+
+Two surrogates are implemented and compared:
+
+- a **DNN** learning the one-step map `c(t) → Δc(t)`, and
+- a **Neural ODE** learning the continuous-time generator `dy/dt = A(u, y)·y`,
+  where `A` is constrained to the physically allowed transitions of the
+  breeding chain, so the learned matrix is directly interpretable.
+
+The target physics is the U238 breeding chain,
+`U238 → U239 → Np239 → Pu239 → Pu240 → Pu241 → Pu242`, spanning timescales from
+23 minutes to years. `docs/training_pipeline.md` describes both models end to
+end; `docs/config_reference.md` documents every configuration key.
+
 ## Quickstart
 
 Requires [uv](https://docs.astral.sh/uv/). Python itself is provisioned by uv — you do
@@ -22,6 +45,66 @@ uv run nucml --config configs/main_config.yaml runtime.model=DNN train.num_epoch
 
 Training reads the HDF5 named by `dataset.path_to_data`, which is not in the
 repository — put it in `datasets/` (see [Downloading data](#downloading-data)).
+
+### Run a trained model on new data
+
+Every training run writes a **model bundle** beside its outputs, at
+`results/<model_name>/model-bundle/`. It holds the weights, the fitted scalers
+as plain JSON, the fully-resolved config, the train/val/test split and the git
+SHA, seed and dataset hash — a few hundred kB, and no dependency on the training
+dataset. Point `nucml` at one:
+
+```bash
+uv run nucml --bundle results/matrix_ode_7x7_breeding_chain/model-bundle \
+             --data   datasets/new_runs.h5 \
+             --out    predictions/
+```
+
+That is the whole command. Weights alone would not be enough — both models build
+their architecture from the config, and for a NODE the solver and its tolerances
+change the numbers, not just the runtime — but the bundle carries all of it, and
+`--bundle` wires it up. It also repoints the config's paths at the bundle's own
+files, so a bundle copied off a cluster works unmodified.
+
+Overrides still apply on top:
+
+```bash
+uv run nucml --bundle <dir> --data new_runs.h5 runtime.device=cuda
+```
+
+The scalers are not optional. A checkpoint without them is half a model, so
+inference loads them from the bundle and there is no fallback — re-fitting on
+whatever data is to hand would silently change every number the run produces.
+
+### Redraw a finished run's figures
+
+`--regenerate-plots` replays a run rather than evaluating new data: the run's own
+test split, weights and scalers, so the figures come out the same as the ones the
+bundle was published with. Nothing is trained and no checkpoint is written.
+
+```bash
+uv run nucml --bundle results/matrix_ode_7x7_breeding_chain/model-bundle \
+             --regenerate-plots \
+             --data datasets/casl_3305_runs_inter.h5 \
+             --out  figures/
+```
+
+This one *does* need the training dataset, because the test split is a share of
+it — `dataset.split` in the config decides how large a share, and the bundle's
+`split_indices.json` records exactly which runs. The rebuilt split is checked
+against that record and the run stops on a mismatch, so redrawn figures are
+either the published run's or nothing.
+
+For a checkpoint trained before bundles existed, backfill one once on a machine
+that still has the dataset:
+
+```bash
+uv run nucml-package --ckpt <old.ckpt> --config <its_config.yaml> \
+                     --data datasets/casl_3305_runs_inter.h5 --out bundles/legacy
+```
+
+Its scalers are *refitted* rather than original, which `metadata.json` records —
+a backfilled bundle is a regression anchor, not a reproduction of the run.
 
 ### Repository layout
 
@@ -196,6 +279,9 @@ train:
 | Set up sim env on Windows | inside `wsl`, see [On a Windows laptop](#on-a-windows-laptop-use-wsl2) |
 | Train | `uv run nucml --config configs/main_config.yaml` |
 | Train with overrides | `uv run nucml --config configs/main_config.yaml train.num_epochs=5 runtime.device=cpu` |
+| Run a trained model | `uv run nucml --bundle results/<name>/model-bundle --data <file.h5> --out predictions/` |
+| Redraw a run's figures | `uv run nucml --bundle results/<name>/model-bundle --regenerate-plots --data <training.h5> --out figures/` |
+| Bundle an old checkpoint | `uv run nucml-package --ckpt <ckpt> --config <cfg> --data <h5> --out bundles/<name>` |
 | Run datagen | `UV_PROJECT_ENVIRONMENT=.venv-sim uv run python data_generation/datagen.py -n 4 -c 16` |
 | Add an ML dependency | `uv add --optional ml <pkg>` (updates `pyproject.toml` **and** `uv.lock`) |
 | Add a sim dependency | `uv add --optional sim <pkg>` |

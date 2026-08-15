@@ -183,4 +183,13 @@ class SQLiteLogger(Logger):
         pass
 
     def finalize(self, status):
+        """Record how the run ended.
+
+        Lightning calls this with "success" after `update_final_results` has
+        already written "completed", which used to leave the column holding two
+        synonyms depending on which path wrote last. A finished run keeps
+        "completed"; anything else is recorded verbatim.
+        """
+        if status == "success":
+            status = "completed"
         self._update(status=status, completed_at=datetime.now().isoformat())

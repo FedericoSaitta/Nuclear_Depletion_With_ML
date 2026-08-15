@@ -203,6 +203,32 @@ def test_inverse_transform_round_trips(kind):
     np.testing.assert_allclose(restored, data, rtol=1e-6, atol=1e-9)
 
 
+def test_ordered_names_follows_array_order_not_config_order():
+    """Per-target labels must come from the column index map.
+
+    The arrays are laid out by `split_df`'s column order; the config dict can
+    list the same targets in any order. Pairing a config-ordered name list with
+    an array-ordered column would mislabel every per-isotope number.
+    """
+    index_map = {"Pu239": 2, "U238": 0, "Np239": 1}
+    assert dataset_helper.ordered_names(index_map) == ["U238", "Np239", "Pu239"]
+
+
+def test_tensor_datasets_reject_nans():
+    """A NaN here is upstream corruption. It used to be patched to -1, which is
+    a plausible-looking scaled value that trains without complaint."""
+    import torch
+
+    good = np.ones((4, 2))
+    bad = np.array([[1.0, np.nan], [1.0, 1.0], [1.0, 1.0], [1.0, 1.0]])
+
+    with pytest.raises(ValueError, match="NaN"):
+        dataset_helper.create_tensor_datasets(bad, good, good, good, good, good)
+
+    datasets = dataset_helper.create_tensor_datasets(good, good, good, good, good, good)
+    assert all(isinstance(d.tensors[0], torch.Tensor) for d in datasets)
+
+
 def test_unknown_scaler_raises():
     """A typo'd scaler name must fail, not silently train on unscaled data.
 

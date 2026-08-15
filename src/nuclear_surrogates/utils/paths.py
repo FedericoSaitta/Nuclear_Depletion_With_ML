@@ -13,6 +13,7 @@ from pathlib import Path
 _PATH_KEYS = (
     ("dataset", "path_to_data"),
     ("dataset", "path_to_inference_data"),
+    ("dataset", "preprocessor_path"),
     ("runtime", "ckp_path"),
     ("runtime", "output_dir"),
     ("runtime", "model_database"),

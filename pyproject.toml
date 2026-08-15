@@ -172,6 +172,21 @@ testpaths = ["tests"]
 filterwarnings = [
   # lightning calls a torch pytree API that torch now deprecates — its fix, not ours.
   "ignore:.*treespec, LeafSpec.*",
+
+  # The next two are lightning telling us to undo what the suite does on
+  # purpose. Every test run is pinned to the CPU with num_workers=0 (see the
+  # `isolated_run` fixture and the golden configs) because both the accelerator
+  # and worker processes reorder float reductions, which is what the golden
+  # fixtures pin. They are left unfiltered outside the suite, where the advice
+  # is worth hearing. Neither fires on a CI runner — only on a machine that has
+  # a GPU and spare cores, i.e. the laptop and the cluster.
+  "ignore:GPU available but not used",
+  "ignore:The .* does not have many workers",
+
+  # joblib assigns to `ndarray.shape` while unpickling and NumPy 2.5 deprecates
+  # that. joblib's fix; it only affects the convenience .joblib copy of the
+  # preprocessor, never the JSON that models are actually served from.
+  "ignore:Setting the shape on a NumPy array has been deprecated",
 ]
 markers = [
   "openmc: requires the OpenMC install and nuclear data (skipped in the ML env)",

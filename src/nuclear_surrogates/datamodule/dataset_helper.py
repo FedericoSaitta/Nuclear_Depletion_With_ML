@@ -159,6 +159,17 @@ def split_df(df, keys):
     return subset.to_numpy(), col_map
 
 
+def ordered_names(index_map):
+    """Column names in array order, from a {name: column_index} map.
+
+    This — not the config's dict order — is the order the data arrays are laid
+    out in. Every place that pairs a name with an array column must use it, or
+    a config that lists targets in a different order than they appear among the
+    inputs would silently mislabel every per-target metric and figure.
+    """
+    return [name for name, _ in sorted(index_map.items(), key=lambda kv: kv[1])]
+
+
 # ── Time-series target creation ──────────────────────────────────────────────
 
 
@@ -309,14 +320,25 @@ def ensure_2d(arr):
     return arr.reshape(-1, 1) if arr.ndim == 1 else arr
 
 
-def _to_tensor(arr, replace_nan=None):
+def _to_tensor(arr, name):
+    """Convert to float32, refusing NaNs.
+
+    A NaN reaching this point is upstream data corruption. It used to be
+    silently patched to -1 — a plausible-looking scaled value that trained and
+    evaluated without complaint — so now it fails instead.
+    """
     t = torch.tensor(arr, dtype=torch.float32)
-    return torch.nan_to_num(t, nan=replace_nan) if replace_nan is not None else t
+    if torch.isnan(t).any():
+        raise ValueError(
+            f"{name} contains NaNs — refusing to build a dataset from corrupt "
+            f"data. Check the source file and the run-boundary handling."
+        )
+    return t
 
 
 def create_tensor_datasets(X_train, X_val, X_test, y_train, y_val, y_test):
     return (
-        TensorDataset(_to_tensor(X_train, replace_nan=-1), _to_tensor(y_train)),
-        TensorDataset(_to_tensor(X_val, replace_nan=-1), _to_tensor(y_val)),
-        TensorDataset(_to_tensor(X_test, replace_nan=-1), _to_tensor(y_test)),
+        TensorDataset(_to_tensor(X_train, "X_train"), _to_tensor(y_train, "y_train")),
+        TensorDataset(_to_tensor(X_val, "X_val"), _to_tensor(y_val, "y_val")),
+        TensorDataset(_to_tensor(X_test, "X_test"), _to_tensor(y_test, "y_test")),
     )

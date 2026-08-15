@@ -53,10 +53,33 @@ def freeze_preprocessor():
     exactly what inference mode did before the bundle existed — so freezing
     these parameters keeps every existing golden value byte-identical while
     removing the dependency on the training file.
+
+    The fit lives here rather than in the datamodule because production code no
+    longer refits scalers at serve time: a model is served with the scalers it
+    was trained with or it does not run. This script is the one place that
+    *produces* such a file, so it does the fit itself, with the parameters the
+    committed goldens were generated under held fixed.
     """
-    cfg = build_inference_cfg(preprocessor_path=None, train_h5=TRAIN_H5)
-    _, dm, _, _ = run_inference(cfg)
-    dm.preprocessor.save(FIX, write_joblib=False)
+    import nuclear_surrogates.datamodule.neural_ode_datamodule as node_dm
+    from nuclear_surrogates.datamodule.preprocessor import Preprocessor
+
+    cfg = build_inference_cfg()
+    cfg.dataset.path_to_data = TRAIN_H5
+    dm = node_dm.NODE_Datamodule(cfg)
+
+    all_columns = list(dm.inputs.keys()) + [k for k in dm.target if k not in dm.inputs]
+    traj = dm._read_trajectories(TRAIN_H5, dm.fraction_of_data, all_columns)
+
+    Preprocessor.fit(
+        dm.inputs,
+        dm.target,
+        traj.input_flat,
+        traj.target_flat,
+        traj.col_index_map,
+        traj.target_index_map,
+        t_days=node_dm.DEFAULT_TRAINING_T_DAYS,
+        t_days_data_span=node_dm._data_span(traj),
+    ).save(FIX, write_joblib=False)
     print(f"wrote {PREPROCESSOR}")
 
 

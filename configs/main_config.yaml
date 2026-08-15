@@ -1,10 +1,20 @@
-# The paper's 7x7 matrix NODE, as it was actually trained.
+# DEFAULT RUNNABLE CONFIG — the 7x7 matrix NODE at desktop/cluster settings.
 #
-# The train block below was recovered from the checkpoint's own embedded
-# hyperparameters (`hyper_parameters` in
-# best-matrix_ode_7x7_breeding_chain-epoch=2367.ckpt) — the values previously
-# committed here had drifted from the run they claimed to describe. The model
-# block was verified against the same source and matched exactly.
+# This is NOT the record of the published run. It is derived from
+# configs/BEST_7x7_MATRIX_NODE.yaml but deliberately differs in the keys that
+# describe the machine rather than the model:
+#
+#     key                   here    as trained
+#     dataset.train.batch_size  512      64
+#     dataset.val.batch_size    512     300
+#     runtime.device           cuda     cpu
+#     runtime.num_workers        12       0
+#
+# Batch size is not a free knob for a NODE: it changes the number of optimiser
+# steps and the adaptive solver's shared step controller, so a model trained
+# from this file is a different run and must not be reported as the paper's.
+# For that, use configs/BEST_7x7_MATRIX_NODE.yaml, whose train block was
+# recovered from the checkpoint's own embedded hyperparameters.
 #
 # Paths are resolved relative to THIS FILE, not to the working directory.
 dataset:
@@ -69,10 +79,11 @@ train:
   grad_clip: 0.0
   drop_last: false
 
+  # `step_size` is read only by fixed-step solvers (rk4); dopri5 chooses its
+  # own steps from the error estimate, so the key is deliberately absent here.
   solver: dopri5
   rtol: 1e-5
   atol: 1e-7
-  step_size: 0.01
 
 runtime:
   mode: train

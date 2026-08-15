@@ -108,6 +108,22 @@ def _load_scaler(spec: dict):
     return scaler
 
 
+def _clamp_quantiles(scaler, n_samples: int) -> None:
+    """Cap a QuantileTransformer's `n_quantiles` at the number of rows it sees.
+
+    sklearn does exactly this internally and warns while doing it, so every fit
+    on a small array — the test fixtures, or any `fraction_of_data` run — emits
+    a UserWarning about a decision it already made for us. Setting the parameter
+    up front is the same arithmetic silently: `quantiles_` and `references_`,
+    the only fitted state that is serialised, come out identical.
+
+    Non-quantile scalers have no such parameter and are left alone.
+    """
+    n_quantiles = getattr(scaler, "n_quantiles", None)
+    if n_quantiles is not None and n_quantiles > n_samples:
+        scaler.set_params(n_quantiles=max(1, n_samples))
+
+
 class ColumnWiseScaler:
     """Per-column fitted scalers applied as a single array transform.
 
@@ -127,6 +143,7 @@ class ColumnWiseScaler:
         X = np.asarray(X)
         self._check_width(X)
         for i, scaler in enumerate(self.scalers):
+            _clamp_quantiles(scaler, X.shape[0])
             scaler.fit(X[:, i : i + 1])
         return self
 
@@ -291,7 +308,8 @@ class Preprocessor:
         """Load from a `preprocessor.json`, or from a directory holding one.
 
         Never fits. This is the whole point: the scalers a model is served with
-        are the ones it was trained with.
+        are the ones it was trained with. See `require_fitted_scalers`, which
+        is what stops there being any alternative.
         """
         if os.path.isdir(path):
             path = os.path.join(path, "preprocessor.json")
@@ -317,6 +335,33 @@ class Preprocessor:
                     f"fitted state is missing from _FITTED_ATTRS."
                 ),
             )
+
+
+def require_fitted_scalers(preprocessor_path) -> None:
+    """Refuse to serve a model without the scalers it was trained with.
+
+    There is deliberately no fallback. Re-fitting on whatever data happens to
+    be to hand produces scalers the checkpoint never saw, and every number
+    computed through them is then wrong by however much the two fits disagree —
+    silently, and by an amount nothing downstream can detect. Inference used to
+    do exactly that whenever this path was unset, behind a `logger.warning`
+    nobody reads in a 500-line log.
+
+    A checkpoint without its scalers is half a model. Half a model does not
+    run.
+    """
+    if not preprocessor_path:
+        raise SystemExit(
+            "Inference needs the fitted scalers, and dataset.preprocessor_path "
+            "is not set.\n\n"
+            "A checkpoint is half a model; the other half is the scalers it "
+            "was trained with. There is no fallback — re-fitting them on other "
+            "data would silently change every number this run produces.\n\n"
+            "Run from a bundle:\n"
+            "    nucml --bundle <results/.../model-bundle> --data <file>\n\n"
+            "For a checkpoint that predates bundles, build one once with "
+            "nucml-package, on a machine that still has the training dataset."
+        )
 
 
 def _build(scaler_dict, index_map) -> ColumnWiseScaler:
