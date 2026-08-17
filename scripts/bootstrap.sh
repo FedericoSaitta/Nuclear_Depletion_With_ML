@@ -33,5 +33,6 @@ cat <<'EOF'
 
 Ready.
   training : uv run nucml train --config configs/node.yaml --data datasets/<file>.h5
-  datagen  : UV_PROJECT_ENVIRONMENT=.venv-sim uv run python data_generation/datagen.py -n 4 -c 16
+  datagen  : UV_PROJECT_ENVIRONMENT=.venv-sim uv run python data_generation/datagen.py \
+                 --config data_generation/configs/casl_pincell.yaml -n 4 -c 16
 EOF

@@ -16,9 +16,31 @@ from nuclear_surrogates.utils.quiet import silence_import_noise
 # suppresses would be emitted.
 silence_import_noise()
 
+# The two halves of this repo are never installed together (see the `conflicts`
+# declaration in pyproject.toml), so in either environment some test modules
+# cannot even be imported. Markers are not enough: pytest imports every module
+# before it deselects anything, so a module whose *import* fails errors out
+# during collection and takes the whole run with it.
+#
+# Hence collection-time ignores in both directions.
+ML_ONLY = [
+    "test_bundle.py",  # omegaconf
+    "test_golden.py",  # lightning, via golden_setup
+    "test_golden_eval.py",  # lightning, via golden_setup
+    "test_pipeline_units.py",  # scikit-learn, via data_scalers
+    "test_preprocessor.py",  # scikit-learn, via data_scalers
+    "test_training.py",  # torch
+]
+
+# torch stands in for the whole `ml` extra: its packages are installed together
+# or not at all, and torch is the one that unambiguously identifies it.
+HAVE_ML = importlib.util.find_spec("torch") is not None
+
 collect_ignore = []
 if importlib.util.find_spec("openmc") is None:
-    collect_ignore = ["OPENMC_tests/test_openmc_install.py"]
+    collect_ignore.append("OPENMC_tests/test_openmc_install.py")
+if not HAVE_ML:
+    collect_ignore.extend(ML_ONLY)
 
 
 def pytest_configure(config):

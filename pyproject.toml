@@ -66,6 +66,9 @@ sim = [
   # Not an OpenMC dependency: data_generation/** and util/** import it directly.
   # The ML half does not, so it stays out of the shared set.
   "pandas>=2.2",
+  # Reads data_generation/configs/*.yaml. Pure Python, no build step. The ML
+  # half reads its configs through omegaconf instead, which is ml-only.
+  "pyyaml>=6",
 ]
 
 [dependency-groups]
@@ -140,6 +143,22 @@ extend-exclude = ["notebooks"]   # learning-journey scripts, not library code
 # flags Lightning's required hook signatures, which cannot be changed.
 extend-select = ["I", "UP", "B", "SIM", "C4", "RET"]
 
+[tool.ruff.lint.isort]
+# data_generation/ is not a package: its modules import each other by bare name,
+# which works because the entry point's own directory is on sys.path. Without
+# this, isort reads them as third-party and interleaves them with numpy and
+# openmc, which hides the fact that they are local.
+known-first-party = [
+  "common",
+  "config",
+  "dataset_io",
+  "nuclides",
+  "power_history",
+  "quarter_sim",
+  "reactor_sim",
+  "tally_io",
+]
+
 [tool.ruff.lint.per-file-ignores]
 # E402 (import not at top of file) is load-bearing in the datagen entry points:
 # they must parse argv and set OMP_NUM_THREADS *before* `import openmc`, which
@@ -153,11 +172,10 @@ extend-select = ["I", "UP", "B", "SIM", "C4", "RET"]
 # import-time warnings *before* `import lightning`, which is what triggers them.
 "src/nuclear_surrogates/main.py" = ["E402"]
 
-# The OpenMC half is held to the default rule set only. It cannot be imported —
-# let alone exercised — from the ML environment, so a stylistic auto-fix there
-# would be an unverifiable change to code that produced published data.
-"data_generation/**" = ["I", "UP", "B", "SIM", "C4", "RET"]
-"util/**" = ["I", "UP", "B", "SIM", "C4", "RET"]
+# util/clean_data.py puts data_generation/ on sys.path before importing from it,
+# for the same reason the datagen entry points can import their siblings at all:
+# neither directory is a package.
+"util/clean_data.py" = ["E402"]
 
 # ============================================================================
 [tool.pytest.ini_options]
@@ -186,7 +204,9 @@ filterwarnings = [
   "ignore:Setting the shape on a NumPy array has been deprecated",
 ]
 markers = [
-  "openmc: requires the OpenMC install and nuclear data (skipped in the ML env)",
+  # The OpenMC install only — these build models and export XML, they run no
+  # transport, so the 7 GB cross-section library is not needed for them.
+  "openmc: requires the OpenMC install (skipped in the ML env)",
   "golden: pins published numbers against committed fixtures",
   # Pinned training numbers are only reproducible on a fixed runner image and
   # library set, so CI runs them in their own Linux-only job.

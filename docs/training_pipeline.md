@@ -18,7 +18,8 @@ A **run** is one simulated fuel pin, depleted by OpenMC under a randomly drawn
 operating history: 100 depletion steps of 10 days each, so 101 sampled time
 points spanning 990 days. Every step draws fresh power, fuel/moderator/clad
 temperatures, moderator density and boron concentration from configured ranges
-(`data_generation/datagen.py`).
+(`data_generation/datagen.py`, configured by
+`data_generation/configs/casl_pincell.yaml`).
 
 `casl_3305_runs_inter.h5` holds 3,305 such runs — 333,805 rows × 238 columns,
 one column per nuclide in the depletion chain plus the operating state.

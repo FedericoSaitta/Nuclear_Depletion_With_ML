@@ -3,14 +3,22 @@
 Shared by quarter_datagen.py and zoom_datagen.py, which used to carry
 near-identical copies of every function here. Column names follow
 ``{nuclide}_fission`` / ``{nuclide}_capture`` (each with a ``_std`` partner),
-driven by the nuclide lists in quarter_sim — extending those lists
-automatically extends the CSV schema.
+driven by the nuclide lists in `nuclides` — extending those lists automatically
+extends the dataset schema.
+
+`openmc` is imported inside `read_statepoint_tallies` rather than at module
+level. That one function is the only thing here that needs it, and keeping the
+import local means the column schema and the power-fraction maths can be
+imported — and tested — in an environment with no OpenMC build, which is what
+CI has.
 """
 
-import numpy as np
-import openmc
+import contextlib
 
-from quarter_sim import CAPTURE_NUCLIDES, FISSION_NUCLIDES, FISSION_Q_VALUES
+import numpy as np
+from loguru import logger
+
+from nuclides import CAPTURE_NUCLIDES, FISSION_NUCLIDES, FISSION_Q_VALUES
 
 
 def step_keys():
@@ -53,36 +61,35 @@ def read_statepoint_tallies(sp_path):
     9003 capture). Each block is independent, so a missing tally leaves its
     columns at NaN without aborting the others.
     """
+    import openmc
+
     result = nan_tally()
     try:
         sp = openmc.StatePoint(sp_path)
-        try:
+        # Each block is suppressed independently and on purpose: one tally that
+        # failed to score should leave its own columns NaN, not cost the run the
+        # other two. A NaN column is visible downstream; a lost one is not.
+        with contextlib.suppress(Exception):
             t = sp.get_tally(id=9001)
             result["flux"] = float(t.mean.flatten()[0])
             result["flux_std"] = float(t.std_dev.flatten()[0])
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             t = sp.get_tally(id=9002)
             m = t.mean.flatten()
             s = t.std_dev.flatten()
             for j, nuc in enumerate(FISSION_NUCLIDES):
                 result[f"{nuc}_fission"] = float(m[j])
                 result[f"{nuc}_fission_std"] = float(s[j])
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             t = sp.get_tally(id=9003)
             m = t.mean.flatten()
             s = t.std_dev.flatten()
             for j, nuc in enumerate(CAPTURE_NUCLIDES):
                 result[f"{nuc}_capture"] = float(m[j])
                 result[f"{nuc}_capture_std"] = float(s[j])
-        except Exception:
-            pass
         sp.close()
-    except Exception as e:
-        print(f"  WARNING: could not read {sp_path}: {e}")
+    except Exception as exc:  # noqa: BLE001 - a bad statepoint must not kill the run
+        logger.warning(f"Could not read {sp_path}: {exc}")
     return result
 
 

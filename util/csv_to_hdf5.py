@@ -1,4 +1,9 @@
-"""Convert a combined datagen CSV into the HDF5 layout the ML pipeline reads.
+"""Migration tool: convert a pre-HDF5 datagen CSV into the layout the ML side reads.
+
+**The generators no longer produce CSV** — they write this layout directly (see
+`data_generation/dataset_io.py`). This exists for datasets generated before that
+change, including the BEAVRS runs, so they can be brought onto the same format
+rather than stranded. Delete it once nothing on disk is still CSV.
 
 The layout is matched by `nuclear_surrogates.datamodule.dataset_helper.read_h5_file`:
 
@@ -9,8 +14,8 @@ The layout is matched by `nuclear_surrogates.datamodule.dataset_helper.read_h5_f
     all_columns       every column name, in the CSV's original order
 
 Usage:
-    python util/csv_to_hdf5.py data.csv output.h5
-    python util/csv_to_hdf5.py data.csv output.h5 --inspect
+    uv run --extra ml python util/csv_to_hdf5.py data.csv output.h5
+    uv run --extra ml python util/csv_to_hdf5.py data.csv output.h5 --inspect
 """
 
 import argparse
@@ -79,7 +84,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Convert a datagen CSV to the HDF5 layout the ML pipeline reads"
     )
-    parser.add_argument("input_csv", help="combined CSV (see util/combine_data.py)")
+    parser.add_argument("input_csv", help="a CSV from before the HDF5 switch")
     parser.add_argument("output_h5", help="where to write the HDF5 file")
     parser.add_argument(
         "--inspect",

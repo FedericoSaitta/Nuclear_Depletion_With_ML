@@ -1,7 +1,7 @@
 cff-version: 1.2.0
 message: "If you use this software in your research, please cite it as follows."
 
-title: "Nuclear Depletion With Machine Learning"
+title: "Nuclear Transport With Machine Learning"
 
 authors:
   - family-names: "Castañeda Rodriguez"

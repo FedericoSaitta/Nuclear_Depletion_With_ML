@@ -1,0 +1,41 @@
+# The CASL dataset: randomised-history pin-cell depletion.
+#
+# This is what produced `casl_3305_runs_inter.h5`, the dataset both published
+# models are trained on. Every value below is transcribed from the hardcoded
+# `base_config` this pipeline used to carry, so a run from this file is the run
+# that produced the paper's data.
+#
+#   uv run --extra sim python data_generation/datagen.py \
+#       --config data_generation/configs/casl_pincell.yaml -n 4 -c 16
+#
+# The YAML says what is simulated; -n/-c/-t/-s/--out say what machine runs it.
+
+model:
+  enrichment: 3.1              # % U-235
+  fuel_density: 10.4           # g/cm3 UO2
+  # [fuel outer radius, clad outer radius] in cm. No helium gap in this model —
+  # the quarter-pin model has one. See reactor_sim.py.
+  geometry_radii: [0.39218, 0.45720]
+  geometry_pitch: 1.25984      # cm
+
+transport:
+  particles: 5000
+  batches: 50
+  inactive: 10
+  temp_method: interpolation   # or `nearest`
+  use_wmp: false               # windowed multipole; overrides temp_method
+
+depletion:
+  chain_file: chain_casl_pwr.xml
+  num_steps: 100
+  delta_t_days: 10
+
+  # Each step draws its operating state uniformly from these [low, high] ranges.
+  # This is what makes the dataset a spread of histories rather than one run:
+  # the surrogate has to learn the map, not memorise a trajectory.
+  power: [0, 41.4]             # W/g specific power
+  t_fuel: [600, 1200]          # K
+  t_mod: [550, 600]            # K
+  t_clad: [570, 670]           # K
+  rho_mod: [0.74, 1.00]        # g/cm3
+  boron_ppm: [0, 1000]

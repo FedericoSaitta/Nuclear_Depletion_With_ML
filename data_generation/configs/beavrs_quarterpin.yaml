@@ -1,0 +1,36 @@
+# BEAVRS Cycle 1: measured power history on a quarter pin cell, no boron.
+#
+# Unlike the CASL config there is no sampling here — the power history is the
+# measured one, read from `beavrs_cycle1_power.csv` and interpolated onto a
+# uniform grid. The reactor state is held fixed, so power is the only thing that
+# varies along a run.
+#
+#   uv run --extra sim python data_generation/quarter_datagen.py \
+#       --config data_generation/configs/beavrs_quarterpin.yaml -c 1 -t 40
+#
+# Every value is transcribed from the argparse defaults this pipeline carried.
+
+model:
+  enrichment: 3.1              # % U-235
+  fuel_density: 10.4           # g/cm3 UO2
+  # [fuel outer, gap outer, clad outer] in cm — this model has a helium gap.
+  geometry_radii: [0.39218, 0.40005, 0.45720]
+  geometry_pitch: 1.25984      # cm
+
+  # Fixed reactor state. No boron: the water is pure H2O.
+  fuel_temp: 900.0             # K
+  mod_temp: 580.0              # K
+  clad_temp: 620.0             # K
+  mod_density: 0.74            # g/cm3
+
+transport:
+  particles: 20000
+  batches: 80                  # active batches = batches - inactive
+  inactive: 20
+  temp_method: interpolation
+
+depletion:
+  chain_file: chain_casl_pwr.xml
+  delta_t_days: 1.0
+  power_file: beavrs_cycle1_power.csv
+  rated_power: 41.7            # W/g at 100 % rated power

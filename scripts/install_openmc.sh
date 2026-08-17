@@ -77,6 +77,6 @@ cat <<EOF
 
 Done. Remember the nuclear data (not installed by this script):
   export OPENMC_CROSS_SECTIONS=$REPO_ROOT/data/cross_sections.xml
-(data_generation/datagen.py:64-66 also sets this itself, relative to the
- script directory — so \`python data_generation/datagen.py\` works as-is.)
+(\`common.setup_paths\` also sets this itself, relative to the data_generation
+ directory — so the generation entry points work as-is.)
 EOF

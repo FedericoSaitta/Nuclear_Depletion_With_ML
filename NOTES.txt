@@ -1,0 +1,1 @@
+uv run nucml infer --bundle results/BEST_7_Isotope_DNN_WITHOUT_STATE_VARIABLES/model-bundle --data   datasets/BEAVERS-Realistic_Daily_Power_Schedule.csv --out    predictions/BEST_7_Isotope_DNN_WITHOUT_STATE_VARIABLES_ON_BEAVRS

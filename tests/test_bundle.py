@@ -123,6 +123,67 @@ def test_a_missing_directory_is_refused(tmp_path):
         read_bundle(tmp_path / "nope")
 
 
+def test_a_bundle_carries_no_absolute_paths(tmp_path):
+    """A bundle is meant to be published, so it must not ship the author's
+    filesystem.
+
+    An absolute path says nothing useful about the file — the dataset is
+    identified by its SHA-256 — while saying quite a lot about the machine that
+    wrote it. Both the metadata and the resolved config are checked, because the
+    config is the one a reader actually opens.
+    """
+    from nuclear_surrogates.bundle import write_bundle
+    from nuclear_surrogates.datamodule.preprocessor import Preprocessor
+
+    class _StubPreprocessor(Preprocessor):
+        def __init__(self):
+            pass
+
+        def save(self, directory, **kwargs):
+            with open(os.path.join(directory, PREPROCESSOR_NAME), "w") as f:
+                f.write("{}")
+
+    cfg = OmegaConf.create(
+        {
+            "dataset": {
+                "path_to_data": "/cluster/scratch/someone/datasets/train.h5",
+                "path_to_inference_data": r"C:\Users\someone\datasets\new.h5",
+                "preprocessor_path": "/cluster/scratch/someone/preprocessor.json",
+                "fraction_of_data": 0.1,
+            },
+            "model": {"name": "demo", "kind": "NODE"},
+            "runtime": {"seed": 3, "output_dir": r"C:\Users\someone\results"},
+        }
+    )
+    out = tmp_path / "b"
+    write_bundle(
+        out_dir=str(out),
+        cfg=cfg,
+        preprocessor=_StubPreprocessor(),
+        ckpt_path=r"C:\Users\someone\results\demo\best-demo-epoch=07.ckpt",
+        hash_dataset=False,
+    )
+
+    for name in (METADATA_NAME, CONFIG_NAME):
+        text = (out / name).read_text()
+        assert "someone" not in text, f"{name} leaks the author's home directory"
+        assert "/cluster/" not in text and "C:\\" not in text, f"{name} leaks a path"
+
+    metadata = json.loads((out / METADATA_NAME).read_text())
+    # The filename survives — it is the part that identifies the artefact.
+    assert metadata["dataset"]["name"] == "train.h5"
+    assert metadata["source_checkpoint"] == "best-demo-epoch=07.ckpt"
+
+    saved = OmegaConf.load(out / CONFIG_NAME)
+    assert saved.dataset.path_to_data == "train.h5"
+    assert saved.dataset.path_to_inference_data == "new.h5"
+    assert saved.dataset.preprocessor_path == "preprocessor.json"
+
+    # The live config the run is still using must not have been touched.
+    assert cfg.dataset.path_to_data == "/cluster/scratch/someone/datasets/train.h5"
+    assert cfg.runtime.output_dir == r"C:\Users\someone\results"
+
+
 def test_metadata_is_strict_json(tmp_path):
     """`json.dump` writes `Infinity` for a metric a run never logged, which
     Python reads back and nothing else does. A never-recorded metric is null.

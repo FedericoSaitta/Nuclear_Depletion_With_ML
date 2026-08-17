@@ -153,7 +153,10 @@ src/nuclear_surrogates/
     bundle.py     writes and reads a model bundle: weights + scalers + config
     utils/        metrics and plotting
 data_generation/  OpenMC depletion pipelines (separate environment; no ML imports)
-util/             one-off data and depletion-chain tools
+    configs/      one YAML per published dataset: geometry, transport, history
+    *_datagen.py  the three pipelines; --help works without OpenMC installed
+    dataset_io.py writes the HDF5 the ML side reads, plus the run manifest
+util/             depletion-chain tools and the pre-HDF5 CSV migration script
 scripts/          bootstrap, OpenMC build, SLURM job scripts
 tests/            golden regression tests + fixtures; OpenMC install smoke tests
 notebooks/        exploration and learning-journey scripts, not library code
@@ -176,7 +179,23 @@ sudo apt install -y g++ cmake libhdf5-dev        # or `module load gcc cmake hdf
 UV_PROJECT_ENVIRONMENT=.venv-sim uv sync --extra sim
 ./scripts/install_openmc.sh                       # builds OpenMC v0.15.2
 
-UV_PROJECT_ENVIRONMENT=.venv-sim uv run python data_generation/datagen.py -n 4 -c 16
+UV_PROJECT_ENVIRONMENT=.venv-sim uv run python data_generation/datagen.py \
+    --config data_generation/configs/casl_pincell.yaml -n 4 -c 16
+```
+
+Same split as the ML half: **the config describes the simulation, the flags
+describe the machine.** `data_generation/configs/` holds one file per published
+dataset — geometry, enrichment, transport settings, depletion history — and
+`-n/-c/-t/-s` say how many workers on how many cores. Each sweep writes a
+`run_manifest.json` beside its output recording the seeds, the chain file and
+its SHA-256, the OpenMC version and the git SHA, which is what makes a published
+dataset regenerable.
+
+Workers write one HDF5 each; merge them into a training set with:
+
+```bash
+uv run --extra sim python data_generation/merge_runs.py \
+    data_generation/data datasets/casl_runs.h5 --drop-empty
 ```
 
 #### On a Windows laptop: use WSL2
@@ -238,8 +257,9 @@ read once at worker startup rather than hammered.
 Smoke-test before anything long, then every later session is just two commands:
 
 ```bash
-uv run --extra sim python data_generation/datagen.py -n 1 -c 1     # smoke test
-uv run --extra sim python data_generation/datagen.py -n 8 -c 3     # real run
+CFG=data_generation/configs/casl_pincell.yaml
+uv run --extra sim python data_generation/datagen.py --config $CFG -n 1 -c 1  # smoke
+uv run --extra sim python data_generation/datagen.py --config $CFG -n 8 -c 3  # real
 ```
 
 Pass `--extra sim` every time. `uv run` re-syncs the environment first, and
@@ -300,8 +320,8 @@ Two different things live in two different places, and only the first is needed 
 train:
 
 - **Training datasets** (`datasets/*.h5`) — the output of the OpenMC pipeline,
-  produced by `data_generation/` and combined with `util/combine_data.py` +
-  `util/csv_to_hdf5.py`. Not redistributed with the repo.
+  produced by `data_generation/` and combined with
+  `data_generation/merge_runs.py`. Not redistributed with the repo.
 - **Nuclear data** (`data/`) — cross sections (7 GB) and depletion chains (30 MB)
   from <https://openmc.org/official-data-libraries/>, needed only for data
   generation. The cross-section download is an `.xml` file plus three folders
@@ -319,7 +339,8 @@ train:
 | Warm-start from a trained model | `uv run nucml finetune --bundle results/<name>/model-bundle --data <file.h5>` |
 | Run a trained model | `uv run nucml infer --bundle results/<name>/model-bundle --data <file.h5> --out predictions/` |
 | Redraw a run's figures | `uv run nucml plots --bundle results/<name>/model-bundle --data <training.h5> --out figures/` |
-| Run datagen | `UV_PROJECT_ENVIRONMENT=.venv-sim uv run python data_generation/datagen.py -n 4 -c 16` |
+| Run datagen | `UV_PROJECT_ENVIRONMENT=.venv-sim uv run python data_generation/datagen.py --config data_generation/configs/casl_pincell.yaml -n 4 -c 16` |
+| Merge datagen output | `uv run --extra sim python data_generation/merge_runs.py data_generation/data out.h5` |
 | Add an ML dependency | `uv add --optional ml <pkg>` (updates `pyproject.toml` **and** `uv.lock`) |
 | Add a sim dependency | `uv add --optional sim <pkg>` |
 | Refresh the lock | `uv lock` |

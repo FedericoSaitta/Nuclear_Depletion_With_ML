@@ -1,61 +1,27 @@
-"""
-Reactor model setup for BEAVRS-based depletion data generation.
+"""Quarter-pin OpenMC model for BEAVRS-based depletion data generation.
 
-Quarter-pin geometry with tallies for flux and reaction rates.
-No boron — water is pure H2O with S(α,β) thermal scattering.
+Four concentric regions — fuel, helium gap, cladding, water — on a quarter of a
+pin cell with reflective boundaries. No boron: water is pure H2O with S(α,β)
+thermal scattering.
 
-Tally coverage for the 7-isotope uncertainty analysis
------------------------------------------------------
-The depletion uncertainty analysis (uncertainty_analysis.py — NOT in this
-repository; it lives on the cluster) reconstructs the
-7x7 Bateman matrix for the chain:
+The tallies scored here reconstruct the 7x7 Bateman matrix for the breeding
+chain from measured one-group data. Which nuclides those are, and why, is in
+`nuclides.py`; the consumer (uncertainty_analysis.py) is not in this repository
+and lives on the cluster.
 
-    U238 --(n,γ)--> U239 --(β⁻)--> Np239 --(β⁻)--> Pu239
-                                                     |(n,γ)
-                                                     v
-                               Pu242 <--(n,γ)-- Pu241 <--(n,γ)-- Pu240
-                                                                   ^
-                                                                   |(n,γ)
-                                                                 Pu239
-
-CAPTURE tallies are scored for every isotope in the chain so that the
-matrix can be built directly from measured one-group data rather than
-relying on literature α = σ_c/σ_f ratios for the Pu isotopes.
-
-FISSION tallies are scored only for isotopes with non-negligible fission
-cross sections in a PWR thermal spectrum (U235, U238, Pu239, Pu240, Pu241).
-U239, Np239, and Pu242 are omitted from the fission list because their
-fission rates are negligible at thermal energies and scoring them would
-add statistical noise without adding information to the matrix.
+The pin-cell counterpart is `reactor_sim.py`. Every function in the two modules
+carries a `quarterpin`/`pincell` prefix because they used to share names while
+returning different numbers of materials, which is a trap worth closing.
 """
 
-import openmc
 import math
 
+import openmc
 
-# Energy per fission [MeV] for power fraction calculation
-FISSION_Q_VALUES = {
-    "U235": 193.7,
-    "U238": 198.5,
-    "Pu239": 200.1,
-    "Pu240": 196.9,
-    "Pu241": 202.2,
-}
-
-FISSION_NUCLIDES = list(FISSION_Q_VALUES.keys())
-
-# Capture tallies for every isotope in the 7-isotope chain.
-# This lets the (cluster-side) uncertainty analysis build the Bateman matrix from
-# measured data — no need to assume α = σ_c/σ_f ratios for the Pu isotopes.
-# Note: U239 and Np239 are short-lived (minutes/days) but valid nuclides
-# for (n,γ) tallies provided the cross-section library includes them
-# (ENDF/B-VIII.0 does). If a library lacks data for one of these nuclides,
-# OpenMC will fail at initialization — in that case, drop the offending
-# nuclide from this list.
-CAPTURE_NUCLIDES = ["U238", "U239", "Np239", "Pu239", "Pu240", "Pu241", "Pu242"]
+from nuclides import CAPTURE_NUCLIDES, FISSION_NUCLIDES
 
 
-def create_materials(config):
+def create_quarterpin_materials(config):
     """Create fuel, gap, cladding, and water materials.
 
     Water is pure H2O (no boron).
@@ -90,7 +56,7 @@ def create_materials(config):
     return fuel, gap, clad, water
 
 
-def set_material_volumes_quarter(fuel, gap, clad, water, radii, pitch):
+def set_quarterpin_volumes(fuel, gap, clad, water, radii, pitch):
     """Set material volumes for quarter-pin geometry.
 
     radii = [fuel_or, gap_or, clad_or]
@@ -101,7 +67,7 @@ def set_material_volumes_quarter(fuel, gap, clad, water, radii, pitch):
     water.volume = (pitch / 2.0) ** 2 - math.pi * radii[2] ** 2 / 4.0
 
 
-def create_quarter_geometry(materials, radii, pitch):
+def create_quarterpin_geometry(materials, radii, pitch):
     """Build quarter-pin cell geometry with reflective symmetry.
 
     Four concentric regions: fuel | He gap | cladding | water
@@ -133,11 +99,10 @@ def create_quarter_geometry(materials, radii, pitch):
     )
 
     root_universe = openmc.Universe(cells=[fuel_cell, gap_cell, clad_cell, water_cell])
-    geometry = openmc.Geometry(root_universe)
-    return geometry
+    return openmc.Geometry(root_universe)
 
 
-def create_settings(config):
+def create_quarterpin_settings(config):
     """Create OpenMC settings for quarter-pin geometry."""
     settings = openmc.Settings()
     settings.particles = config["particles"]
@@ -161,7 +126,7 @@ def create_settings(config):
     return settings
 
 
-def create_tallies(fuel):
+def create_quarterpin_tallies(fuel):
     """Create tallies for flux and reaction rates in the fuel.
 
     Uses high tally IDs (9001+) to avoid conflicts with the depletion

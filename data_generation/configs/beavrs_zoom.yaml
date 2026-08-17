@@ -1,0 +1,48 @@
+# BEAVRS Cycle 1, zoomed: hourly resolution over a window of the cycle.
+#
+# Starts from the depleted compositions of a coarser daily run rather than from
+# fresh fuel, so it resolves the short-timescale behaviour the daily grid steps
+# straight over. The daily run to start from is a path, not a physics choice,
+# so it stays on the command line (--daily-results).
+#
+#   DAILY=data_generation/results/worker_1_<hash>/depletion_results.h5
+#   uv run --extra sim python data_generation/zoom_datagen.py \
+#       --config data_generation/configs/beavrs_zoom.yaml \
+#       --daily-results $DAILY -t 80
+#
+# Every value is transcribed from the argparse defaults this pipeline carried,
+# with start/end day taken from scripts/zoom_datagen.sh.
+
+model:
+  enrichment: 3.1              # % U-235
+  fuel_density: 10.4           # g/cm3 UO2
+  geometry_radii: [0.39218, 0.40005, 0.45720]
+  geometry_pitch: 1.25984      # cm
+
+  fuel_temp: 900.0             # K
+  mod_temp: 580.0              # K
+  clad_temp: 620.0             # K
+  mod_density: 0.74            # g/cm3
+
+transport:
+  particles: 50000
+  batches: 60
+  inactive: 15
+  temp_method: interpolation
+
+  # Steps below `power_threshold` W/g run no meaningful transport, so they are
+  # solved at reduced fidelity. This is the whole reason this pipeline steps one
+  # integrate() call at a time instead of one call for the window.
+  power_threshold: 0.01
+  decay_particles: 100
+  decay_batches: 10
+  decay_inactive: 3
+
+depletion:
+  chain_file: chain_casl_pwr.xml
+  delta_t_days: 0.0416667      # one hour
+  power_file: beavrs_cycle1_power.csv
+  rated_power: 41.7            # W/g at 100 % rated power
+  start_day: 140
+  end_day: 170
+  daily_dt: 1.0                # step size of the run being zoomed into

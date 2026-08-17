@@ -17,24 +17,21 @@ export PATH="$HOME/.local/bin:$PATH"
 export UV_PROJECT_ENVIRONMENT="$SLURM_SUBMIT_DIR/.venv-sim"
 cd "$SLURM_SUBMIT_DIR"
 
-# HDF5 file locking breaks on most parallel filesystems; datagen.py:65 sets
-# this per-worker, but exporting here covers the OpenMC executable too.
+# HDF5 file locking breaks on most parallel filesystems. `common.setup_paths`
+# sets this per-worker; exporting here covers the OpenMC executable too.
 export HDF5_USE_FILE_LOCKING=FALSE
 
 # The daily run to zoom into is worker- and machine-specific (the directory name
 # carries a random worker hash), so it has to be supplied at submission time:
-#   DAILY_RESULTS=data_generation/results/worker_1_<hash>/depletion_results.h5 sbatch scripts/zoom_datagen.sh
+#   DAILY_RESULTS=data_generation/results/worker_1_<hash>/depletion_results.h5 \
+#       sbatch scripts/zoom_datagen.sh
 : "${DAILY_RESULTS:?set DAILY_RESULTS=<path to a daily depletion_results.h5>}"
 
+# Single process on all 80 allocated cores: this pipeline steps one integrate()
+# call at a time, so the parallelism is OpenMP inside the transport solve rather
+# than across workers.
 uv run --extra sim --no-dev --locked python data_generation/zoom_datagen.py \
+    --config "${DATAGEN_CONFIG:-data_generation/configs/beavrs_zoom.yaml}" \
     --daily-results "$DAILY_RESULTS" \
-    --start-day 140 \
-    --end-day 170 \
-    -p data_generation/data_beavers.txt \
     -t 80 \
-    -s 42 \
-    --particles 50000 \
-    --batches 60 \
-    --inactive 15 \
-    --dt 0.0416667 \
-    -f chain_endfb71_pwr.xml
+    -s 42

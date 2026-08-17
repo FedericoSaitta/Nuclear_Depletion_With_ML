@@ -1,6 +1,19 @@
-# This script sets up the openMC model used for data generation
-import openmc
+"""Full pin-cell OpenMC model for the randomised-history CASL data generation.
+
+Three regions — fuel, cladding, water — with reflective boundaries, and boron
+carried in the water so the sampled boron concentration can be varied per step.
+There is deliberately no helium gap here; the quarter-pin model in
+`quarter_sim.py` has one. That difference is real and predates this refactor.
+
+Every function carries a `pincell` prefix, matching the `quarterpin` prefix in
+the other module: the two used to export `create_materials` and
+`create_settings` under the same names while returning different numbers of
+materials.
+"""
+
 import math
+
+import openmc
 
 
 def update_water_composition(water, boron_ppm, density_g_cm3):
@@ -32,7 +45,9 @@ def update_water_composition(water, boron_ppm, density_g_cm3):
     water.set_density("g/cm3", density_g_cm3)
 
 
-def create_materials(config_dict, initial_boron_ppm=0, initial_water_density=1.0):
+def create_pincell_materials(
+    config_dict, initial_boron_ppm=0, initial_water_density=1.0
+):
     enrichment = config_dict["enrichment"]
     fuel_density = config_dict["fuel_density"]  # in g/cm³
 
@@ -61,13 +76,13 @@ def create_materials(config_dict, initial_boron_ppm=0, initial_water_density=1.0
 
 
 # Note these are called volumes but as this is a 2D problem they are effectively areas
-def set_material_volumes(fuel, clad, water, radii, pitch):
+def set_pincell_volumes(fuel, clad, water, radii, pitch):
     fuel.volume = math.pi * radii[0] ** 2
     clad.volume = math.pi * (radii[1] ** 2 - radii[0] ** 2)
     water.volume = pitch**2 - math.pi * radii[1] ** 2
 
 
-def create_geometry(materials, radii, pitch):
+def create_pincell_geometry(materials, radii, pitch):
     pin_surfaces = [openmc.ZCylinder(r=r) for r in radii]
     pin_univ = openmc.model.pin(pin_surfaces, materials)
 
@@ -80,23 +95,23 @@ def create_geometry(materials, radii, pitch):
     bound_box = +left & -right & +bottom & -top
     root_cell = openmc.Cell(fill=pin_univ, region=bound_box)
     root_univ = openmc.Universe(cells=[root_cell])
-    geometry = openmc.Geometry(root_univ)
-
-    return geometry
+    return openmc.Geometry(root_univ)
 
 
-def create_settings(config_dict):
-    seed = config_dict["seed"]
-    particles = config_dict["particles"]
+def create_pincell_settings(config_dict):
+    """OpenMC settings for the full pin cell.
 
-    inactive = config_dict["inactive"]
-    batches = config_dict["batches"]
-    temp_method = config_dict["temp_method"]
-
+    `verbosity` and `output` are set here rather than patched onto the returned
+    object by the caller, which is what `datagen.py` used to do. Tally output is
+    off because this pipeline scores no tallies — only concentrations and k-eff
+    come out of it.
+    """
     settings = openmc.Settings()
-    settings.particles = particles
-    settings.inactive = inactive
-    settings.batches = batches
+    settings.particles = config_dict["particles"]
+    settings.inactive = config_dict["inactive"]
+    settings.batches = config_dict["batches"]
+    settings.verbosity = 1
+    settings.output = {"tallies": False}
 
     source = openmc.IndependentSource()
     source.space = openmc.stats.Point((0, 0, 0))
@@ -104,9 +119,9 @@ def create_settings(config_dict):
     source.energy = openmc.stats.Watt()
     settings.source = source
 
-    settings.temperature = {"method": temp_method}
+    settings.temperature = {"method": config_dict.get("temp_method", "interpolation")}
 
-    if seed is not None:
-        settings.seed = seed
+    if config_dict.get("seed") is not None:
+        settings.seed = config_dict["seed"]
 
     return settings

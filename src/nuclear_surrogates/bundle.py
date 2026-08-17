@@ -37,6 +37,7 @@ import json
 import math
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -131,6 +132,39 @@ def sha256_file(path, chunk_size=8 << 20) -> str | None:
     return digest.hexdigest()
 
 
+# Config keys holding a filesystem path. A bundle is meant to be published, and
+# an absolute path says nothing useful about the file while saying quite a lot
+# about the machine that wrote it — so only the filename travels. Nothing is
+# lost: `read_bundle` clears or overrides every one of these, and the dataset is
+# identified by its SHA-256 in the metadata rather than by where it sat.
+_PATH_KEYS = ("path_to_data", "path_to_inference_data", "preprocessor_path")
+
+
+def _filename(path):
+    """Last component of *path*, splitting on either separator.
+
+    Both are handled because a bundle written on Windows is routinely read on
+    Linux, and `os.path.basename` only knows the host's separator.
+    """
+    if not path:
+        return path
+    return re.split(r"[\\/]", str(path))[-1]
+
+
+def _publishable(cfg):
+    """A copy of *cfg* with machine-specific paths reduced to filenames.
+
+    A copy, not an edit: `cfg` is the live config the run is still using.
+    """
+    published = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+    for key in _PATH_KEYS:
+        if key in published.get("dataset", {}):
+            published.dataset[key] = _filename(published.dataset[key])
+    if "output_dir" in published.get("runtime", {}):
+        published.runtime.output_dir = _filename(published.runtime.output_dir)
+    return published
+
+
 def write_bundle(
     out_dir,
     cfg,
@@ -149,7 +183,7 @@ def write_bundle(
     os.makedirs(out_dir, exist_ok=True)
 
     preprocessor.save(out_dir)
-    OmegaConf.save(cfg, os.path.join(out_dir, CONFIG_NAME))
+    OmegaConf.save(_publishable(cfg), os.path.join(out_dir, CONFIG_NAME))
 
     if ckpt_path and os.path.isfile(ckpt_path):
         shutil.copy2(ckpt_path, os.path.join(out_dir, WEIGHTS_NAME))
@@ -168,9 +202,12 @@ def write_bundle(
         "seed": cfg.runtime.get("seed"),
         "git_sha": _git("rev-parse", "HEAD"),
         "git_dirty": None if dirty is None else bool(dirty),
-        "source_checkpoint": ckpt_path,
+        # Filenames, not paths — see `_publishable`. The SHA-256 below is what
+        # actually identifies the dataset; the directory it happened to sit in
+        # identifies only the machine.
+        "source_checkpoint": _filename(ckpt_path),
         "dataset": {
-            "path": cfg.dataset.get("path_to_data"),
+            "name": _filename(cfg.dataset.get("path_to_data")),
             "sha256": (
                 sha256_file(cfg.dataset.get("path_to_data")) if hash_dataset else None
             ),
