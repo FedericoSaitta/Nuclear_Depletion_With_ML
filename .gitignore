@@ -32,6 +32,7 @@ data_generation/results/
 /data/
 /datasets/
 /results/
+/predictions/
 # Model bundles are run output: a training run writes its own. Publish a
 # specific bundle deliberately (Zenodo, a release) rather than tracking the
 # whole directory.
