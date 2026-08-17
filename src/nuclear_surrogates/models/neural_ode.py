@@ -90,12 +90,6 @@ class NODE_Model(L.LightningModule):
             if step_size:
                 options["step_size"] = step_size
 
-        # Solver-specific keys the plain config cannot express, e.g.
-        # `{solver: BDF}` for scipy_solver. Explicit values win.
-        extra = getattr(self.cfg.train, "solver_options", None)
-        if extra:
-            options.update(OmegaConf.to_container(extra, resolve=True))
-
         common_kwargs = {
             "method": self.cfg.train.solver,
             "rtol": self.rtol,
@@ -104,21 +98,14 @@ class NODE_Model(L.LightningModule):
         }
 
         if self.use_adjoint:
-            adjoint_kwargs = {
-                "adjoint_rtol": self.adjoint_rtol,
-                "adjoint_atol": self.adjoint_atol,
-                "adjoint_method": self.adjoint_method,
-            }
-            # Kept separate from the forward options: the adjoint may use a
-            # different method, and a forward-only key (rk4's `step_size`) is
-            # not valid for it.
-            adjoint_extra = getattr(self.cfg.train, "adjoint_solver_options", None)
-            if adjoint_extra:
-                adjoint_kwargs["adjoint_options"] = OmegaConf.to_container(
-                    adjoint_extra, resolve=True
-                )
             return odeint_adjoint(
-                self.func, y0, t_span, **adjoint_kwargs, **common_kwargs
+                self.func,
+                y0,
+                t_span,
+                adjoint_rtol=self.adjoint_rtol,
+                adjoint_atol=self.adjoint_atol,
+                adjoint_method=self.adjoint_method,
+                **common_kwargs,
             )
         return odeint(self.func, y0, t_span, **common_kwargs)
 
@@ -303,7 +290,7 @@ class NODE_Model(L.LightningModule):
         self._plot_trajectories(
             trues_unscaled, ar_preds_unscaled, inputs_unscaled, target_names
         )
-        self._log_to_database(per_target_metrics)
+        self._write_test_metrics(per_target_metrics)
 
         self._test_preds.clear()
         self._test_trues.clear()
@@ -382,20 +369,18 @@ class NODE_Model(L.LightningModule):
                 save_path=os.path.join(target_dir, "test_all_trajectories.png"),
             )
 
-    def _log_to_database(self, per_target_metrics):
-        if not hasattr(self.trainer.logger, "update_final_results"):
-            return
+    def _write_test_metrics(self, per_target_metrics):
+        """Write the test metrics beside the figures they belong to.
 
+        These are the only run outputs the bundle cannot carry: `write_bundle`
+        runs before `trainer.test`, so at bundle time they do not exist yet.
+        """
         averages = {
             f"{key}_avg": float(np.mean([m[key] for m in per_target_metrics]))
             for key in ("mae", "rmse", "r2")
         }
-        self.trainer.logger.update_final_results(
-            train_losses=self._train_losses,
-            val_losses=self._val_losses,
-            val_r2_scores=[],
-            val_mae_scores=[],
-            test_metrics={**averages, "per_target": per_target_metrics},
+        evaluation.write_test_metrics(
+            self.result_dir, {**averages, "per_target": per_target_metrics}
         )
 
     # ── Predict / optimiser ──────────────────────────────────────────────────

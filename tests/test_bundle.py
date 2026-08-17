@@ -12,7 +12,6 @@ import pytest
 from omegaconf import OmegaConf
 
 from nuclear_surrogates.bundle import (
-    BUNDLE_VERSION,
     CONFIG_NAME,
     METADATA_NAME,
     PREPROCESSOR_NAME,
@@ -44,13 +43,15 @@ def bundle(tmp_path):
                     "path_to_data": "/cluster/home/someone/datasets/train.h5",
                     "fraction_of_data": 0.1,
                 },
-                "model": {"name": "demo"},
+                "model": {"name": "demo", "kind": "NODE"},
+                # A real config.resolved.yaml records the training machine's
+                # runtime block. read_bundle must drop it: the cluster's device
+                # and output directory are not this machine's.
                 "runtime": {
-                    "mode": "train",
-                    "model": "NODE",
-                    "ckp_path": "/cluster/home/someone/results/best.ckpt",
+                    "device": "cuda",
+                    "num_workers": 12,
                     "output_dir": "/cluster/home/someone/results",
-                    "seed": 42,
+                    "seed": 7,
                 },
             }
         ),
@@ -59,7 +60,6 @@ def bundle(tmp_path):
     (path / METADATA_NAME).write_text(
         json.dumps(
             {
-                "bundle_version": BUNDLE_VERSION,
                 "model_name": "demo",
                 "model_kind": "NODE",
                 "git_sha": "0123456789abcdef",
@@ -69,46 +69,44 @@ def bundle(tmp_path):
     return path
 
 
-def test_read_bundle_points_the_config_at_the_bundles_own_files(bundle):
+def test_read_bundle_addresses_the_bundles_own_files(bundle):
     """A bundle copied off the cluster must stop referring to the cluster.
 
     The config it carries was written on the machine that trained the model, so
-    every absolute path in it is wrong somewhere else. The three paths that name
-    bundle contents are rewritten to the bundle; the training dataset, which is
-    not in the bundle, is cleared rather than left dangling.
+    every absolute path in it is wrong somewhere else. The weights and scalers
+    come back as bundle-relative paths; the training dataset, which is not in
+    the bundle, is cleared rather than left dangling.
     """
-    cfg, metadata = read_bundle(bundle)
+    cfg, loaded = read_bundle(bundle)
 
-    assert cfg.runtime.mode == "inference"
-    assert cfg.runtime.ckp_path == str(bundle / WEIGHTS_NAME)
+    assert loaded.weights == bundle / WEIGHTS_NAME
+    assert loaded.preprocessor == bundle / PREPROCESSOR_NAME
     assert cfg.dataset.preprocessor_path == str(bundle / PREPROCESSOR_NAME)
     assert cfg.dataset.path_to_data == ""
-    assert metadata["model_kind"] == "NODE"
+    assert loaded.metadata["model_kind"] == "NODE"
 
 
-def test_read_bundle_applies_data_out_and_overrides(bundle, tmp_path):
-    cfg, _ = read_bundle(
-        bundle,
-        inference_data=MINI_H5,
-        output_dir=tmp_path / "served",
-        overrides=["runtime.device=cuda", "dataset.fraction_of_data=1.0"],
-    )
-    assert cfg.dataset.path_to_inference_data == os.path.abspath(MINI_H5)
-    assert cfg.runtime.output_dir == str((tmp_path / "served").resolve())
-    assert cfg.runtime.device == "cuda"
-    assert cfg.dataset.fraction_of_data == 1.0
+def test_read_bundle_drops_the_training_machines_runtime(bundle):
+    """Everything about the machine is the new command line's to decide.
 
-
-def test_overrides_win_over_the_bundles_own_paths(bundle, tmp_path):
-    """Last word to the user — including over the paths read_bundle just set.
-
-    Swapping in a different checkpoint against a bundle's scalers is a
-    legitimate thing to want; it should not require editing the bundle.
+    Inheriting `device: cuda` from a cluster run would make a laptop run fail
+    for a reason that has nothing to do with what the user asked for.
     """
-    other = tmp_path / "other.ckpt"
-    other.write_bytes(b"")
-    cfg, _ = read_bundle(bundle, overrides=[f"runtime.ckp_path={other}"])
-    assert cfg.runtime.ckp_path == str(other)
+    cfg, loaded = read_bundle(bundle)
+
+    assert "runtime" not in cfg, "the recorded runtime block must not survive"
+    # The seed is the exception, and only because `plots` rebuilds the recorded
+    # run's split from it.
+    assert loaded.seed == 7
+
+
+def test_read_bundle_keeps_the_model_description(bundle):
+    """What a bundle is *for*: the architecture the weights load into."""
+    cfg, _ = read_bundle(bundle)
+
+    assert cfg.model.kind == "NODE"
+    assert cfg.model.name == "demo"
+    assert cfg.dataset.fraction_of_data == 0.1
 
 
 @pytest.mark.parametrize("missing", REQUIRED_NAMES)
@@ -123,16 +121,6 @@ def test_an_incomplete_directory_is_not_a_bundle(bundle, missing):
 def test_a_missing_directory_is_refused(tmp_path):
     with pytest.raises(SystemExit, match="No bundle directory"):
         read_bundle(tmp_path / "nope")
-
-
-def test_a_future_bundle_version_is_refused(bundle):
-    """Mirrors Preprocessor.from_dict's schema check: refuse to guess at a
-    layout this build does not know."""
-    meta = json.loads((bundle / METADATA_NAME).read_text())
-    meta["bundle_version"] = BUNDLE_VERSION + 1
-    (bundle / METADATA_NAME).write_text(json.dumps(meta))
-    with pytest.raises(SystemExit, match="Upgrade nuclear_surrogates"):
-        read_bundle(bundle)
 
 
 def test_metadata_is_strict_json(tmp_path):
@@ -153,7 +141,11 @@ def test_metadata_is_strict_json(tmp_path):
     out = write_bundle(
         out_dir=str(tmp_path / "b"),
         cfg=OmegaConf.create(
-            {"dataset": {}, "model": {"name": "x"}, "runtime": {"seed": 1}}
+            {
+                "dataset": {},
+                "model": {"name": "x", "kind": "DNN"},
+                "runtime": {"seed": 1},
+            }
         ),
         preprocessor=_StubPreprocessor(),
         metrics={"val_r2": -float("inf"), "val_loss": 0.5, "val_mae": float("inf")},
@@ -169,29 +161,96 @@ def test_metadata_is_strict_json(tmp_path):
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
-
-def test_cli_bundle_needs_something_to_evaluate(bundle):
-    from nuclear_surrogates.main import _build_parser, build_config
-
-    args = _build_parser().parse_args(["--bundle", str(bundle)])
-    with pytest.raises(SystemExit, match="--data"):
-        build_config(args)
+SMOKE_DNN = os.path.join(REPO, "configs", "smoke_dnn.yaml")
 
 
-def test_cli_rejects_config_with_data_or_out(tmp_path):
-    """--data/--out are bundle flags. Silently ignoring them with --config
-    would leave a user believing they had redirected a run."""
+@pytest.mark.parametrize("verb", ["train", "finetune", "infer", "plots"])
+def test_every_verb_requires_a_source_and_data(verb, tmp_path):
+    """Argparse enforces the legal combinations, so no mode can be reached
+    half-configured. This used to be three hand-written SystemExit guards."""
+    from nuclear_surrogates.main import _build_parser
+
+    source = "--config" if verb == "train" else "--bundle"
+    value = SMOKE_DNN if verb == "train" else str(tmp_path)
+
+    for argv in ([verb], [verb, source, value], [verb, "--data", MINI_H5]):
+        with pytest.raises(SystemExit):
+            _build_parser().parse_args(argv)
+
+    # Both together parse.
+    args = _build_parser().parse_args([verb, source, value, "--data", MINI_H5])
+    assert args.command == verb
+
+
+def test_train_builds_a_runtime_block_from_the_flags(tmp_path):
+    """The `runtime` section exists at run time but lives in no YAML."""
     from nuclear_surrogates.main import _build_parser, build_config
 
     args = _build_parser().parse_args(
-        ["--config", os.path.join(REPO, "configs", "smoke_dnn.yaml"), "--data", MINI_H5]
+        [
+            "train",
+            "--config",
+            SMOKE_DNN,
+            "--data",
+            MINI_H5,
+            "--out",
+            str(tmp_path / "out"),
+            "--device",
+            "cpu",
+            "--workers",
+            "3",
+            "--seed",
+            "11",
+            "--no-plots",
+        ]
     )
-    with pytest.raises(SystemExit, match="apply to --bundle"):
-        build_config(args)
+    cfg, loaded = build_config(args)
+
+    assert loaded is None
+    assert cfg.dataset.path_to_data == str(os.path.abspath(MINI_H5))
+    assert cfg.runtime.output_dir == str((tmp_path / "out").resolve())
+    assert cfg.runtime.device == "cpu"
+    assert cfg.runtime.num_workers == 3
+    assert cfg.runtime.seed == 11
+    assert cfg.runtime.plots is False
 
 
-def test_cli_bundle_and_config_are_mutually_exclusive(bundle):
-    from nuclear_surrogates.main import _build_parser
+def test_infer_takes_the_bundles_seed_and_never_the_training_path(bundle, tmp_path):
+    """`--data` on `infer` is the file to evaluate, never the training file."""
+    from nuclear_surrogates.main import _build_parser, build_config
 
-    with pytest.raises(SystemExit):
-        _build_parser().parse_args(["--config", "x.yaml", "--bundle", str(bundle)])
+    args = _build_parser().parse_args(
+        ["infer", "--bundle", str(bundle), "--data", MINI_H5, "--out", str(tmp_path)]
+    )
+    cfg, loaded = build_config(args)
+
+    assert cfg.dataset.path_to_inference_data == str(os.path.abspath(MINI_H5))
+    assert cfg.dataset.path_to_data == "", "infer must not be given the training file"
+    assert (
+        cfg.runtime.seed == loaded.seed == 7
+    ), "an unflagged seed comes from the bundle"
+
+
+def test_overrides_win_over_everything_the_cli_set(bundle, tmp_path):
+    """Last word to the user — including over the runtime block just built."""
+    from nuclear_surrogates.main import _build_parser, build_config
+
+    args = _build_parser().parse_args(
+        [
+            "infer",
+            "--bundle",
+            str(bundle),
+            "--data",
+            MINI_H5,
+            "--out",
+            str(tmp_path),
+            "--device",
+            "cpu",
+            "runtime.device=cuda",
+            "dataset.fraction_of_data=1.0",
+        ]
+    )
+    cfg, _ = build_config(args)
+
+    assert cfg.runtime.device == "cuda"
+    assert cfg.dataset.fraction_of_data == 1.0

@@ -1,24 +1,28 @@
 # Configuration reference
 
-Every key a run config may contain, what reads it, and what values are valid.
+Every key a run config may contain, what reads it, and what values are valid —
+followed by the [command-line flags](#command-line) that supply everything a
+config deliberately does not.
 
-A run is one YAML file plus optional command-line overrides:
+A run is one YAML file, one subcommand, and optional overrides:
 
 ```bash
-uv run nucml --config configs/main_config.yaml train.num_epochs=5 runtime.device=cpu
+uv run nucml train --config configs/node.yaml --data datasets/casl_3305_runs_inter.h5 \
+                   --device cpu train.num_epochs=5
 ```
 
 Two conventions hold throughout:
 
-- **Paths are resolved relative to the config file itself**, never to the
-  working directory (`utils/paths.py:resolve_config_paths`), so a run behaves
-  the same whichever directory it is launched from.
+- **A config describes the model, not the run.** There is no path, device,
+  seed or mode key in any config under `configs/`; those are flags, so the same
+  file runs unedited on a laptop and on the cluster. `tests/test_configs.py`
+  enforces the absence.
 - **Unrecognised enumerated values raise.** A typo in a scaler, activation or
   loss name fails at construction rather than silently substituting a default;
   `tests/test_configs.py` catches it earlier still, before a config is
   committed.
 
-Keys marked **NODE** are read only when `runtime.model: NODE`; keys marked
+Keys marked **NODE** are read only when `model.kind: NODE`; keys marked
 **DNN** only by the DNN path. Everything else is shared.
 
 ---
@@ -27,9 +31,6 @@ Keys marked **NODE** are read only when `runtime.model: NODE`; keys marked
 
 | Key | Type | Notes |
 |---|---|---|
-| `path_to_data` | path | Training HDF5 (or CSV). Fits the scalers. |
-| `path_to_inference_data` | path | The file evaluated by `runtime.mode: inference`. |
-| `preprocessor_path` | path | Fitted scalers from a bundle. **Required** for `inference`. |
 | `fraction_of_data` | float in (0, 1] | See the semantics note below. |
 | `split` | mapping | Optional `{train, val, test}` fractions; must sum to 1.0. |
 | `inputs` | mapping | `column: scaler`, the model's inputs. |
@@ -37,6 +38,13 @@ Keys marked **NODE** are read only when `runtime.model: NODE`; keys marked
 | `target_delta_conc` | bool | Predict the change per step rather than the absolute value. |
 | `train.batch_size` | int | Training dataloader batch size. |
 | `val.batch_size` | int | Validation and test batch size (no gradients, so it can be larger). |
+
+Three further `dataset` keys exist but are **written by the CLI, never by you**:
+`path_to_data` (from `--data` on `train` / `finetune` / `plots`),
+`path_to_inference_data` (from `--data` on `infer`) and `preprocessor_path`
+(from `--bundle`). They appear in a bundle's `config.resolved.yaml` because that
+file records what actually ran; a config in `configs/` that declared one would
+be describing a machine rather than a model, and the test suite rejects it.
 
 **`fraction_of_data` is a prefix, not a sample.** It keeps the *first*
 `fraction × total` whole runs of the file (`dataset_helper.read_data`), so
@@ -51,28 +59,26 @@ model falls back to its historical default, which is why the two differ:
 | NODE | 0.6 / 0.2 / 0.2 | seeded random permutation of runs |
 
 The partition actually used is written to
-`<output_dir>/<model.name>/model-bundle/split_indices.json`. That the two
+`<--out>/<model.name>/model-bundle/split_indices.json`. That the two
 models split differently is a known limitation of the head-to-head comparison
-— see `AUDIT.md` P5.
+— see `docs/training_pipeline.md` §8.
 
 **Scalers** (case-insensitive): `MinMax`, `Standard`, `Robust`, `MaxAbs`,
 `Normalizer`, `Quantile`, `Power`, `none`. Each is fitted **per column** and on
 the **training split only**. Fitted state is persisted to `preprocessor.json`,
 which is what lets a checkpoint be served without the training dataset.
 
-**`preprocessor_path`** points at a bundle directory or a `preprocessor.json`.
-Like every other path key it is resolved relative to the config file.
+**`preprocessor_path`** points at the `preprocessor.json` inside a bundle, and
+`--bundle` is what sets it. `infer` **requires** it, and there is no fallback. A
+checkpoint without its scalers is half a model: re-fitting on whatever data is
+to hand produces scalers the checkpoint never saw, and every number computed
+through them is then wrong by however much the two fits disagree — silently,
+since the output still looks reasonable. Inference used to do exactly that
+behind a warning; it now exits.
 
-Inference **requires** it, and there is no fallback. A checkpoint without its
-scalers is half a model: re-fitting on whatever data is to hand produces scalers
-the checkpoint never saw, and every number computed through them is then wrong
-by however much the two fits disagree — silently, since the output still looks
-reasonable. Inference used to do exactly that behind a warning; it now exits.
-
-Set during training, it makes the run *load* scalers instead of fitting them.
-That is how `regenerate_plots` replays a finished run against its own scalers.
-
-You should rarely need the key by hand: `nucml --bundle` sets it.
+Present during a training-shaped run, it makes the run *load* scalers instead of
+fitting them. That is how `plots` replays a finished run against its own
+scalers.
 
 **`target_delta_conc: true`** makes the target `c(t+1) − c(t)`. This matters
 for isotopes like U238 that change by only a few percent over the full history:
@@ -86,17 +92,27 @@ time (`evaluation.deltas_to_absolute`).
 
 | Key | Type | Notes |
 |---|---|---|
+| `kind` | str | `DNN` or `NODE`. Chooses the model class *and* its datamodule. |
 | `name` | str | Names the run's output directory and its database row. |
 | `layers` | list[int] | Hidden widths, e.g. `[128, 128]`. |
 | `dropout_probability` | float in [0, 1] | `0.0` disables dropout. |
 | `activation` | str | Hidden-layer activation. |
-| `output_activation` | str | Use `none` for regression. |
+| `output_activation` | str | Optional. Use `none` for regression; omit under `matrix_ode`. |
 | `residual_connections` | bool | Skip connections, applied only where adjacent widths match. |
 | `matrix_ode` | bool | **NODE** — use the constrained depletion matrix. |
 | `matrix_zero_entries` | list[[int, int]] | **NODE** — matrix entries forced to zero. |
 
+**`kind`** is the one key with no default: `main.py` looks it up directly, so a
+config that omits it fails immediately rather than training the wrong model.
+
 **Activations**: `relu`, `tanh`, `sigmoid`, `leaky_relu`, `elu`, `gelu`,
 `selu`, `softplus`, `none`.
+
+**`output_activation` under `matrix_ode`.** `ODEFuncMatrix` hardcodes `"none"`
+and applies its own sign constraints instead, so a value set here is silently
+discarded. `configs/node.yaml` therefore omits the key, and
+`tests/test_configs.py` checks that every matrix-ODE config does — a key that
+reads as a knob and is not one is worse than an absent key.
 
 **`residual_connections`** is applied per layer, only where the input and
 output widths are equal; if none match, the model logs an error rather than
@@ -137,84 +153,82 @@ are in range.
 | `solver` | str | Any `torchdiffeq` method, e.g. `dopri5`, `rk4`. |
 | `rtol` / `atol` | float | Adaptive-solver tolerances. |
 | `step_size` | float | **Fixed-step solvers only** (`rk4`). Ignored by `dopri5`. |
-| `solver_options` | mapping | Optional. Extra `torchdiffeq` options the flat keys cannot express. |
 | `use_adjoint` | bool | Optional. Gradients from a backward adjoint solve. |
 | `adjoint_method` | str | Solver for the backward pass. |
 | `adjoint_rtol` / `adjoint_atol` | float | Backward-pass tolerances. |
-| `adjoint_solver_options` | mapping | Optional. Kept separate because a forward-only key (rk4's `step_size`) is invalid for the adjoint. |
 
 **`use_adjoint`** recovers gradients by solving the adjoint system backwards
 instead of storing the forward graph: O(1) memory in the number of function
 evaluations rather than O(NFE), at roughly twice the wall time per batch. It is
-what makes a large batch fit once the learned dynamics turn stiff — see
-`configs/NODE_adjoint.yaml`, which documents the measured trade.
+what makes a large batch fit once the learned dynamics turn stiff. Neither
+shipped config enables it; turn it on with an override
+(`train.use_adjoint=true`) when a batch no longer fits.
 
 **Tolerances are not free.** The number of function evaluations per epoch is
 logged as `nfe` and drawn on `training_loss_log.png`; watch it when changing
 `rtol`/`atol`. Note also that the states are float32 (eps ≈ 1.2e-7), so an
 `atol` at or below that is asking for more than the arithmetic delivers
-(`AUDIT.md` P4).
+(`docs/training_pipeline.md` §8).
 
 ---
 
-## `runtime`
+## Command line
 
-| Key | Type | Notes |
+What the config no longer holds. Four subcommands, each taking one source —
+a config to build a new model, or a bundle to reuse a trained one:
+
+| Command | Source | Does |
 |---|---|---|
-| `mode` | str | `train`, `train_from_ckp`, `inference`, `regenerate_plots`. |
-| `model` | str | `DNN` or `NODE`. |
-| `ckp_path` | path | Checkpoint for `train_from_ckp` / `inference` / `regenerate_plots`. |
-| `bundle_path` | path | Set by `--bundle`; where `regenerate_plots` reads `split_indices.json`. |
-| `device` | str | `cpu`, `cuda`, `auto`, `gpu`, `mps`. |
-| `seed` | int | Seeds the whole run — see below. |
-| `num_workers` | int | Dataloader worker processes; `0` loads in the main process. |
-| `output_dir` | path | Root for run outputs: `<output_dir>/<model.name>/`. |
-| `model_database` | path | SQLite file the experiment logger appends a row to. |
-| `plots` | bool | Optional, default `true`. Set `false` to skip the data-distribution figures. |
+| `nucml train` | `--config CFG` | Fits scalers on the training split, trains, tests, writes a bundle. |
+| `nucml finetune` | `--bundle DIR` | Loads the bundle's **weights only**, then trains as above into a new bundle. |
+| `nucml infer` | `--bundle DIR` | Evaluates the frozen model on `--data`. Never opens the training file. |
+| `nucml plots` | `--bundle DIR` | Redraws a finished run's figures. Nothing trained, no checkpoint written. |
 
-**Modes.**
+Every verb takes the same machine flags, all optional except `--data`:
 
-- `inference` loads `ckp_path` and evaluates it on
-  `dataset.path_to_inference_data`, for both the DNN and the NODE. It requires
-  `dataset.preprocessor_path` and never opens `dataset.path_to_data`.
-- `regenerate_plots` redraws a *finished* run's figures: it rebuilds that run's
-  own train/val/test split over `dataset.path_to_data`, loads the bundle's
-  scalers, and runs the evaluation epoch on the test share alone. Nothing is
-  trained and no checkpoint is written. Unlike `inference` it does need the
-  training dataset, because the split is recorded as indices into it.
+| Flag | Default | Sets |
+|---|---|---|
+| `--data FILE` | **required** | `dataset.path_to_data`, or `path_to_inference_data` under `infer`. |
+| `--out DIR` | `results` | Root for run outputs: `<--out>/<model.name>/`. |
+| `--device D` | `auto` | `auto`, `cpu`, `cuda`, `gpu`, `mps`. |
+| `--workers N` | `0` | Dataloader worker processes; `0` loads in the main process. |
+| `--seed N` | `42`, or the bundle's | Seeds the whole run — see below. |
+| `--no-plots` | off | Skip the data-distribution figures. |
+| `key=value …` | — | Trailing OmegaConf overrides, applied last. |
 
-  The rebuilt split is checked against the bundle's `split_indices.json` and the
-  run **exits on a mismatch** — a different dataset, `fraction_of_data` or seed
-  would otherwise yield plausible figures labelled as the published run's.
+These become the `runtime` block of the resolved config, which is what the
+bundle records. Nothing reads a `runtime` section out of a hand-written YAML;
+`read_bundle` strips the recorded one back off, since the machine reading a
+bundle is rarely the one that wrote it.
 
-In practice you do not write either config by hand. `nucml --bundle` sets `mode`,
-`ckp_path`, `bundle_path` and `preprocessor_path` from the bundle's contents:
+**`finetune` is a warm start, not a resume.** Only the weights are restored —
+the optimizer, the LR schedule and the epoch counter all start fresh. That is
+the useful behaviour for adapting a trained model to new data or restarting
+with a different learning rate, but it means the loss curve will not simply
+continue where the previous run's left off.
 
-```bash
-# evaluate on new data
-uv run nucml --bundle results/<model_name>/model-bundle \
-             --data   datasets/new_runs.h5 \
-             --out    predictions/
+**`plots` needs the training dataset**, unlike `infer`, because the test split
+is recorded as indices into it. The rebuilt split is checked against the
+bundle's `split_indices.json` and the run **exits on a mismatch** — a different
+dataset, `fraction_of_data` or seed would otherwise yield plausible figures
+labelled as the published run's.
 
-# redraw the run's own figures
-uv run nucml --bundle results/<model_name>/model-bundle --regenerate-plots \
-             --data   datasets/casl_3305_runs_inter.h5 \
-             --out    figures/
-```
-
-**`seed`.** `main.py` calls `L.seed_everything(seed, workers=True)` before
+**`--seed`.** `main.py` calls `L.seed_everything(seed, workers=True)` before
 anything is constructed, covering weight initialisation and dataloader
 shuffling. The two run-splitting permutations and the permutation-importance
 shuffle take explicit `numpy` generators rather than the global RNG, so a
-datamodule built outside `main()` — as the tests and `nucml-package` do —
-splits identically.
+datamodule built outside `main()` — as the tests do — splits identically.
+
+For the three bundle verbs the default is not `42` but *the seed the bundle
+recorded*, so `plots` reproduces the published split without being told. Passing
+`--seed` there overrides it, which is precisely what makes the split differ.
 
 *Caveat:* this gives run-to-run reproducibility on a fixed machine and library
 set. Bitwise equality across different GPUs additionally requires
 `torch.use_deterministic_algorithms(True)` and TF32 disabled; `main.py` sets
 `torch.set_float32_matmul_precision("high")`, which permits TF32 matmuls.
 
-**`num_workers`.** For the NODE, `0` is often faster: the dataset is already
+**`--workers`.** For the NODE, `0` is often faster: the dataset is already
 tensors in RAM, so workers add process handover and a per-process copy for no
 gain.
 
@@ -223,9 +237,10 @@ gain.
 ## What a run writes
 
 ```
-<output_dir>/<model.name>/
+<--out>/<model.name>/
 ├── best-<name>-epoch=NN.ckpt      best-validation-loss checkpoint
 ├── training_loss_log.png          loss curves (plus NFE for the NODE)
+├── test_metrics.json              per-isotope MAE / RMSE / R² / MARE
 ├── model-bundle/                  the run's record
 │   ├── weights.ckpt
 │   ├── preprocessor.json          fitted scalers, plain text, source of truth

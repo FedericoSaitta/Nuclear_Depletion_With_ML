@@ -10,6 +10,7 @@ Array convention throughout: ``(runs, steps, targets)``, in physical units.
 
 from __future__ import annotations
 
+import json
 import os
 
 import numpy as np
@@ -20,6 +21,8 @@ from nuclear_surrogates.utils import metrics, plot
 # Well below the smallest physical concentration (~1e-10 atom/b-cm), so it
 # regularises log(0) without biasing any real value.
 MALE_EPSILON = 1e-20
+
+TEST_METRICS_NAME = "test_metrics.json"
 
 
 def deltas_to_absolute(deltas, initial):
@@ -150,6 +153,31 @@ def report_prediction_comparisons(
             output_dir,
         )
         logger.info(f"  {target_name}: comparison plot saved to {output_dir}")
+
+
+def write_test_metrics(result_dir, test_metrics):
+    """Write the run's test metrics to `<result_dir>/test_metrics.json`.
+
+    The per-target numbers are the manuscript's headline results, and this is
+    the only place they are recorded in machine-readable form: the bundle is
+    written before `trainer.test` runs, so `metadata.json` carries the
+    *validation* metrics and cannot carry these.
+
+    Best-effort, like the bundle — a finished evaluation must not be lost to a
+    failed write.
+    """
+    path = os.path.join(result_dir, TEST_METRICS_NAME)
+    try:
+        os.makedirs(result_dir, exist_ok=True)
+        with open(path, "w") as f:
+            # allow_nan=False: `json.dump` writes a bare `Infinity` for a metric
+            # that came out non-finite, which Python reads back and nothing else
+            # does. Same rule the bundle's metadata.json follows.
+            json.dump(test_metrics, f, indent=2, allow_nan=False)
+    except (OSError, ValueError) as exc:
+        logger.error(f"Failed to write {path}: {exc}")
+        return
+    logger.info(f"Test metrics written to {path}")
 
 
 def report_error_growth(trues, ar_preds, tf_preds, target_names, result_dir, log):

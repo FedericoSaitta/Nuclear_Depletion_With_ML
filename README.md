@@ -1,4 +1,6 @@
-# Nuclear_Depletion_With_ML
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21975132.svg)](https://doi.org/10.5281/zenodo.21975132)
+
+# Nuclear_Transport_With_ML
 
 Machine-learning surrogates for OpenMC fuel-depletion calculations. A Monte-Carlo
 depletion run of a PWR pin cell takes hours to weeks; a trained surrogate
@@ -28,105 +30,140 @@ end; `docs/config_reference.md` documents every configuration key.
 Requires [uv](https://docs.astral.sh/uv/). Python itself is provisioned by uv — you do
 not need to install or `module load` anything.
 
-### Train / evaluate a surrogate (no OpenMC, no nuclear data)
-
 ```bash
 git clone https://github.com/FedericoSaitta/Nuclear_Transport_With_ML.git
 cd Nuclear_Transport_With_ML
 uv sync --extra ml
-uv run nucml --config configs/main_config.yaml
 ```
 
-Override any config key from the command line:
+### The four commands
+
+`nucml` has four verbs, and each one takes exactly one thing to work from —
+a config to train a new model, or a bundle to reuse a trained one:
+
+| | | |
+|---|---|---|
+| `nucml train` | `--config CFG --data H5` | train a new model from scratch |
+| `nucml finetune` | `--bundle DIR --data H5` | warm-start from a trained model's weights |
+| `nucml infer` | `--bundle DIR --data H5` | evaluate a trained model on new data |
+| `nucml plots` | `--bundle DIR --data H5` | redraw a finished run's figures |
+
+The split is deliberate: **the YAML describes the model, the command line
+describes the run.** A config in `configs/` names the architecture, the scalers,
+the loss and the solver — nothing about which machine it runs on or which file
+it reads. Those are flags, shared by all four verbs:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--data FILE` | required | the HDF5 to train on, or to run inference against |
+| `--out DIR` | `results` | where figures, checkpoints and the bundle go |
+| `--device D` | `auto` | `auto`, `cpu`, `cuda`, `gpu` or `mps` |
+| `--workers N` | `0` | dataloader worker processes |
+| `--seed N` | `42`, or the bundle's | RNG seed; also fixes the train/val/test split |
+| `--no-plots` | off | skip figure generation |
+
+Anything else is a trailing `key=value` override, applied last:
 
 ```bash
-uv run nucml --config configs/main_config.yaml runtime.model=DNN train.num_epochs=5
+uv run nucml train --config configs/node.yaml --data datasets/casl_3305_runs_inter.h5 \
+                   train.num_epochs=5 model.layers=[64,64]
 ```
 
-Training reads the HDF5 named by `dataset.path_to_data`, which is not in the
-repository — put it in `datasets/` (see [Downloading data](#downloading-data)).
+Two configs ship with the repo, one per paper model: `configs/node.yaml`
+(the constrained 7×7 matrix Neural ODE) and `configs/dnn.yaml`. Neither names a
+dataset — the HDF5 is not in the repository, so put one in `datasets/` (see
+[Downloading data](#downloading-data)) and pass it with `--data`.
+
+### Train
+
+```bash
+uv run nucml train --config configs/node.yaml \
+                   --data   datasets/casl_3305_runs_inter.h5 \
+                   --out    results/ --device cuda
+```
 
 ### Run a trained model on new data
 
 Every training run writes a **model bundle** beside its outputs, at
-`results/<model_name>/model-bundle/`. It holds the weights, the fitted scalers
+`<--out>/<model_name>/model-bundle/`. It holds the weights, the fitted scalers
 as plain JSON, the fully-resolved config, the train/val/test split and the git
 SHA, seed and dataset hash — a few hundred kB, and no dependency on the training
-dataset. Point `nucml` at one:
+dataset. Point `infer` at one:
 
 ```bash
-uv run nucml --bundle results/matrix_ode_7x7_breeding_chain/model-bundle \
-             --data   datasets/new_runs.h5 \
-             --out    predictions/
+uv run nucml infer --bundle results/matrix_ode_7x7_breeding_chain/model-bundle \
+                   --data   datasets/new_runs.h5 \
+                   --out    predictions/
 ```
 
 That is the whole command. Weights alone would not be enough — both models build
 their architecture from the config, and for a NODE the solver and its tolerances
-change the numbers, not just the runtime — but the bundle carries all of it, and
-`--bundle` wires it up. It also repoints the config's paths at the bundle's own
-files, so a bundle copied off a cluster works unmodified.
+change the numbers, not just the runtime — but the bundle carries all of it. The
+bundle is the *only* thing the three reuse verbs accept; there is deliberately no
+way to point one at a bare `.ckpt`, because a checkpoint separated from its
+scalers is half a model. Re-fitting scalers on whatever data is to hand would
+silently change every number the run produces, so there is no fallback.
 
-Overrides still apply on top:
+### Continue training from a trained model
+
+`finetune` restores the **weights only** and starts a fresh optimizer, LR
+schedule and epoch counter. It is a warm start, not a resume — useful for
+adapting a trained model to a new dataset, or for continuing a run that stopped
+early with a different learning rate:
 
 ```bash
-uv run nucml --bundle <dir> --data new_runs.h5 runtime.device=cuda
+uv run nucml finetune --bundle results/matrix_ode_7x7_breeding_chain/model-bundle \
+                      --data   datasets/casl_3305_runs_inter.h5 \
+                      --out    results/ \
+                      train.learning_rate=0.0005 train.num_epochs=500
 ```
 
-The scalers are not optional. A checkpoint without them is half a model, so
-inference loads them from the bundle and there is no fallback — re-fitting on
-whatever data is to hand would silently change every number the run produces.
+It writes its own bundle under `<--out>/<model_name>/`, so the original is left
+untouched.
 
 ### Redraw a finished run's figures
 
-`--regenerate-plots` replays a run rather than evaluating new data: the run's own
-test split, weights and scalers, so the figures come out the same as the ones the
-bundle was published with. Nothing is trained and no checkpoint is written.
+`plots` replays a run rather than evaluating new data: the run's own test split,
+weights and scalers, so the figures come out the same as the ones the bundle was
+published with. Nothing is trained and no checkpoint is written.
 
 ```bash
-uv run nucml --bundle results/matrix_ode_7x7_breeding_chain/model-bundle \
-             --regenerate-plots \
-             --data datasets/casl_3305_runs_inter.h5 \
-             --out  figures/
+uv run nucml plots --bundle results/matrix_ode_7x7_breeding_chain/model-bundle \
+                   --data   datasets/casl_3305_runs_inter.h5 \
+                   --out    figures/
 ```
 
 This one *does* need the training dataset, because the test split is a share of
 it — `dataset.split` in the config decides how large a share, and the bundle's
 `split_indices.json` records exactly which runs. The rebuilt split is checked
 against that record and the run stops on a mismatch, so redrawn figures are
-either the published run's or nothing.
-
-For a checkpoint trained before bundles existed, backfill one once on a machine
-that still has the dataset:
-
-```bash
-uv run nucml-package --ckpt <old.ckpt> --config <its_config.yaml> \
-                     --data datasets/casl_3305_runs_inter.h5 --out bundles/legacy
-```
-
-Its scalers are *refitted* rather than original, which `metadata.json` records —
-a backfilled bundle is a regression anchor, not a reproduction of the run.
+either the published run's or nothing. The seed recorded in the bundle is
+reused automatically; `--seed` overrides it, which is exactly what makes the
+split differ, so leave it alone here.
 
 ### Repository layout
 
 ```
-configs/          run configs. Every path inside one is relative to the config
-                  file itself, so a run is independent of the working directory
+configs/          model configs: architecture, scalers, loss, solver. No paths,
+                  no device, no mode — those are command-line flags
 src/nuclear_surrogates/
-    main.py       the `nucml` entry point: merge config + CLI overrides, dispatch
+    main.py       the `nucml` entry point: four subcommands, config + overrides
     datamodule/   HDF5 -> scaled tensors; DNN pair-wise and NODE trajectory splits
     models/       DNN, Neural ODE (incl. the constrained depletion matrix), modes
-    utils/        metrics, plotting, path resolution, SQLite experiment logger
+    bundle.py     writes and reads a model bundle: weights + scalers + config
+    utils/        metrics and plotting
 data_generation/  OpenMC depletion pipelines (separate environment; no ML imports)
 util/             one-off data and depletion-chain tools
 scripts/          bootstrap, OpenMC build, SLURM job scripts
 tests/            golden regression tests + fixtures; OpenMC install smoke tests
 notebooks/        exploration and learning-journey scripts, not library code
-docs/             config_reference.md   every config key, with valid values
+docs/             config_reference.md   every config key and CLI flag
                   training_pipeline.md  how both models are trained and evaluated
 
 datasets/         training HDF5 files          (untracked)
 data/             OpenMC nuclear data, 7 GB    (untracked)
-results/          <model_name>/ per run: figures, checkpoints  (untracked)
+results/          <model_name>/ per run: figures, checkpoints, model-bundle/
+                  (untracked; the default --out)
 ```
 
 ### Generate data with OpenMC (Linux / WSL2 / macOS)
@@ -277,10 +314,11 @@ train:
 | Set up ML env | `uv sync --extra ml` |
 | Set up sim env | `UV_PROJECT_ENVIRONMENT=.venv-sim uv sync --extra sim` then `./scripts/install_openmc.sh` |
 | Set up sim env on Windows | inside `wsl`, see [On a Windows laptop](#on-a-windows-laptop-use-wsl2) |
-| Train | `uv run nucml --config configs/main_config.yaml` |
-| Train with overrides | `uv run nucml --config configs/main_config.yaml train.num_epochs=5 runtime.device=cpu` |
-| Run a trained model | `uv run nucml --bundle results/<name>/model-bundle --data <file.h5> --out predictions/` |
-| Redraw a run's figures | `uv run nucml --bundle results/<name>/model-bundle --regenerate-plots --data <training.h5> --out figures/` |
+| Train | `uv run nucml train --config configs/node.yaml --data <file.h5>` |
+| Train with overrides | `uv run nucml train --config configs/node.yaml --data <file.h5> --device cpu train.num_epochs=5` |
+| Warm-start from a trained model | `uv run nucml finetune --bundle results/<name>/model-bundle --data <file.h5>` |
+| Run a trained model | `uv run nucml infer --bundle results/<name>/model-bundle --data <file.h5> --out predictions/` |
+| Redraw a run's figures | `uv run nucml plots --bundle results/<name>/model-bundle --data <training.h5> --out figures/` |
 | Run datagen | `UV_PROJECT_ENVIRONMENT=.venv-sim uv run python data_generation/datagen.py -n 4 -c 16` |
 | Add an ML dependency | `uv add --optional ml <pkg>` (updates `pyproject.toml` **and** `uv.lock`) |
 | Add a sim dependency | `uv add --optional sim <pkg>` |

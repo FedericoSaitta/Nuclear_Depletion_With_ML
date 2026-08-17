@@ -1,9 +1,16 @@
-# Best 7-isotope DNN
-# Paths are resolved relative to THIS FILE, not to the working directory.
+# The paper's 7-isotope DNN, as trained. Hyperparameters came from a per-target
+# Optuna study, which is why the learning rate and weight decay are not round
+# numbers.
+#
+#   nucml train --config configs/dnn.yaml --data datasets/casl_3305_runs_inter.h5
+#
+# This file describes the MODEL and nothing else — paths, device and mode are
+# command-line flags.
 dataset:
-  path_to_data: ../datasets/casl_3305_runs_inter.h5
   fraction_of_data: 1.0
 
+  # Fractions of whole runs. The DNN splits sequentially in time; the NODE
+  # partitions by a seeded random permutation of runs.
   split:
     train: 0.8
     val: 0.1
@@ -31,20 +38,26 @@ dataset:
     Pu240: robust
     Pu241: robust
     Pu242: robust
+
+  # Predict c(t+1) - c(t) rather than c(t+1). U238 changes by only a few percent
+  # over a full history, so a network asked for it directly scores R^2 ~ 1 by
+  # copying its input.
   target_delta_conc: true
+
   train:
     batch_size: 512
   val:
     batch_size: 8192
+
 model:
+  kind: DNN
   name: BEST_7_Isotope_DNN
-  layers:
-  - 128
-  - 128
+  layers: [128, 128]
   dropout_probability: 0.0
   activation: tanh
   output_activation: none
   residual_connections: true
+
 train:
   loss: huber
   learning_rate: 0.0009134017134849459
@@ -52,14 +65,5 @@ train:
   lr_scheduler_patience: 10
   num_epochs: 500
   early_stopping_patience: 20
-  drop_last: false
   grad_clip: 0.0
-runtime:
-  mode: train
-  model: DNN
-  ckp_path: ""
-  device: cuda
-  seed: 42
-  num_workers: 6
-  output_dir: ../results
-  model_database: ../Chain_Model.db
+  drop_last: false

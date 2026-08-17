@@ -133,8 +133,8 @@ COMPOUNDING = ("U238", "Pu240", "Pu241", "Pu242")
 # sampled point, so their concentration is slaved to the local capture rate
 # rather than to the trajectory's history — feeding predictions back in cannot
 # accumulate error for them. Pu239, the first long-lived member, is buffered by
-# the same effect. This is the identifiability limit AUDIT.md P3 describes,
-# stated here as a test rather than a caveat in prose.
+# the same effect. This is the identifiability limit `docs/training_pipeline.md`
+# §8 describes, stated here as a test rather than a caveat in prose.
 EQUILIBRIUM_BUFFERED = ("U239", "Np239", "Pu239")
 
 

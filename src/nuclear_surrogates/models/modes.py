@@ -9,7 +9,6 @@ from loguru import logger
 
 from nuclear_surrogates.bundle import BUNDLE_DIRNAME, SPLIT_NAME, write_bundle
 from nuclear_surrogates.utils.paths import result_dir
-from nuclear_surrogates.utils.sql_lite_logger import SQLiteLogger
 
 # ── Shared helpers ───────────────────────────────────────────────────────────
 
@@ -43,7 +42,7 @@ def _build_callbacks(cfg, result_dir_path):
     return callbacks, checkpoint_cb
 
 
-def _build_trainer(cfg, callbacks, pl_logger, **extra_kwargs):
+def _build_trainer(cfg, callbacks, **extra_kwargs):
     # Only meaningful with dataloader workers: shipping tensors between
     # processes exhausts the default file-descriptor sharing on Linux. With
     # num_workers=0 there are no worker processes to share with.
@@ -55,7 +54,9 @@ def _build_trainer(cfg, callbacks, pl_logger, **extra_kwargs):
         accelerator=cfg.runtime.device,
         devices="auto",
         callbacks=callbacks,
-        logger=pl_logger,
+        # A run's record is its bundle and its `test_metrics.json`, both written
+        # to the result directory. There is no experiment tracker to log to.
+        logger=False,
         gradient_clip_val=cfg.train.grad_clip,
         gradient_clip_algorithm="norm",
         **extra_kwargs,
@@ -65,25 +66,15 @@ def _build_trainer(cfg, callbacks, pl_logger, **extra_kwargs):
 # ── Checkpoint utilities ─────────────────────────────────────────────────────
 
 
-def _fix_state_dict_keys(model_keys, ckpt_keys, state_dict):
-    """Reconcile a 'model.' prefix mismatch between model and checkpoint."""
-    if model_keys == ckpt_keys:
-        return state_dict
-
-    model_has_prefix = any(k.startswith("model.") for k in model_keys)
-    ckpt_has_prefix = any(k.startswith("model.") for k in ckpt_keys)
-
-    if model_has_prefix and not ckpt_has_prefix:
-        return {f"model.{k}": v for k, v in state_dict.items()}
-    if ckpt_has_prefix and not model_has_prefix:
-        return {k.replace("model.", "", 1): v for k, v in state_dict.items()}
-
-    # Keys differ for another reason — return as-is and let strict loading surface the error.
-    return state_dict
-
-
 def load_checkpoint_into_model(model, ckpt_path):
-    """Load a checkpoint into *model*, fixing a leading 'model.' prefix if needed."""
+    """Load a checkpoint into *model*.
+
+    Strict, and it can afford to be: every checkpoint now arrives inside a
+    bundle written by the same model class, so the keys match by construction —
+    `func.*` for a NODE, `model.*` for a DNN. A mismatch means the config no
+    longer describes the architecture the weights came from, which is exactly
+    the thing that should fail loudly rather than be patched up.
+    """
     checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     state_dict = (
         checkpoint.get("state_dict", checkpoint)
@@ -91,31 +82,20 @@ def load_checkpoint_into_model(model, ckpt_path):
         else checkpoint
     )
 
-    formatted_state_dict = _fix_state_dict_keys(
-        set(model.state_dict().keys()),
-        set(state_dict.keys()),
-        state_dict,
-    )
-
-    model.load_state_dict(formatted_state_dict, strict=True)
+    model.load_state_dict(state_dict, strict=True)
     return model
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
 
-def train_and_test(datamodule, model_class, cfg):
+def train(datamodule, model_class, cfg):
     """Instantiate a model, train it, and test using the best checkpoint."""
     result_dir_path = result_dir(cfg)
     callbacks, checkpoint_cb = _build_callbacks(cfg, result_dir_path)
 
-    pl_logger = SQLiteLogger(
-        db_path=cfg.runtime.model_database,
-        name=cfg.model.name,
-    )
-
     model = model_class(config_object=cfg)
-    trainer = _build_trainer(cfg, callbacks, pl_logger)
+    trainer = _build_trainer(cfg, callbacks)
 
     trainer.fit(model=model, datamodule=datamodule)
 
@@ -129,9 +109,11 @@ def train_and_test(datamodule, model_class, cfg):
     best_path = checkpoint_cb.best_model_path
     logger.info(f"Best model saved at: {best_path}")
 
-    bundle = _write_run_bundle(datamodule, cfg, result_dir_path, best_path, val_metrics)
-    pl_logger.set_bundle_path(bundle)
+    _write_run_bundle(datamodule, cfg, result_dir_path, best_path, val_metrics)
 
+    # After the bundle, not before: the test metrics do not exist yet, which is
+    # why the model writes them to `test_metrics.json` itself rather than the
+    # bundle carrying them.
     trainer.test(model=model, datamodule=datamodule, ckpt_path=best_path)
     return val_metrics
 
@@ -139,11 +121,8 @@ def train_and_test(datamodule, model_class, cfg):
 def _write_run_bundle(datamodule, cfg, result_dir_path, ckpt_path, metrics=None):
     """Package weights + fitted scalers + provenance beside the run's outputs.
 
-    This is the run's record: the experiment database stores results and a
-    pointer here rather than its own copy of the config.
-
-    Best-effort — a bundle failure must not throw away a finished training run,
-    so it returns None and the caller logs that the run has no record.
+    This is the run's record. Best-effort — a bundle failure must not throw away
+    a finished training run, so it returns None rather than raising.
     """
     preprocessor = getattr(datamodule, "preprocessor", None)
     if preprocessor is None:
@@ -163,46 +142,44 @@ def _write_run_bundle(datamodule, cfg, result_dir_path, ckpt_path, metrics=None)
         return None
 
 
-def train_from_checkpoint_and_test(datamodule, model_class, cfg):
-    """Resume training from a checkpoint, then test using the best checkpoint."""
+def finetune(datamodule, model_class, cfg, bundle):
+    """Warm-start a new training run from a bundle's weights.
+
+    Only the weights are restored. The optimizer, the LR scheduler and the
+    epoch counter all start fresh, so this is a fine-tune rather than a resume
+    — a run started here will not reproduce the tail of the run it came from.
+    """
     result_dir_path = result_dir(cfg)
     callbacks, checkpoint_cb = _build_callbacks(cfg, result_dir_path)
 
-    pl_logger = SQLiteLogger(
-        db_path=cfg.runtime.model_database,
-        name=cfg.model.name,
-    )
-
-    logger.info(f"Loading model from checkpoint: {cfg.runtime.ckp_path}")
+    logger.info(f"Loading weights from bundle: {bundle.path}")
 
     model = model_class(cfg)
     datamodule.setup(stage="fit")
-    model = load_checkpoint_into_model(model, cfg.runtime.ckp_path)
+    model = load_checkpoint_into_model(model, bundle.weights)
 
-    logger.info("Successfully loaded checkpoint — starting training")
+    logger.info("Weights loaded — starting training with a fresh optimizer")
 
-    trainer = _build_trainer(cfg, callbacks, pl_logger)
+    trainer = _build_trainer(cfg, callbacks)
     trainer.fit(model=model, datamodule=datamodule)
 
     best_path = checkpoint_cb.best_model_path
     logger.info(f"Best model saved at: {best_path}")
 
-    bundle = _write_run_bundle(datamodule, cfg, result_dir_path, best_path)
-    pl_logger.set_bundle_path(bundle)
+    _write_run_bundle(datamodule, cfg, result_dir_path, best_path)
 
     trainer.test(model=model, datamodule=datamodule, ckpt_path=best_path)
 
 
-def inference(datamodule, model_class, cfg):
-    """Evaluate a frozen checkpoint on `dataset.path_to_inference_data`.
+def infer(datamodule, model_class, cfg, bundle):
+    """Evaluate a frozen bundle on `dataset.path_to_inference_data`.
 
-    The scalers come from `dataset.preprocessor_path`; the training dataset is
-    never opened.
+    The scalers come from the bundle; the training dataset is never opened.
     """
-    logger.info(f"Inference mode — loading checkpoint: {cfg.runtime.ckp_path}")
+    logger.info(f"Inference from bundle: {bundle.path}")
 
     model = model_class(cfg)
-    model = load_checkpoint_into_model(model, cfg.runtime.ckp_path)
+    model = load_checkpoint_into_model(model, bundle.weights)
 
     datamodule.inference_mode = True
 
@@ -215,28 +192,27 @@ def inference(datamodule, model_class, cfg):
     trainer.test(model=model, datamodule=datamodule)
 
 
-def _verify_split_matches_bundle(datamodule, cfg):
+def _verify_split_matches_bundle(datamodule, bundle):
     """Check the reproduced split against the one the bundle recorded.
 
-    `regenerate_plots` rebuilds the split from `runtime.seed` and
-    `dataset.split` rather than replaying indices, so the figures it produces
-    are only the original run's if that rebuild lands on the same runs. A
-    different dataset, a different `fraction_of_data`, or a change to the
-    splitting code all move it, and every one of them would otherwise produce
-    plausible-looking figures labelled as the published run's.
+    `plots` rebuilds the split from `runtime.seed` and `dataset.split` rather
+    than replaying indices, so the figures it produces are only the original
+    run's if that rebuild lands on the same runs. A different dataset, a
+    different `fraction_of_data`, or a change to the splitting code all move
+    it, and every one of them would otherwise produce plausible-looking figures
+    labelled as the published run's.
 
     So it is checked, not assumed. `split_indices.json` is the recorded truth.
     """
-    bundle_path = cfg.runtime.get("bundle_path")
     reproduced = getattr(datamodule, "split_info", None)
-    if not bundle_path or reproduced is None:
+    if reproduced is None:
         logger.warning(
-            "No bundle_path in the config — cannot verify the split against "
+            "The datamodule recorded no split — cannot verify it against "
             "split_indices.json. These figures may not be the original run's."
         )
         return
 
-    split_file = os.path.join(bundle_path, SPLIT_NAME)
+    split_file = os.path.join(bundle.path, SPLIT_NAME)
     if not os.path.isfile(split_file):
         logger.warning(
             f"{split_file} is missing — the bundle predates split recording, "
@@ -255,14 +231,13 @@ def _verify_split_matches_bundle(datamodule, cfg):
                 f"recorded, {len(reproduced.get(key, []))} reproduced).\n\n"
                 f"These figures would not be the run the bundle describes. "
                 f"Check that --data is the dataset it was trained on "
-                f"(metadata.json records its sha256), and that "
-                f"dataset.fraction_of_data and runtime.seed still match "
-                f"config.resolved.yaml."
+                f"(metadata.json records its sha256), and that --seed and "
+                f"dataset.fraction_of_data still match config.resolved.yaml."
             )
     logger.info("Reproduced split matches the bundle's split_indices.json")
 
 
-def regenerate_plots(datamodule, model_class, cfg):
+def plots(datamodule, model_class, cfg, bundle):
     """Redraw a finished run's figures from its bundle, changing no numbers.
 
     Rebuilds the original train/val/test split over `dataset.path_to_data`,
@@ -271,27 +246,26 @@ def regenerate_plots(datamodule, model_class, cfg):
     and the same scalers the published figures came from. Nothing is trained
     and no checkpoint is written.
 
-    Unlike `inference`, this needs the training dataset: the split is recorded
-    as indices into that file, and the test portion is a share of it rather
-    than a separate file.
+    Unlike `infer`, this needs the training dataset: the split is recorded as
+    indices into that file, and the test portion is a share of it rather than a
+    separate file.
     """
-    logger.info(f"Regenerating plots from checkpoint: {cfg.runtime.ckp_path}")
+    logger.info(f"Regenerating plots from bundle: {bundle.path}")
 
     dataset = cfg.dataset.get("path_to_data")
     if not dataset or not os.path.isfile(dataset):
         raise SystemExit(
-            f"regenerate_plots needs the dataset the run was trained on, to "
-            f"carve out the same test split; dataset.path_to_data is "
-            f"{dataset!r}.\n\nPass --data <the training HDF5>."
+            f"`nucml plots` needs the dataset the run was trained on, to carve "
+            f"out the same test split; --data is {dataset!r}."
         )
 
     # stage="fit" is the split-building path — the test split it produces is
     # the run's own, not a fresh one.
     datamodule.setup(stage="fit")
-    _verify_split_matches_bundle(datamodule, cfg)
+    _verify_split_matches_bundle(datamodule, bundle)
 
     model = model_class(cfg)
-    model = load_checkpoint_into_model(model, cfg.runtime.ckp_path)
+    model = load_checkpoint_into_model(model, bundle.weights)
 
     trainer = L.Trainer(
         accelerator=cfg.runtime.device,

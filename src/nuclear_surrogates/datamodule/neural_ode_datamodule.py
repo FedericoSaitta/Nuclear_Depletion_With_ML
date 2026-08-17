@@ -19,7 +19,7 @@ from nuclear_surrogates.utils.paths import result_dir
 # The nominal training span recorded in a bundle's `t_days`. Historically
 # hardcoded at 1000 while the data actually spans 990 days; it is kept at 1000
 # so existing bundles and the depletion-matrix figure's unit conversion are
-# unchanged (AUDIT.md P1). It is NOT the number the time axis is normalised by
+# unchanged. It is NOT the number the time axis is normalised by
 # — see `_training_time_unit`.
 DEFAULT_TRAINING_T_DAYS = 1000.0
 
@@ -58,9 +58,9 @@ def _training_time_unit(preprocessor) -> float:
     Inference used to divide by `t_days` instead, which is the nominal 1000, so
     the same 990-day grid came out as [0, 0.99]: every step was integrated over
     a 1 % shorter interval than the model was trained on, and a frozen
-    checkpoint did not reproduce its own training-mode trajectories. That was
-    AUDIT.md P14. Bundles written before `t_days_data_span` existed fall back to
-    `t_days` and keep their old behaviour.
+    checkpoint did not reproduce its own training-mode trajectories. Bundles
+    written before `t_days_data_span` existed fall back to `t_days` and keep
+    their old behaviour.
     """
     span = getattr(preprocessor, "t_days_data_span", None)
     if span is None:
@@ -253,9 +253,9 @@ class NODE_Datamodule(L.LightningDataModule):
         )
 
         # Fitted on the training split only — no leakage from val/test. The
-        # load branch is `regenerate_plots` replaying a finished run against
-        # the scalers that run was trained with, rather than a fresh fit that
-        # would only coincidentally agree with them.
+        # load branch is `nucml plots` replaying a finished run against the
+        # scalers that run was trained with, rather than a fresh fit that would
+        # only coincidentally agree with them.
         train_input_raw, train_target_raw = splits["train"]
         if self.preprocessor_path:
             logger.info("Loading fitted scalers from the bundle rather than fitting")

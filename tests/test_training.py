@@ -13,9 +13,9 @@ Two tiers, deliberately separated:
   contract test cannot see, but is only reproducible on a fixed runner image, so
   CI runs it in its own Linux-only job.
 
-`trainer.fit` is driven directly rather than through `modes.train_and_test`,
-which chains an expensive `trainer.test` (Jacobians, permutation importance,
-dozens of figures) that these tests do not need.
+`trainer.fit` is driven directly rather than through `modes.train`, which chains
+an expensive `trainer.test` (Jacobians, permutation importance, dozens of
+figures) that these tests do not need.
 """
 
 import json
@@ -31,21 +31,29 @@ CONFIGS = {
     "DNN": os.path.join(REPO, "configs", "smoke_dnn.yaml"),
     "NODE": os.path.join(REPO, "configs", "smoke_node.yaml"),
 }
+MINI_H5 = os.path.join(REPO, "tests", "fixtures", "mini_casl_10runs.h5")
 GOLDEN_TRAIN = os.path.join(REPO, "tests", "fixtures", "golden_train.json")
 
 
 def load_cfg(kind, tmp_path, **overrides):
-    """Smoke config, redirected so a test writes nothing outside tmp_path."""
-    from nuclear_surrogates.utils.paths import resolve_config_paths
+    """A smoke config plus the runtime block `main.py` would synthesise.
 
-    path = CONFIGS[kind]
-    cfg = OmegaConf.load(path)
-    resolve_config_paths(cfg, path)
-    cfg.runtime.output_dir = str(tmp_path / "results")
-    cfg.runtime.model_database = str(tmp_path / "experiments.db")
-    cfg.runtime.device = "cpu"
-    cfg.runtime.num_workers = 0
-    cfg.runtime.plots = False
+    Configs carry no paths and no `runtime` section any more, so what the CLI
+    would build from its flags is built here instead — redirected into tmp_path
+    so a test writes nothing outside it.
+
+    `seed: 0` is what the smoke configs used to declare, and
+    `fixtures/golden_train.json` pins a loss trajectory produced at it.
+    """
+    cfg = OmegaConf.load(CONFIGS[kind])
+    cfg.dataset.path_to_data = MINI_H5
+    cfg.runtime = {
+        "output_dir": str(tmp_path / "results"),
+        "device": "cpu",
+        "num_workers": 0,
+        "plots": False,
+        "seed": 0,
+    }
     for key, value in overrides.items():
         OmegaConf.update(cfg, key, value)
     return cfg
@@ -58,7 +66,7 @@ def build(cfg):
     from nuclear_surrogates.main import MODELS
 
     L.seed_everything(cfg.runtime.seed, workers=True)
-    model_cls, dm_cls = MODELS[cfg.runtime.model]
+    model_cls, dm_cls = MODELS[cfg.model.kind]
     return model_cls(cfg), dm_cls(cfg)
 
 
@@ -337,15 +345,14 @@ def test_inference_from_a_bundle_never_opens_the_training_file(kind, tmp_path):
     trainer.save_checkpoint(ckpt)
     bundle = modes._write_run_bundle(dm, cfg, modes.result_dir(cfg), str(ckpt))
 
-    inference_cfg, metadata = read_bundle(
-        bundle,
-        inference_data=cfg.dataset.path_to_data,
-        output_dir=str(tmp_path / "served"),
-    )
-    assert metadata["model_kind"] == kind
-    assert inference_cfg.runtime.mode == "inference"
+    inference_cfg, loaded = read_bundle(bundle)
+    inference_cfg.dataset.path_to_inference_data = cfg.dataset.path_to_data
+    inference_cfg.runtime = {**cfg.runtime, "output_dir": str(tmp_path / "served")}
+
+    assert loaded.metadata["model_kind"] == kind
     assert not inference_cfg.dataset.path_to_data, "training path must be cleared"
-    assert os.path.dirname(inference_cfg.runtime.ckp_path) == os.path.abspath(bundle)
+    assert loaded.weights.parent == loaded.path
+    assert str(loaded.path) == os.path.abspath(bundle)
 
     opened = []
     real_read = data_help.read_data
@@ -374,11 +381,11 @@ def test_inference_from_a_bundle_never_opens_the_training_file(kind, tmp_path):
     assert len(served.train_dataset) == 0, "inference must not build a train split"
 
 
-# ── regenerate_plots ─────────────────────────────────────────────────────────
+# ── plots ────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize("kind", ["DNN", "NODE"])
-def test_regenerate_plots_replays_the_runs_own_test_split(kind, tmp_path):
+def test_plots_replays_the_runs_own_test_split(kind, tmp_path):
     """Redrawing a finished run's figures must use that run's own test runs.
 
     The split is rebuilt from the seed rather than replayed from the recorded
@@ -399,14 +406,13 @@ def test_regenerate_plots_replays_the_runs_own_test_split(kind, tmp_path):
     trainer.save_checkpoint(ckpt)
     bundle = modes._write_run_bundle(dm, cfg, modes.result_dir(cfg), str(ckpt))
 
-    replay_cfg, _ = read_bundle(
-        bundle,
-        mode="regenerate_plots",
-        training_data=cfg.dataset.path_to_data,
-        output_dir=str(tmp_path / "redrawn"),
-    )
-    assert replay_cfg.runtime.mode == "regenerate_plots"
-    assert replay_cfg.runtime.bundle_path == os.path.abspath(bundle)
+    replay_cfg, loaded = read_bundle(bundle)
+    replay_cfg.dataset.path_to_data = cfg.dataset.path_to_data
+    replay_cfg.runtime = {**cfg.runtime, "output_dir": str(tmp_path / "redrawn")}
+
+    # The seed is the one runtime value a bundle carries forward, because the
+    # split this test checks is a function of it.
+    assert loaded.seed == cfg.runtime.seed
 
     _, dm_cls = MODELS[kind]
     replayed = dm_cls(replay_cfg)
@@ -420,12 +426,15 @@ def test_regenerate_plots_replays_the_runs_own_test_split(kind, tmp_path):
         ), f"{key} split drifted from the bundle's record"
 
     # And the replay must use the run's scalers, not a fresh fit of its own.
-    modes._verify_split_matches_bundle(replayed, replay_cfg)
+    modes._verify_split_matches_bundle(replayed, loaded)
     assert replayed.preprocessor.to_dict() == dm.preprocessor.to_dict()
 
 
-def test_regenerate_plots_refuses_a_split_that_does_not_match(tmp_path):
+def test_plots_refuses_a_split_that_does_not_match(tmp_path):
     """A mismatch means these are not the published run's runs. Fail, don't draw."""
+    from pathlib import Path
+
+    from nuclear_surrogates.bundle import Bundle
     from nuclear_surrogates.models import modes
 
     cfg = load_cfg("NODE", tmp_path, **{"train.num_epochs": 1})
@@ -433,20 +442,22 @@ def test_regenerate_plots_refuses_a_split_that_does_not_match(tmp_path):
     dm.setup(stage="fit")
     bundle = modes._write_run_bundle(dm, cfg, modes.result_dir(cfg), ckpt_path=None)
 
-    cfg.runtime.bundle_path = bundle
+    # Built directly rather than via read_bundle: this run wrote no weights, and
+    # only the directory matters for locating split_indices.json.
+    loaded = Bundle(Path(bundle), None, None, {}, cfg.runtime.seed)
     dm.split_info = {**dm.split_info, "test": [999]}
     with pytest.raises(SystemExit, match="split_indices.json"):
-        modes._verify_split_matches_bundle(dm, cfg)
+        modes._verify_split_matches_bundle(dm, loaded)
 
 
-def test_regenerate_plots_needs_the_training_dataset(tmp_path):
+def test_plots_needs_the_training_dataset(tmp_path):
     """It carves the test split out of the training file, so it cannot run
-    without it — unlike inference, which needs only the bundle."""
-    from nuclear_surrogates.main import _build_parser, build_config
+    without it — unlike `infer`, which needs only the bundle."""
+    from nuclear_surrogates.main import _build_parser
 
-    args = _build_parser().parse_args(["--bundle", str(tmp_path), "--regenerate-plots"])
+    parser = _build_parser()
     with pytest.raises(SystemExit):
-        build_config(args)
+        parser.parse_args(["plots", "--bundle", str(tmp_path)])
 
 
 # ── evaluation epoch ─────────────────────────────────────────────────────────

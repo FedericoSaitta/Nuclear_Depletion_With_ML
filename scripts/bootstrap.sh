@@ -2,7 +2,7 @@
 # One-time setup on the cluster. Idempotent; safe to re-run.
 #
 # Deliberately does NOT use `module load python/...` or conda: uv provisions
-# CPython 3.12 itself from .python-version. The only site
+# CPython 3.12 itself from pyproject.toml's `requires-python`. The only site
 # modules needed are the compilers/HDF5 for the OpenMC build.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -12,7 +12,7 @@ if ! command -v uv >/dev/null 2>&1; then
   curl -LsSf https://astral.sh/uv/install.sh | sh
   export PATH="$HOME/.local/bin:$PATH"
 fi
-uv python install            # honours .python-version → CPython 3.12
+uv python install            # honours requires-python → CPython 3.12
 
 # --- ML environment --------------------------------------------------------
 echo ">>> .venv        (ML: torch + lightning)"
@@ -32,6 +32,6 @@ fi
 cat <<'EOF'
 
 Ready.
-  training : uv run nucml --config configs/main_config.yaml
+  training : uv run nucml train --config configs/node.yaml --data datasets/<file>.h5
   datagen  : UV_PROJECT_ENVIRONMENT=.venv-sim uv run python data_generation/datagen.py -n 4 -c 16
 EOF

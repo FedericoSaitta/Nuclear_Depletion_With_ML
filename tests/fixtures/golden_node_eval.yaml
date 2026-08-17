@@ -8,17 +8,17 @@
 #
 # It lives beside the fixtures it pins, rather than in `configs/`, because it
 # is test infrastructure — not a configuration anyone should run. Keeping it
-# here also leaves `configs/main_config.yaml` free to edit for real runs
-# without silently breaking the regression anchor.
+# here also leaves `configs/node.yaml` free to edit for real runs without
+# silently breaking the regression anchor.
 #
 # Note the solver is rtol 1e-6 / atol 1e-8, which is what the fixtures were made
-# with. The checkpoint was *trained* at 1e-5 / 1e-7 — see AUDIT.md P4.
-# Reconciling the two means regenerating the fixtures.
+# with. The checkpoint was *trained* at 1e-5 / 1e-7. Reconciling the two means
+# regenerating the fixtures.
 #
-# Paths are resolved relative to THIS FILE, not to the working directory.
+# It carries no paths and no runtime block: `golden_setup.build_inference_cfg`
+# supplies every one of those absolutely, which is why this file survived the
+# move to a path-free config schema without the goldens moving with it.
 dataset:
-  path_to_data: ../../datasets/casl_3305_runs_inter.h5   # training data (fits the scalers)
-  path_to_inference_data: ../../datasets/casl_3305_runs_inter.h5
   fraction_of_data: 0.1
 
   inputs:
@@ -39,6 +39,7 @@ dataset:
     batch_size: 128
 
 model:
+  kind: NODE
   name: NODE_FIXED_IMPORTANCE
   matrix_ode: true
   layers: [128, 128]
@@ -75,20 +76,3 @@ train:
   rtol: 1e-6
   atol: 1e-8
   step_size: 0.01
-
-runtime:
-  mode: train
-  model: NODE
-  # Checkpoint to load for mode: train_from_ckp / inference. Resolved like the
-  # dataset paths above, so a relative value is taken from this file's directory.
-  ckp_path: ""
-  device: cuda
-  # Seeds weight init, the DataLoader shuffle and the train/val/test split.
-  # The chosen split is written to <output_dir>/<model.name>/split_indices.json.
-  seed: 42
-  num_workers: 12
-
-  # Both resolved relative to this file, so output lands in the same place no
-  # matter which directory the run was launched from.
-  output_dir: ../../results
-  model_database: ../../Chain_Model.db

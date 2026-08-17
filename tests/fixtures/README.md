@@ -44,20 +44,21 @@ not a reproduction of the original training run.
 Note `preprocessor.json` records `t_days: 1000.0` alongside
 `t_days_data_span: 990.0`. The data really spans 990 days; 1000 is the constant
 the published runs used. Both travel so the discrepancy is visible — correcting
-what consumes it is `AUDIT.md` P1 and has not been done.
+what consumes it would move a published figure and has not been done
+(`docs/training_pipeline.md` §8).
 
 ## Why the config lives here
 
 These fixtures pin the output of a *specific* configuration, so the config is
-part of the fixture. It used to be `configs/main_config.yaml`, which is a
+part of the fixture. It used to be a config under `configs/`, which is a
 working file — the moment its solver tolerances were loosened from
 `rtol 1e-6 / atol 1e-8` to `1e-5 / 1e-7`, dopri5 took different steps and five
 of the nine golden tests failed on trajectories differing by ~2%. Nothing was
 wrong with the code; the anchor had simply moved.
 
 Note the tolerance recorded here is what the fixtures were *generated* with. The
-checkpoint was *trained* at `1e-5 / 1e-7` — see `AUDIT.md` P4. Reconciling the
-two means regenerating.
+checkpoint was *trained* at `1e-5 / 1e-7`. Reconciling the two means
+regenerating.
 
 ## Regenerating
 
@@ -90,11 +91,11 @@ consciously and record it. Never loosen one silently to clear a red build.
 
 - The DNN. Its paper checkpoint is at
   `results/legacy_ML/Best_Chain_Result/best-Best_Chain_Result-epoch=176.ckpt`
-  (236 KB) and its config is `configs/BEST_7_Isotope_DNN.yaml`; the DNN test path
-  uses a deterministic sequential split, so it would need no extra fixtures
-  beyond the checkpoint.
+  (236 KB) and its config is `configs/dnn.yaml`; the DNN test path uses a
+  deterministic sequential split, so it would need no extra fixtures beyond the
+  checkpoint.
 - The scaled→physical depletion-matrix conversion (`_get_unscaling_matrix`).
   `golden_matrix_A.npy` pins the matrix the network builds, not the unit
   conversion applied before it is plotted — and that conversion has known issues
-  (`AUDIT.md` P1-P2).
+  (`docs/training_pipeline.md` §8).
 - Jacobian sensitivity and stepwise importance.

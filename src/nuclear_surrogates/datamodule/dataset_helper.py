@@ -85,7 +85,8 @@ def read_data(file_path, fraction_of_data, drop_run_label=True, columns=None):
     if drop_run_label and "run_label" in df.columns:
         df = df.drop("run_label")
 
-    check_duplicates(df)
+    if df.is_duplicated().any():
+        logger.warning("DataFrame contains duplicate rows.")
 
     run_length = detect_run_length(df)
     logger.info(f"Detected run length: {run_length}")
@@ -101,15 +102,6 @@ def read_data(file_path, fraction_of_data, drop_run_label=True, columns=None):
 
 
 # ── DataFrame inspection / cleaning ──────────────────────────────────────────
-
-
-def check_duplicates(df):
-    has_dupes = df.is_duplicated().any()
-    if has_dupes:
-        logger.warning("DataFrame contains duplicate rows.")
-    else:
-        logger.info("No duplicate rows found.")
-    return has_dupes
 
 
 def remove_empty_columns(df):

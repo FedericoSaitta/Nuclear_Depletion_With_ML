@@ -149,10 +149,9 @@ extend-select = ["I", "UP", "B", "SIM", "C4", "RET"]
 "data_generation/quarter_datagen.py" = ["E402"]
 "data_generation/zoom_datagen.py" = ["E402"]
 
-# Same shape of problem on the ML side: both entry points must silence
+# Same shape of problem on the ML side: the entry point must silence
 # import-time warnings *before* `import lightning`, which is what triggers them.
 "src/nuclear_surrogates/main.py" = ["E402"]
-"src/nuclear_surrogates/packaging.py" = ["E402"]
 
 # The OpenMC half is held to the default rule set only. It cannot be imported —
 # let alone exercised — from the ML environment, so a stylistic auto-fix there

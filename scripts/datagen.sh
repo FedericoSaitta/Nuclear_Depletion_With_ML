@@ -13,7 +13,7 @@
 
 module purge
 # No `module load python` and no conda: uv provisions CPython 3.12 from
-# .python-version, and .venv-sim carries the locked dependency set.
+# pyproject.toml's `requires-python`, and .venv-sim carries the locked set.
 export PATH="$HOME/.local/bin:$PATH"
 export UV_PROJECT_ENVIRONMENT="$SLURM_SUBMIT_DIR/.venv-sim"
 cd "$SLURM_SUBMIT_DIR"

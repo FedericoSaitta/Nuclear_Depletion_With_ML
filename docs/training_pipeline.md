@@ -52,9 +52,12 @@ Both models go through the same path (`datamodule/dataset_helper.py`):
    The fitted state is persisted as a `Preprocessor` (`preprocessor.json`) so a
    checkpoint can be served without the training file.
 
-The two models split differently, which is a known wart (`AUDIT.md` P5):
+The two models split differently, which is a known wart (see §8). The
+splits below are each model's default when `dataset.split` is absent; the
+scalers are the ones `configs/dnn.yaml` and `configs/node.yaml` set, not a
+property of either model:
 
-| | split | strategy | scalers |
+| | split | strategy | scalers (as shipped) |
 |---|---|---|---|
 | DNN | 80 / 10 / 10 | sequential by run | per-column mix (quantile, robust, standard, MinMax) |
 | NODE | 60 / 20 / 20 | random by run, seeded | MinMax throughout |
@@ -219,7 +222,7 @@ A frequent source of confusion, worth stating plainly:
 
 `metrics.mare` is `mean|error| / max|truth|` — normalised by a single global
 maximum, not per sample. Despite the name it is not mean absolute *relative*
-error (`AUDIT.md` P7).
+error (see §8).
 
 ---
 
@@ -353,11 +356,13 @@ different questions, and both belong in a write-up:
 
 ## 7. What a run leaves behind
 
-`results/<model.name>/` after `nucml --config ...`:
+`<--out>/<model.name>/` after `nucml train --config ... --data ...`
+(`--out` defaults to `results/`):
 
 ```
 best-<name>-epoch=NN.ckpt        best-validation-loss checkpoint
 model-bundle/                    the run's record — see below
+test_metrics.json                per-isotope MAE / RMSE / R² / MARE, averaged too
 <target>/                        per-isotope figures, one directory each
   predictions_vs_actual.png      scatter against truth
   residuals_combined*.png        residual structure, linear and log-log
@@ -384,23 +389,26 @@ model-bundle/
 └── metadata.json             git SHA, seed, dataset SHA-256, library versions
 ```
 
-A row in `Chain_Model.db` records the run's identity and results and points at
-this directory via `bundle_path`; the configuration itself is read from
-`config.resolved.yaml` rather than duplicated into columns.
+`metadata.json` records the *validation* metrics, because the bundle is written
+before `trainer.test` runs. The test metrics — the per-isotope MAE, RMSE, R² and
+the TF/AR MARE pair — land in `test_metrics.json` beside the figures instead.
 
-To run the model again, point `nucml` at the directory:
+To run the model again, point one of the three bundle verbs at the directory:
 
 ```bash
-uv run nucml --bundle results/<model_name>/model-bundle \
-             --data   datasets/new_runs.h5 \
-             --out    predictions/
+uv run nucml infer --bundle results/<model_name>/model-bundle \
+                   --data   datasets/new_runs.h5 \
+                   --out    predictions/
 ```
 
-To redraw this run's own figures instead of evaluating new data, add
-`--regenerate-plots` and pass the dataset it was trained on. That rebuilds the
-run's train/val/test split, keeps only the test share, and replays it with the
-bundle's weights and scalers — the same runs the published figures came from,
-verified against `split_indices.json` before anything is drawn.
+To redraw this run's own figures instead of evaluating new data, use `plots` and
+pass the dataset it was trained on. That rebuilds the run's train/val/test
+split, keeps only the test share, and replays it with the bundle's weights and
+scalers — the same runs the published figures came from, verified against
+`split_indices.json` before anything is drawn.
+
+To keep training from these weights, `finetune` warm-starts a fresh run from
+them: weights only, so the optimizer and LR schedule restart.
 
 `read_bundle` repoints the bundle's config at the bundle's own weights and
 scalers and clears `dataset.path_to_data`, so the run cannot fall back on a
@@ -413,13 +421,25 @@ is why `config.resolved.yaml` is in the bundle rather than assumed.
 
 ## 8. Known caveats
 
-Recorded in full in `AUDIT.md`; the ones that bear on reading these results:
+These bear directly on how the results above should be read. None is fixed,
+because fixing any of them moves a published number.
 
-- **P5** — the DNN and NODE use different split protocols and different amounts
-  of data, so their headline numbers are not a like-for-like comparison.
-- **P6** — every number is a single training run on a single split; there is no
-  spread.
-- **P7** — `mare` is normalised by a global maximum, not per sample.
-- **P1/P2** — the depletion-matrix figure's conversion to physical units carries
-  a 1% time-span bias and drops the MinMax offset, which makes the U238 column
-  uninterpretable as a rate.
+- **The DNN/NODE comparison is not level.** They use different split protocols
+  (sequential in time vs a seeded permutation of whole runs) and different
+  amounts of data, so their headline numbers are not like-for-like.
+- **No spread on any number.** Every result is a single training run on a single
+  split. There are no repeats and no error bars on the model comparison.
+- **`mare` is misnamed.** It is `mean|error| / max|truth|` — normalised by one
+  global maximum, not per sample — so it is not mean absolute *relative* error.
+  Published numbers depend on the current definition, so it must not drift.
+- **The depletion-matrix figure's unit conversion is approximate.** It hardcodes
+  a 1000-day span against 990 days of data (a 1% bias) and drops the MinMax
+  offset, which leaves the U238 column uninterpretable as a rate. The matrix the
+  network builds is unaffected; only the conversion applied before plotting is.
+- **The solver tolerance is below what the arithmetic delivers.** States are
+  float32 (eps ≈ 1.2e-7), so the `atol` the goldens were generated at asks for
+  more precision than the representation carries.
+- **Fast-decay chain entries are unidentifiable at 10-day sampling.** U239 and
+  Np239 are at equilibrium at every sampled point, so their concentrations are
+  slaved to the local capture rate rather than to the trajectory's history.
+  `tests/test_golden_eval.py` states this as an assertion rather than prose.

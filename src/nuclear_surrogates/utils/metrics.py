@@ -4,7 +4,7 @@ The per-output metrics wrap scikit-learn rather than re-deriving the formulas;
 the wrappers exist to fix `multioutput="raw_values"` (every caller wants the
 per-target array) and to log loudly when a result contains NaN or Inf, which
 sklearn passes through silently. `mare` stays hand-rolled: it is this project's
-own (mis)named quantity — see its docstring and AUDIT.md P7.
+own (mis)named quantity — see its docstring.
 """
 
 import numpy as np
@@ -72,7 +72,7 @@ def mare(y_true, y_pred):
 
     Despite the name this is NOT mean absolute *relative* error: it divides by a
     single global maximum, not per-sample. Published numbers depend on it, so
-    the definition must not drift — see AUDIT.md.
+    the definition must not drift — see `docs/training_pipeline.md` §8.
     """
     y_true, y_pred = np.asarray(y_true), np.asarray(y_pred)
     max_abs = np.max(np.abs(y_true))

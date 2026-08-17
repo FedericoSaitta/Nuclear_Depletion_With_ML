@@ -76,16 +76,28 @@ def build_inference_cfg(preprocessor_path=PREPROCESSOR, output_dir=None):
     The fitted scalers are loaded from *preprocessor_path* and the training
     file is never opened — there is no other way to run inference, by design.
     `make_golden.freeze_preprocessor` is what produces that file.
-    """
-    from nuclear_surrogates.utils.paths import resolve_config_paths
 
+    Every path is set here, absolute. The frozen fixture config is never asked
+    to supply one, which is why it survives untouched across the move to a
+    path-free config schema — and why the goldens it pins cannot move with it.
+    """
     cfg = OmegaConf.load(CONFIG)
-    resolve_config_paths(cfg, CONFIG)
-    cfg.runtime.update(mode="inference", device="cpu", num_workers=0, plots=False)
-    if output_dir is not None:
-        cfg.runtime.output_dir = str(output_dir)
+    # The frozen config carries no runtime block — a config describes a model.
+    # 42 is the seed the committed goldens were generated under; it reaches the
+    # NODE datamodule's run permutation, so it is load-bearing, not decoration.
+    cfg.runtime = {
+        "device": "cpu",
+        "num_workers": 0,
+        "plots": False,
+        "seed": 42,
+        "output_dir": str(output_dir) if output_dir is not None else "results",
+    }
     cfg.dataset.path_to_inference_data = MINI_H5
     cfg.dataset.preprocessor_path = preprocessor_path
+    # Empty, not absent: the datamodules read it by attribute even in inference
+    # mode, where nothing opens it. `read_bundle` blanks it the same way, so a
+    # bundle can never reopen the file it was trained on.
+    cfg.dataset.path_to_data = ""
     return cfg
 
 

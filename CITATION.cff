@@ -9,6 +9,7 @@ authors:
 
   - family-names: "Saitta"
     given-names: "Federico"
+    orcid: "https://orcid.org/0009-0001-6063-1184"
 
 contributors:
   - family-names: "Christie"
@@ -19,8 +20,8 @@ contributors:
 version: "0.1.0"
 date-released: "2026-08-15"
 
-repository-code: "https://github.com/FedericoSaitta/Nuclear_Depletion_With_ML"
-url: "https://github.com/FedericoSaitta/Nuclear_Depletion_With_ML.git"
+repository-code: "https://github.com/FedericoSaitta/Nuclear_Transport_With_ML"
+url: "https://github.com/FedericoSaitta/Nuclear_Transport_With_ML.git"
 
 keywords:
   - "nuclear depletion"

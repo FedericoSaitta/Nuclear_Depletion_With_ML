@@ -1,8 +1,8 @@
 """Shared test setup.
 
 Two jobs: keep OpenMC-dependent tests out of the ML environment, and keep the
-suite hermetic — a test run must not write into `results/`, must not append to
-the tracked `Chain_Model.db`, and must not need a display.
+suite hermetic — a test run must not write into `results/` and must not need a
+display.
 """
 
 import importlib.util
@@ -56,23 +56,3 @@ def frozen_node_run(tmp_path_factory):
     out = tmp_path_factory.mktemp("frozen_node_run")
     model, dm, preds, trues = run_inference(build_inference_cfg(output_dir=out))
     return model, dm, preds, trues
-
-
-@pytest.fixture
-def isolated_run(tmp_path):
-    """Redirect a run's outputs and experiment DB into tmp_path.
-
-    Apply to any cfg *before* constructing a model or datamodule: both create
-    their result directory in `__init__`, so setting these afterwards is too
-    late.
-    """
-
-    def apply(cfg):
-        cfg.runtime.output_dir = str(tmp_path / "results")
-        cfg.runtime.model_database = str(tmp_path / "experiments.db")
-        cfg.runtime.plots = False
-        cfg.runtime.device = "cpu"
-        cfg.runtime.num_workers = 0
-        return cfg
-
-    return apply

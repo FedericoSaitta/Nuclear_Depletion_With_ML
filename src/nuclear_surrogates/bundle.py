@@ -1,8 +1,9 @@
 """A model bundle: everything needed to reuse a trained model, in one directory.
 
-A training run writes it beside its own outputs, as
-`results/<model_name>/model-bundle/`; `nucml-package` writes one wherever
-`--out` points.
+A training run writes one beside its own outputs, as
+`<--out>/<model_name>/model-bundle/`. It is the only thing `nucml finetune`,
+`nucml infer` and `nucml plots` accept — there is deliberately no way to point
+them at a bare checkpoint.
 
     model-bundle/
     ├── weights.ckpt          Lightning checkpoint
@@ -20,6 +21,13 @@ served: both models build their architecture from the config, `load_state_dict`
 is strict, and for a NODE the solver and its tolerances are part of the model's
 definition rather than of its training. `config.resolved.yaml` is what closes
 that gap, which is why the bundle carries it and `read_bundle` reads it back.
+
+`config.resolved.yaml` records the run's `runtime` block — device, workers,
+seed, output directory — even though a hand-written config in `configs/` has no
+such section. That is the point of the word *resolved*: it is the machine's
+record of what actually ran, not a file anyone edits. `read_bundle` strips it
+back off, because the machine that reads a bundle is rarely the one that wrote
+it; only the seed survives, and only so `plots` can rebuild the same split.
 """
 
 from __future__ import annotations
@@ -32,13 +40,12 @@ import platform
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from loguru import logger
 from omegaconf import OmegaConf
-
-BUNDLE_VERSION = 1
 
 # Where a training run puts its bundle, relative to that run's result dir.
 BUNDLE_DIRNAME = "model-bundle"
@@ -55,6 +62,24 @@ METADATA_NAME = "metadata.json"
 # preprocessor means the wrong scalers, no config means no architecture to load
 # the weights into.
 REQUIRED_NAMES = (WEIGHTS_NAME, PREPROCESSOR_NAME, CONFIG_NAME)
+
+
+@dataclass(frozen=True)
+class Bundle:
+    """A bundle's contents, addressed by name rather than by config key.
+
+    This is what replaced `runtime.ckp_path`. A checkpoint path used to travel
+    inside the config, which meant every mode had to trust that some earlier
+    step had put the right one there — and that a user could set it to a
+    checkpoint whose scalers lived somewhere else entirely. Passing the bundle
+    itself makes the weights and the scalers arrive together or not at all.
+    """
+
+    path: Path
+    weights: Path
+    preprocessor: Path
+    metadata: dict
+    seed: int | None
 
 
 def _git(*args) -> str | None:
@@ -84,7 +109,7 @@ def _library_versions() -> dict:
 def _finite(metrics: dict) -> dict:
     """Replace non-finite metric values with None.
 
-    `train_and_test` defaults a metric the run never logged to +/-inf, and
+    `modes.train` defaults a metric the run never logged to +/-inf, and
     `json.dump` writes that as a bare `Infinity` — which Python reads back but
     `jq`, JS and Rust all reject. A metric that was never recorded is honestly
     null, so write it that way.
@@ -137,10 +162,9 @@ def write_bundle(
 
     dirty = _git("status", "--porcelain")
     metadata = {
-        "bundle_version": BUNDLE_VERSION,
         "created_utc": datetime.now(UTC).isoformat(),
         "model_name": cfg.model.get("name"),
-        "model_kind": cfg.runtime.get("model"),
+        "model_kind": cfg.model.get("kind"),
         "seed": cfg.runtime.get("seed"),
         "git_sha": _git("rev-parse", "HEAD"),
         "git_dirty": None if dirty is None else bool(dirty),
@@ -168,28 +192,18 @@ def write_bundle(
     return out_dir
 
 
-def read_bundle(
-    bundle_dir,
-    mode="inference",
-    inference_data=None,
-    training_data=None,
-    output_dir=None,
-    overrides=None,
-):
-    """Rebuild the config a bundle describes. Returns (cfg, metadata).
+def read_bundle(bundle_dir):
+    """Load a bundle. Returns `(cfg, Bundle)`.
 
-    A bundle is self-anchoring: the config it carries is rewritten to point at
-    the bundle's *own* weights and scalers, so a bundle copied off the cluster
-    stops referring to the cluster's filesystem. `dataset.path_to_data` is
-    cleared for the same reason — the training file is not part of a bundle,
-    and `inference` must never reopen it.
+    The config comes back describing the *model* only: the `runtime` block the
+    training machine recorded is dropped, and `dataset.path_to_data` is cleared
+    so `infer` has no way to reopen the training file even by accident. The
+    caller supplies a fresh runtime from the command line, and the file to work
+    on as `--data`.
 
-    *training_data* puts it back, for `regenerate_plots`, which replays a
-    finished run over its own recorded test split and therefore does need the
-    file that run was trained on.
-
-    The result is a plain config, so everything downstream (`MODES`, the
-    datamodules, dotlist overrides) works exactly as it does for `--config`.
+    `dataset.preprocessor_path` is the one path this does set, because the
+    datamodules read it directly and the whole point of a bundle is that the
+    scalers arrive with the weights.
     """
     bundle = Path(bundle_dir).resolve()
     if not bundle.is_dir():
@@ -200,7 +214,7 @@ def read_bundle(
         raise SystemExit(
             f"{bundle} is not a model bundle — missing {', '.join(missing)}.\n"
             f"A bundle is written by a training run to "
-            f"results/<model_name>/{BUNDLE_DIRNAME}/, or by nucml-package."
+            f"<--out>/<model_name>/{BUNDLE_DIRNAME}/."
         )
 
     metadata = {}
@@ -209,41 +223,28 @@ def read_bundle(
         with open(metadata_path) as f:
             metadata = json.load(f)
 
-    version = metadata.get("bundle_version", BUNDLE_VERSION)
-    if version > BUNDLE_VERSION:
-        raise SystemExit(
-            f"{bundle} is bundle_version {version}; this build reads up to "
-            f"{BUNDLE_VERSION}. Upgrade nuclear_surrogates to read it."
-        )
-
     cfg = OmegaConf.load(bundle / CONFIG_NAME)
 
-    # No resolve_config_paths here: config.resolved.yaml already holds absolute
-    # paths, and re-anchoring them at the bundle directory would corrupt them.
-    # Everything set below is absolute already.
-    cfg.runtime.mode = mode
-    cfg.runtime.ckp_path = str(bundle / WEIGHTS_NAME)
-    # Recorded so a mode can find the rest of the bundle — regenerate_plots
-    # reads split_indices.json back out of it.
-    cfg.runtime.bundle_path = str(bundle)
+    # The seed is the one runtime value worth carrying forward: `plots` rebuilds
+    # the recorded run's split from it, and a different seed silently produces
+    # different figures under the published run's name.
+    seed = cfg.runtime.get("seed") if "runtime" in cfg else None
+    if seed is None:
+        seed = metadata.get("seed")
+    cfg.pop("runtime", None)
+
     cfg.dataset.preprocessor_path = str(bundle / PREPROCESSOR_NAME)
     cfg.dataset.path_to_data = ""
-
-    if inference_data is not None:
-        cfg.dataset.path_to_inference_data = str(Path(inference_data).resolve())
-    if training_data is not None:
-        cfg.dataset.path_to_data = str(Path(training_data).resolve())
-    if output_dir is not None:
-        cfg.runtime.output_dir = str(Path(output_dir).resolve())
-
-    # Last, so the user can override anything above — including, deliberately,
-    # the paths this function just set.
-    if overrides:
-        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(list(overrides)))
 
     logger.info(
         f"Loaded bundle {bundle} "
         f"(model {metadata.get('model_name')!r}, kind {metadata.get('model_kind')!r}, "
         f"git {str(metadata.get('git_sha'))[:8]})"
     )
-    return cfg, metadata
+    return cfg, Bundle(
+        path=bundle,
+        weights=bundle / WEIGHTS_NAME,
+        preprocessor=bundle / PREPROCESSOR_NAME,
+        metadata=metadata,
+        seed=seed,
+    )

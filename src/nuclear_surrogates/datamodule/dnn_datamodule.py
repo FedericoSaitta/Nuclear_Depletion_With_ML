@@ -36,7 +36,7 @@ class DNN_Datamodule(L.LightningDataModule):
         self.seed = cfg_object.runtime.get("seed", 42)
 
         # When set, the fitted scalers are LOADED rather than re-derived.
-        # Required for inference; during training it is how `regenerate_plots`
+        # Required for inference; during training it is how `nucml plots`
         # replays a run against the scalers that run was trained with.
         self.preprocessor_path = cfg_object.dataset.get("preprocessor_path", None)
         self.preprocessor = None
@@ -188,8 +188,8 @@ class DNN_Datamodule(L.LightningDataModule):
         the DNN is a one-step map rather than an integration, so there is no
         time axis to renormalise. `t_days` never reaches the forward pass —
         `predict_step` and `test_step` only go through `target_scaler` — so the
-        NODE's `_training_time_unit` correction (AUDIT P14) has no analogue
-        here and must not be copied in.
+        NODE's `_training_time_unit` correction has no analogue here and must
+        not be copied in.
 
         What does have to match training is `dataset.target_delta_conc`, since
         it decides whether the targets are concentrations or differences. It

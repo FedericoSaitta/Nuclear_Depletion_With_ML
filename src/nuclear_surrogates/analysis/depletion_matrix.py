@@ -4,14 +4,14 @@ Only meaningful for `model.matrix_ode`, where the right-hand side is
 ``dy/dt = A(u(t), y(t)) · y``. The matrix is read directly out of the network at
 sampled points and rescaled from model units into 1/day.
 
-Two caveats carried by the conversion below are recorded in AUDIT.md and are
-NOT fixed here, because fixing either moves a published figure:
+Two caveats are carried by the conversion below and are NOT fixed here, because
+fixing either moves a published figure (`docs/training_pipeline.md` §8):
 
-* **P1** — the physical span is hardcoded at 1000 days while the data spans 990,
-  so every coefficient is ~1 % low.
-* **P2** — the MinMax offset is dropped, which is exact only where a target's
-  minimum is zero. U238 depletes by a few percent, so its diagonal is not
-  interpretable as a depletion rate.
+* the physical span is hardcoded at 1000 days while the data spans 990, so every
+  coefficient is ~1 % low;
+* the MinMax offset is dropped, which is exact only where a target's minimum is
+  zero. U238 depletes by a few percent, so its diagonal is not interpretable as
+  a depletion rate.
 """
 
 import os
@@ -23,7 +23,7 @@ from loguru import logger
 from nuclear_surrogates.analysis.rollout import JACOBIAN_BATCH, SolveContext
 from nuclear_surrogates.utils import plot
 
-# See P1 above. Deliberately not derived from the time array.
+# The hardcoded span above. Deliberately not derived from the time array.
 FIGURE_T_TOTAL_DAYS = 1000
 
 
@@ -32,7 +32,7 @@ def unscaling_matrix(ctx: SolveContext, target_names):
 
     In scaled space dy_s/dt_n = A_s @ y_s; in physical space
     A_phys[i,j] = A_s[i,j] * (range_i / range_j) / T_total_days. This ignores
-    the MinMax offset (AUDIT.md P2) and uses a hardcoded span (P1).
+    the MinMax offset and uses a hardcoded span — see the module docstring.
 
     Returns (scale_matrix, T_total_days, time_unit).
     """

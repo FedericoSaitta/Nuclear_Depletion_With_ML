@@ -358,9 +358,9 @@ def require_fitted_scalers(preprocessor_path) -> None:
             "was trained with. There is no fallback — re-fitting them on other "
             "data would silently change every number this run produces.\n\n"
             "Run from a bundle:\n"
-            "    nucml --bundle <results/.../model-bundle> --data <file>\n\n"
-            "For a checkpoint that predates bundles, build one once with "
-            "nucml-package, on a machine that still has the training dataset."
+            "    nucml infer --bundle <results/.../model-bundle> --data <file>\n\n"
+            "A bare checkpoint cannot be served. If all you have is one, "
+            "retrain to get a bundle."
         )
 
 

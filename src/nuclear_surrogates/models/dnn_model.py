@@ -65,8 +65,6 @@ class DNN_Model(L.LightningModule):
     def _init_tracking_variables(self):
         self.train_losses = []
         self.val_losses = []
-        self.val_r2_scores = []
-        self.val_mae_scores = []
         self.test_predictions = []
         self.test_labels = []
         self.test_inputs = []
@@ -79,7 +77,6 @@ class DNN_Model(L.LightningModule):
     def training_step(self, batch, batch_idx):
         x, y = batch
         loss = self.loss_fn(self.model(x), y)
-        # Deliberately not logged to the SQLite database: only final results are.
         self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
         return loss
 
@@ -114,11 +111,9 @@ class DNN_Model(L.LightningModule):
 
         r2 = float(metrics.r2(all_targets, all_preds).mean())
         self.log("val_r2", r2, prog_bar=True)
-        self.val_r2_scores.append(r2)
 
         mae = float(metrics.mae(all_targets, all_preds).mean())
         self.log("val_mae", mae, prog_bar=True)
-        self.val_mae_scores.append(mae)
 
         self.val_preds_epoch = []
         self.val_targets_epoch = []
@@ -206,7 +201,7 @@ class DNN_Model(L.LightningModule):
             trues, ar_preds, tf_preds, target_names, self.result_dir, self.log
         )
 
-        self._log_to_database(mae_arr, rmse_arr, r2_arr, per_target_metrics)
+        self._write_test_metrics(mae_arr, rmse_arr, r2_arr, per_target_metrics)
 
     def _prepare_test_data(self):
         """Consolidate test data from batches."""
@@ -344,16 +339,15 @@ class DNN_Model(L.LightningModule):
 
     # ── Bookkeeping ──────────────────────────────────────────────────────────
 
-    def _log_to_database(self, mae_arr, rmse_arr, r2_arr, per_target_metrics):
-        if not hasattr(self.trainer.logger, "update_final_results"):
-            return
+    def _write_test_metrics(self, mae_arr, rmse_arr, r2_arr, per_target_metrics):
+        """Write the test metrics beside the figures they belong to.
 
-        self.trainer.logger.update_final_results(
-            train_losses=self.train_losses,
-            val_losses=self.val_losses,
-            val_r2_scores=self.val_r2_scores,
-            val_mae_scores=self.val_mae_scores,
-            test_metrics={
+        These are the only run outputs the bundle cannot carry: `write_bundle`
+        runs before `trainer.test`, so at bundle time they do not exist yet.
+        """
+        evaluation.write_test_metrics(
+            self.result_dir,
+            {
                 "mae_avg": float(mae_arr.mean()),
                 "rmse_avg": float(rmse_arr.mean()),
                 "r2_avg": float(r2_arr.mean()),
