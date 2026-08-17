@@ -262,7 +262,7 @@ def test_train_builds_a_runtime_block_from_the_flags(tmp_path):
             "3",
             "--seed",
             "11",
-            "--no-plots",
+            "--no-analyses",
         ]
     )
     cfg, loaded = build_config(args)
@@ -273,7 +273,7 @@ def test_train_builds_a_runtime_block_from_the_flags(tmp_path):
     assert cfg.runtime.device == "cpu"
     assert cfg.runtime.num_workers == 3
     assert cfg.runtime.seed == 11
-    assert cfg.runtime.plots is False
+    assert cfg.runtime.analyses is False
 
 
 def test_infer_takes_the_bundles_seed_and_never_the_training_path(bundle, tmp_path):

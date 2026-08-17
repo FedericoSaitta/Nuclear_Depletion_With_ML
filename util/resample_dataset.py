@@ -8,8 +8,8 @@ cannot be evaluated on 1-day data — it emits a 10-day-sized change where a
 finer dataset.
 
     uv run --extra ml python util/resample_dataset.py \\
-        datasets/BEAVERS-Realistic_Daily_Power_Schedule.csv \\
-        datasets/BEAVERS-Realistic_10Day_Power_Schedule.csv --factor 10
+        datasets/beavrs_cycle1_daily.h5 \\
+        datasets/beavrs_cycle1_10day.h5 --factor 10
 
 Columns are not all coarsened the same way, and getting this wrong is the whole
 risk of the operation:

@@ -4,7 +4,7 @@
 #
 #   uv run nucml train --config configs/smoke_dnn.yaml \
 #                      --data tests/fixtures/mini_casl_10runs.h5 \
-#                      --seed 0 --no-plots
+#                      --seed 0 --no-analyses
 dataset:
   fraction_of_data: 1.0
 

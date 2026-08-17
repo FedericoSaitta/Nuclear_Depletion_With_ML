@@ -193,7 +193,7 @@ Every verb takes the same machine flags, all optional except `--data`:
 | `--device D` | `auto` | `auto`, `cpu`, `cuda`, `gpu`, `mps`. |
 | `--workers N` | `0` | Dataloader worker processes; `0` loads in the main process. |
 | `--seed N` | `42`, or the bundle's | Seeds the whole run — see below. |
-| `--no-plots` | off | Skip the data-distribution figures. |
+| `--no-analyses` | off | Skip every figure and post-hoc analysis; metrics are still written. |
 | `key=value …` | — | Trailing OmegaConf overrides, applied last. |
 
 These become the `runtime` block of the resolved config, which is what the

@@ -88,7 +88,7 @@ def build_inference_cfg(preprocessor_path=PREPROCESSOR, output_dir=None):
     cfg.runtime = {
         "device": "cpu",
         "num_workers": 0,
-        "plots": False,
+        "analyses": False,
         "seed": 42,
         "output_dir": str(output_dir) if output_dir is not None else "results",
     }

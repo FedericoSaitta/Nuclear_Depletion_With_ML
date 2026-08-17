@@ -60,7 +60,7 @@ it reads. Those are flags, shared by all four verbs:
 | `--device D` | `auto` | `auto`, `cpu`, `cuda`, `gpu` or `mps` |
 | `--workers N` | `0` | dataloader worker processes |
 | `--seed N` | `42`, or the bundle's | RNG seed; also fixes the train/val/test split |
-| `--no-plots` | off | skip figure generation |
+| `--no-analyses` | off | skip every figure and post-hoc analysis |
 
 Anything else is a trailing `key=value` override, applied last:
 

@@ -155,6 +155,112 @@ def report_prediction_comparisons(
         logger.info(f"  {target_name}: comparison plot saved to {output_dir}")
 
 
+def report_per_target(
+    trues, preds, target_names, result_dir, log, steps_per_run, figures=True
+):
+    """Per-target MAE / RMSE / R², the scatter and the residual figures.
+
+    *figures* is the one place `--no-analyses` has to reach inside a report
+    function rather than gate it from outside: this one computes the metrics a
+    run always needs and draws figures it sometimes does not.
+
+    Both models reduce to a 2-D ``(samples, targets)`` array before this point —
+    the DNN from its stacked test batches, the NODE by flattening runs and steps
+    — so one implementation serves both. It used to be `_plot_single_output` plus
+    `_compute_and_log_overall_metrics` on one side and the whole of
+    `_report_pointwise_metrics` on the other.
+
+    Returns the `per_target_metrics` list the callers go on to enrich with the
+    MARE comparison and write to `test_metrics.json`.
+    """
+    mae_per_output = metrics.mae(trues, preds)
+    rmse_per_output = metrics.rmse(trues, preds)
+    r2_per_output = metrics.r2(trues, preds)
+
+    log("Mean Absolute Error (avg)", float(mae_per_output.mean()))
+    log("Root Mean Squared Error (avg)", float(rmse_per_output.mean()))
+    log("R-squared coefficient (avg)", float(r2_per_output.mean()))
+
+    logger.info("TEST SET — UNSCALED metrics:")
+    logger.info(f"  R² (avg):   {r2_per_output.mean():.6f}")
+    logger.info(f"  RMSE (avg): {rmse_per_output.mean():.6f}")
+    logger.info(f"  MAE (avg):  {mae_per_output.mean():.6f}")
+
+    per_target_metrics = []
+    for idx, target_name in enumerate(target_names):
+        if figures:
+            output_dir = os.path.join(result_dir, target_name)
+            os.makedirs(output_dir, exist_ok=True)
+
+            plot.plot_predictions_vs_actuals(
+                trues[:, idx],
+                preds[:, idx],
+                mae_per_output[idx],
+                rmse_per_output[idx],
+                r2_per_output[idx],
+                output_dir,
+            )
+            plot.plot_residuals_combined(
+                trues[:, idx], preds[:, idx], output_dir, steps_per_run=steps_per_run
+            )
+
+        per_target_metrics.append(
+            {
+                "name": target_name,
+                "mae": float(mae_per_output[idx]),
+                "rmse": float(rmse_per_output[idx]),
+                "r2": float(r2_per_output[idx]),
+            }
+        )
+
+    return per_target_metrics, mae_per_output, rmse_per_output, r2_per_output
+
+
+def report_trajectories(
+    t,
+    trues,
+    ar_preds,
+    forcing,
+    target_names,
+    result_dir,
+    xlabel="Time",
+    num_examples=2,
+):
+    """A couple of individual test trajectories per target, plus an all-runs overlay.
+
+    *t* is the x-axis and *xlabel* names it, because the two models measure it
+    differently: the NODE integrates over a real time span, while the DNN is a
+    one-step map with no notion of elapsed time and can only count steps. That
+    distinction is worth showing on the axis rather than hiding behind a shared
+    default.
+    """
+    num_runs = trues.shape[0]
+
+    for target_idx, target_name in enumerate(target_names):
+        target_dir = os.path.join(result_dir, target_name)
+        os.makedirs(target_dir, exist_ok=True)
+
+        for i in range(min(num_examples, num_runs)):
+            plot.plot_trajectory(
+                t,
+                ar_preds[i, :, target_idx],
+                trues[i, :, target_idx],
+                forcing[i],
+                title=f"{target_name} — Test Trajectory {i + 1}",
+                save_path=os.path.join(target_dir, f"test_traj_{i + 1}.png"),
+                xlabel=xlabel,
+            )
+
+        plot.plot_trajectory_summary(
+            t,
+            ar_preds[:, :, target_idx],
+            trues[:, :, target_idx],
+            title=f"{target_name} — All Test Trajectories ({num_runs} runs)",
+            save_path=os.path.join(target_dir, "test_all_trajectories.png"),
+            xlabel=xlabel,
+        )
+
+
 def write_test_metrics(result_dir, test_metrics):
     """Write the run's test metrics to `<result_dir>/test_metrics.json`.
 
@@ -210,7 +316,5 @@ def report_error_growth(trues, ar_preds, tf_preds, target_names, result_dir, log
                 metric_name=metric_name,
                 ylabel=ylabel,
                 skip_first_n=0,
-                tf_errors_all=c[f"tf_{key}_errors"],
-                ar_errors_all=c[f"ar_{key}_errors"],
             )
         logger.info(f"  {target_name}: error growth plots saved to {output_dir}")

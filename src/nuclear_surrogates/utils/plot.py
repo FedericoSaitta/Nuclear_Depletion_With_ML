@@ -410,10 +410,16 @@ def plot_error_growth_metric(
     metric_name="MALE",
     ylabel="Error",
     skip_first_n=0,
-    tf_errors_all=None,
-    ar_errors_all=None,
 ):
-    """Error against timestep, drawn once linear and once log-scaled."""
+    """Error against timestep, teacher-forced against autoregressive.
+
+    Linear axes only. There used to be a log-scaled twin of every one of these:
+    for MALE that meant a log axis on Mean Absolute *Log* Error, and for MAE it
+    was a figure nothing referenced. The `_linear` in the filename is kept even
+    though nothing is log-scaled any more, because `docs/training_pipeline.md`
+    cites `U239_MAE_growth_linear.png` and `Pu242_MAE_growth_linear.png` by name
+    and the write-up is in progress.
+    """
     os.makedirs(output_dir, exist_ok=True)
 
     if skip_first_n > 0:
@@ -422,78 +428,57 @@ def plot_error_growth_metric(
         avg_ar_error = avg_ar_error[skip_first_n:]
         std_tf_error = std_tf_error[skip_first_n:]
         std_ar_error = std_ar_error[skip_first_n:]
-        if tf_errors_all is not None:
-            tf_errors_all = tf_errors_all[:, skip_first_n:]
-            ar_errors_all = ar_errors_all[:, skip_first_n:]
     else:
         time_steps = np.arange(len(avg_tf_error))
 
-    have_raw = tf_errors_all is not None and ar_errors_all is not None
+    fig, ax = plt.subplots(figsize=(12, 7))
 
-    for scale_type in ("linear", "log"):
-        fig, ax = plt.subplots(figsize=(12, 7))
-
-        for avg, color, label in (
-            (avg_tf_error, TF_COLOR, "Teacher-Forcing (mean)"),
-            (avg_ar_error, AR_COLOR, "Autoregressive (mean)"),
-        ):
-            ax.plot(
-                time_steps,
-                avg,
-                label=label,
-                color=color,
-                linewidth=2.5,
-                alpha=0.9,
-                zorder=5,
-            )
-
-        for avg, std, raw, color, tag in (
-            (avg_tf_error, std_tf_error, tf_errors_all, TF_COLOR, "TF"),
-            (avg_ar_error, std_ar_error, ar_errors_all, AR_COLOR, "AR"),
-        ):
-            if scale_type == "linear":
-                lower, upper, band = avg - std, avg + std, f"{tag} ±1σ"
-            elif have_raw:
-                # Percentiles, not mean ± std: an arithmetic band is meaningless
-                # once the axis is logarithmic.
-                lower = np.percentile(raw, 16, axis=0)
-                upper = np.percentile(raw, 84, axis=0)
-                band = f"{tag} 16-84%ile"
-            else:
-                # Geometric fallback — approximate, but better than arithmetic.
-                factor = np.exp(std / (avg + 1e-20))
-                lower, upper, band = avg / factor, avg * factor, f"{tag} approx. ±1σ"
-            ax.fill_between(
-                time_steps, lower, upper, alpha=0.2, color=color, label=band
-            )
-
-        ax.set_xlabel("Time Step", fontsize=13, fontweight="bold")
-        if scale_type == "log":
-            ax.set_yscale("log")
-            ax.set_ylabel(f"{ylabel} (log scale)", fontsize=13, fontweight="bold")
-        else:
-            ax.set_ylabel(ylabel, fontsize=13, fontweight="bold")
-
-        ax.set_title(
-            f"{metric_name} Growth Over Time: {target_name}"
-            f"{' (Log Scale)' if scale_type == 'log' else ''}\n"
-            f"(Averaged over {num_runs} runs — final AR {metric_name}: "
-            f"{float(avg_ar_error[-1]):.4f})",
-            fontsize=14,
-            fontweight="bold",
-            pad=15,
+    for avg, color, label in (
+        (avg_tf_error, TF_COLOR, "Teacher-Forcing (mean)"),
+        (avg_ar_error, AR_COLOR, "Autoregressive (mean)"),
+    ):
+        ax.plot(
+            time_steps,
+            avg,
+            label=label,
+            color=color,
+            linewidth=2.5,
+            alpha=0.9,
+            zorder=5,
         )
-        ax.legend(fontsize=10, loc="best", framealpha=0.9)
-        ax.grid(True, alpha=0.3, linestyle="--")
-        fig.tight_layout()
 
-        _save(
-            fig,
-            os.path.join(
-                output_dir, f"{target_name}_{metric_name}_growth_{scale_type}.png"
-            ),
-            f"{metric_name} growth plot ({scale_type} scale) saved to",
+    for avg, std, color, tag in (
+        (avg_tf_error, std_tf_error, TF_COLOR, "TF"),
+        (avg_ar_error, std_ar_error, AR_COLOR, "AR"),
+    ):
+        ax.fill_between(
+            time_steps,
+            avg - std,
+            avg + std,
+            alpha=0.2,
+            color=color,
+            label=f"{tag} ±1σ",
         )
+
+    ax.set_xlabel("Time Step", fontsize=13, fontweight="bold")
+    ax.set_ylabel(ylabel, fontsize=13, fontweight="bold")
+    ax.set_title(
+        f"{metric_name} Growth Over Time: {target_name}\n"
+        f"(Averaged over {num_runs} runs — final AR {metric_name}: "
+        f"{float(avg_ar_error[-1]):.4f})",
+        fontsize=14,
+        fontweight="bold",
+        pad=15,
+    )
+    ax.legend(fontsize=10, loc="best", framealpha=0.9)
+    ax.grid(True, alpha=0.3, linestyle="--")
+    fig.tight_layout()
+
+    _save(
+        fig,
+        os.path.join(output_dir, f"{target_name}_{metric_name}_growth_linear.png"),
+        f"{metric_name} growth plot saved to",
+    )
 
 
 def plot_feature_importance(
@@ -555,8 +540,12 @@ def plot_feature_importance(
 # ── Trajectories ─────────────────────────────────────────────────────────────
 
 
-def plot_node_trajectory(t, pred, true, power, title, save_path):
-    """Three-panel plot: power forcing, prediction vs truth, residual."""
+def plot_trajectory(t, pred, true, power, title, save_path, xlabel="Time"):
+    """Three-panel plot: power forcing, prediction vs truth, residual.
+
+    *xlabel* because the two models measure the axis differently — the NODE
+    integrates over a real time span, the DNN only counts steps.
+    """
     fig, (ax1, ax2, ax3) = plt.subplots(
         3,
         1,
@@ -580,13 +569,13 @@ def plot_node_trajectory(t, pred, true, power, title, save_path):
     ax3.plot(t, pred - true, color="tab:red", linewidth=0.8)
     ax3.axhline(0, color="black", linewidth=0.5, linestyle="--")
     ax3.set_ylabel("Residual")
-    ax3.set_xlabel("Time")
+    ax3.set_xlabel(xlabel)
     ax3.grid(True, alpha=0.3)
 
-    _save(fig, save_path, "NODE trajectory plot saved to")
+    _save(fig, save_path, "Trajectory plot saved to")
 
 
-def plot_node_trajectory_summary(t, all_preds, all_trues, title, save_path):
+def plot_trajectory_summary(t, all_preds, all_trues, title, save_path, xlabel="Time"):
     """Overlay every trajectory, with the mean absolute residual beneath."""
     fig, (ax1, ax2) = plt.subplots(
         2,
@@ -624,10 +613,10 @@ def plot_node_trajectory_summary(t, all_preds, all_trues, title, save_path):
     ax2.plot(t, mean_abs_res, color="tab:red", linewidth=1.0)
     ax2.axhline(0, color="black", linewidth=0.5, linestyle="--")
     ax2.set_ylabel("Mean |Residual|", fontsize=12)
-    ax2.set_xlabel("Time", fontsize=12)
+    ax2.set_xlabel(xlabel, fontsize=12)
     ax2.grid(True, alpha=0.3)
 
-    _save(fig, save_path, "NODE trajectory summary saved to")
+    _save(fig, save_path, "Trajectory summary saved to")
 
 
 # ── Jacobian sensitivity ─────────────────────────────────────────────────────

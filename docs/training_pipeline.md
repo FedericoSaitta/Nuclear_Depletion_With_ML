@@ -368,7 +368,9 @@ test_metrics.json                per-isotope MAE / RMSE / R² / MARE, averaged t
   predictions_vs_actual.png      scatter against truth
   residuals_combined*.png        residual structure, linear and log-log
   <t>_prediction_comparison.png  truth vs TF vs AR for one run
-  <t>_{MAE,MALE}_growth_*.png    error against timestep — the §6 evidence
+  <t>_{MAE,MALE}_growth_linear.png  error against timestep — the §6 evidence
+  test_traj_N.png                a couple of individual test runs
+  test_all_trajectories.png      every test run overlaid, with mean |residual|
   {r2,mse}_score_importance.png  permutation importance (DNN)
   jacobian_*                     sensitivity analysis (NODE)
   stepwise_importance*           per-step permutation importance (NODE)
@@ -376,6 +378,23 @@ depletion_matrix_{mean,evolution}.png   the learned A, in physical units (NODE)
 stepwise_importance.md           importance tables, ready to paste (NODE)
 training_loss_log.png            loss curves, plus NFE for the NODE
 ```
+
+Both models emit the same figures except where the physics differs: permutation
+feature importance is a DNN output, and the Jacobian sweep, the depletion matrix
+and the per-step importance need the ODE's right-hand side so they exist only for
+the NODE. Everything else — the scatter, the residuals, the growth curves, the
+trajectories — is drawn by the same code for both, so the head-to-head comparison
+in §6 is like-for-like.
+
+`--no-analyses` skips all of it, figures and analyses alike, while still writing
+`test_metrics.json` and the bundle. That is the flag for a hyperparameter sweep,
+where the Jacobian and importance passes re-integrate the whole test set for
+output nobody reads.
+
+The one thing it does **not** skip is `training_loss_log.png`, and the reason is
+the rule the flag follows: it suppresses exactly what `nucml plots` can put back.
+`plots` replays `trainer.test` against a bundle and never runs `fit`, so the loss
+curve is the single figure that could not be recovered without retraining.
 
 The **bundle** is the unit of publication — a checkpoint alone is half a model,
 because the other half is the fitted scalers:

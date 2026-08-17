@@ -40,7 +40,7 @@ class DNN_Datamodule(L.LightningDataModule):
         # replays a run against the scalers that run was trained with.
         self.preprocessor_path = cfg_object.dataset.get("preprocessor_path", None)
         self.preprocessor = None
-        self.make_plots = cfg_object.runtime.get("plots", True)
+        self.make_plots = cfg_object.runtime.get("analyses", True)
 
         # `modes.inference` sets this; setup() then takes _setup_inference.
         self.inference_mode = False

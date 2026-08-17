@@ -51,7 +51,7 @@ def load_cfg(kind, tmp_path, **overrides):
         "output_dir": str(tmp_path / "results"),
         "device": "cpu",
         "num_workers": 0,
-        "plots": False,
+        "analyses": False,
         "seed": 0,
     }
     for key, value in overrides.items():
@@ -473,7 +473,7 @@ def test_dnn_test_epoch_reports_and_plots_every_target(tmp_path):
     """
     import lightning as L
 
-    cfg = load_cfg("DNN", tmp_path, **{"train.num_epochs": 1})
+    cfg = load_cfg("DNN", tmp_path, **{"train.num_epochs": 1, "runtime.analyses": True})
     model, dm, _ = train(cfg)
 
     trainer = L.Trainer(
@@ -501,14 +501,67 @@ def test_dnn_test_epoch_reports_and_plots_every_target(tmp_path):
         for figure in (
             "predictions_vs_actual.png",
             "residuals_combined.png",
+            "residuals_combined_loglog.png",
             f"{target}_prediction_comparison.png",
             f"{target}_MAE_growth_linear.png",
-            f"{target}_MALE_growth_log.png",
+            f"{target}_MALE_growth_linear.png",
+            # The DNN draws trajectories too now. It used to compute the arrays
+            # and throw them away, which left the head-to-head against the NODE
+            # without comparable figures.
+            "test_traj_1.png",
+            "test_all_trajectories.png",
             "r2_score_importance.png",
         ):
             assert os.path.exists(
                 os.path.join(target_dir, figure)
             ), f"{target}: {figure} was not written"
+
+        # The log-scaled twins are gone: MALE is already Mean Absolute *Log*
+        # Error, so a log axis on it plotted log-of-log, and nothing referenced
+        # the MAE one.
+        for gone in (f"{target}_MAE_growth_log.png", f"{target}_MALE_growth_log.png"):
+            assert not os.path.exists(
+                os.path.join(target_dir, gone)
+            ), f"{target}: {gone} should no longer be written"
+
+
+@pytest.mark.parametrize("kind", ["DNN", "NODE"])
+def test_no_analyses_writes_metrics_but_no_figures(kind, tmp_path):
+    """`--no-analyses` is the flag a hyperparameter sweep wants.
+
+    It has to suppress every figure *and* the expensive post-hoc passes —
+    permutation importance, Jacobians, the depletion matrix — while still
+    producing the metrics that decide whether the trial was any good.
+    """
+    import lightning as L
+
+    cfg = load_cfg(kind, tmp_path, **{"train.num_epochs": 1})
+    assert cfg.runtime.analyses is False
+    model, dm, _ = train(cfg)
+
+    L.Trainer(
+        accelerator="cpu",
+        logger=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+    ).test(model, datamodule=dm)
+
+    results = tmp_path / "results"
+    written = sorted(p.name for p in results.rglob("*.png"))
+    # The loss curve is the one exception, and the rule behind it is
+    # regenerability: `nucml plots` never runs `fit`, so this figure cannot be
+    # recreated from the bundle the way every other one can.
+    assert written == [
+        "training_loss_log.png"
+    ], f"{kind}: --no-analyses should leave only the loss curve, got {written[:6]}"
+    assert not list(
+        results.rglob("stepwise_importance.*")
+    ), f"{kind}: the importance tables are analysis output and must be skipped too"
+
+    metrics_file = results / cfg.model.name / "test_metrics.json"
+    payload = json.loads(metrics_file.read_text())
+    assert len(payload["per_target"]) == len(cfg.dataset.targets)
+    assert np.isfinite(payload["mae_avg"])
 
 
 # ── pinned trajectory ────────────────────────────────────────────────────────

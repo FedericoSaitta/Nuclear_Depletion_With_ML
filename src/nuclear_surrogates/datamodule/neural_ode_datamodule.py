@@ -100,7 +100,7 @@ class NODE_Datamodule(L.LightningDataModule):
         # training dataset, and what removes the train/serve skew.
         self.preprocessor_path = cfg_object.dataset.get("preprocessor_path", None)
         self.preprocessor = None
-        self.make_plots = cfg_object.runtime.get("plots", True)
+        self.make_plots = cfg_object.runtime.get("analyses", True)
 
         self.train_batch_size = cfg_object.dataset.train.batch_size
         self.val_batch_size = cfg_object.dataset.val.batch_size

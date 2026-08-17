@@ -92,10 +92,14 @@ def _machine_flags() -> argparse.ArgumentParser:
         ),
     )
     parent.add_argument(
-        "--no-plots",
-        dest="plots",
+        "--no-analyses",
+        dest="analyses",
         action="store_false",
-        help="skip the data-distribution figures",
+        help=(
+            "skip every figure and every post-hoc analysis (permutation "
+            "importance, Jacobians, depletion matrix). Metrics are still "
+            "computed and test_metrics.json is still written"
+        ),
     )
     parent.add_argument(
         "overrides",
@@ -217,7 +221,7 @@ def _runtime_section(args, bundle):
         "num_workers": args.workers,
         "seed": seed,
         "output_dir": str(args.out.resolve()),
-        "plots": args.plots,
+        "analyses": args.analyses,
     }
 
 

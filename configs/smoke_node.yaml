@@ -5,7 +5,7 @@
 #
 #   uv run nucml train --config configs/smoke_node.yaml \
 #                      --data tests/fixtures/mini_casl_10runs.h5 \
-#                      --seed 0 --no-plots
+#                      --seed 0 --no-analyses
 #
 # The training regression tests drive this same file. `--seed 0` is not
 # decorative: tests/fixtures/golden_train.json pins a loss trajectory produced

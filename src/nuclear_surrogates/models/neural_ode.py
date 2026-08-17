@@ -7,8 +7,6 @@ importance) live in `nuclear_surrogates.analysis`, and the metric maths shared
 with the DNN lives in `nuclear_surrogates.evaluation`.
 """
 
-import os
-
 import lightning as L
 import numpy as np
 import torch
@@ -20,7 +18,7 @@ from nuclear_surrogates import analysis, evaluation
 from nuclear_surrogates.datamodule.dataset_helper import ordered_names
 from nuclear_surrogates.models.model_architectures import ODEFuncForced, ODEFuncMatrix
 from nuclear_surrogates.models.model_helper import get_loss_fn
-from nuclear_surrogates.utils import metrics, plot
+from nuclear_surrogates.utils import plot
 from nuclear_surrogates.utils.paths import result_dir
 
 
@@ -157,6 +155,19 @@ class NODE_Model(L.LightningModule):
             self.solve_context(), all_inputs_scaled, all_trues_scaled
         )
 
+    @property
+    def draw_analyses(self):
+        """Whether to emit the evaluation figures and run the post-hoc analyses.
+
+        `--no-analyses` turns this off. The line it draws is regenerability:
+        everything gated on it can be recreated later with `nucml plots` from
+        the bundle, so skipping it during a hyperparameter sweep costs nothing
+        permanent. The training loss curve is deliberately **not** gated — it is
+        written by `on_train_end`, which `plots` never reaches, so it is the one
+        figure that would be gone for good. Metrics are computed either way.
+        """
+        return self.cfg.runtime.get("analyses", True)
+
     # ── Training ─────────────────────────────────────────────────────────────
 
     def training_step(self, batch, batch_idx):
@@ -176,6 +187,8 @@ class NODE_Model(L.LightningModule):
         )
 
     def on_train_end(self):
+        # Not gated on `draw_analyses`: `nucml plots` cannot regenerate this one,
+        # because it never runs `fit`. See `draw_analyses`.
         plot.plot_losses(
             self._train_losses, self._val_losses, self.result_dir, nfes=self._train_nfes
         )
@@ -242,8 +255,14 @@ class NODE_Model(L.LightningModule):
             f"Test set: {num_runs} trajectories, {steps} steps, {n_target} targets"
         )
 
-        per_target_metrics = self._report_pointwise_metrics(
-            trues_unscaled, ar_preds_unscaled, target_names, steps
+        per_target_metrics, *_ = evaluation.report_per_target(
+            trues_unscaled.reshape(-1, n_target),
+            ar_preds_unscaled.reshape(-1, n_target),
+            target_names,
+            self.result_dir,
+            self.log,
+            steps_per_run=steps,
+            figures=self.draw_analyses,
         )
 
         evaluation.report_mare_comparison(
@@ -255,119 +274,57 @@ class NODE_Model(L.LightningModule):
             per_target_metrics,
         )
 
-        ctx = self.solve_context()
-        analysis.jacobian_analysis(
-            ctx, all_inputs_scaled, all_trues_scaled, target_names, forcing_names
-        )
-        analysis.stepwise_importance(
-            ctx,
-            all_inputs_scaled,
-            all_trues_scaled,
-            target_names,
-            forcing_names,
-            self.log,
-        )
-        if self.matrix_ode:
-            analysis.depletion_matrix_analysis(
-                ctx, all_inputs_scaled, all_trues_scaled, target_names
+        if self.draw_analyses:
+            # These re-integrate the whole test set — the Jacobian sweep and the
+            # per-step importance are the most expensive things a run does, and
+            # the reason `--no-analyses` exists.
+            ctx = self.solve_context()
+            analysis.jacobian_analysis(
+                ctx, all_inputs_scaled, all_trues_scaled, target_names, forcing_names
+            )
+            analysis.stepwise_importance(
+                ctx,
+                all_inputs_scaled,
+                all_trues_scaled,
+                target_names,
+                forcing_names,
+                self.log,
+            )
+            if self.matrix_ode:
+                analysis.depletion_matrix_analysis(
+                    ctx, all_inputs_scaled, all_trues_scaled, target_names
+                )
+
+            evaluation.report_prediction_comparisons(
+                trues_unscaled,
+                ar_preds_unscaled,
+                tf_preds_unscaled,
+                target_names,
+                self.result_dir,
+            )
+            evaluation.report_error_growth(
+                trues_unscaled,
+                ar_preds_unscaled,
+                tf_preds_unscaled,
+                target_names,
+                self.result_dir,
+                self.log,
+            )
+            evaluation.report_trajectories(
+                self.t_span.cpu().numpy(),
+                trues_unscaled,
+                ar_preds_unscaled,
+                inputs_unscaled[:, :, 0],  # power, the first forcing input
+                target_names,
+                self.result_dir,
+                xlabel="Time",
             )
 
-        evaluation.report_prediction_comparisons(
-            trues_unscaled,
-            ar_preds_unscaled,
-            tf_preds_unscaled,
-            target_names,
-            self.result_dir,
-        )
-        evaluation.report_error_growth(
-            trues_unscaled,
-            ar_preds_unscaled,
-            tf_preds_unscaled,
-            target_names,
-            self.result_dir,
-            self.log,
-        )
-        self._plot_trajectories(
-            trues_unscaled, ar_preds_unscaled, inputs_unscaled, target_names
-        )
         self._write_test_metrics(per_target_metrics)
 
         self._test_preds.clear()
         self._test_trues.clear()
         self._test_input_trajs.clear()
-
-    def _report_pointwise_metrics(self, trues, ar_preds, target_names, steps):
-        """Per-target MAE/RMSE/R² over all timesteps, plus the scatter figures."""
-        n_target = len(target_names)
-        flat_trues = trues.reshape(-1, n_target)
-        flat_preds = ar_preds.reshape(-1, n_target)
-
-        mae_per_output = metrics.mae(flat_trues, flat_preds)
-        rmse_per_output = metrics.rmse(flat_trues, flat_preds)
-        r2_per_output = metrics.r2(flat_trues, flat_preds)
-
-        self.log("Mean Absolute Error (avg)", float(mae_per_output.mean()))
-        self.log("Root Mean Squared Error (avg)", float(rmse_per_output.mean()))
-        self.log("R-squared coefficient (avg)", float(r2_per_output.mean()))
-
-        logger.info("TEST SET — UNSCALED metrics (Autoregressive):")
-        logger.info(f"  R² (avg):   {r2_per_output.mean():.6f}")
-        logger.info(f"  RMSE (avg): {rmse_per_output.mean():.6f}")
-        logger.info(f"  MAE (avg):  {mae_per_output.mean():.6f}")
-
-        per_target_metrics = []
-        for idx, target_name in enumerate(target_names):
-            output_dir = os.path.join(self.result_dir, target_name)
-            os.makedirs(output_dir, exist_ok=True)
-
-            plot.plot_predictions_vs_actuals(
-                flat_trues[:, idx],
-                flat_preds[:, idx],
-                mae_per_output[idx],
-                rmse_per_output[idx],
-                r2_per_output[idx],
-                output_dir,
-            )
-            plot.plot_residuals_combined(
-                flat_trues[:, idx], flat_preds[:, idx], output_dir, steps_per_run=steps
-            )
-
-            per_target_metrics.append(
-                {
-                    "name": target_name,
-                    "mae": float(mae_per_output[idx]),
-                    "rmse": float(rmse_per_output[idx]),
-                    "r2": float(r2_per_output[idx]),
-                }
-            )
-        return per_target_metrics
-
-    def _plot_trajectories(self, trues, ar_preds, inputs, target_names, num_to_plot=5):
-        """A few individual trajectories per target, plus an all-runs overlay."""
-        t_np = self.t_span.cpu().numpy()
-        num_runs = trues.shape[0]
-
-        for target_idx, target_name in enumerate(target_names):
-            target_dir = os.path.join(self.result_dir, target_name)
-            os.makedirs(target_dir, exist_ok=True)
-
-            for i in range(min(num_to_plot, num_runs)):
-                plot.plot_node_trajectory(
-                    t_np,
-                    ar_preds[i, :, target_idx],
-                    trues[i, :, target_idx],
-                    inputs[i, :, 0],  # power, the first forcing input
-                    title=f"{target_name} — Test Trajectory {i + 1}",
-                    save_path=os.path.join(target_dir, f"test_traj_{i + 1}.png"),
-                )
-
-            plot.plot_node_trajectory_summary(
-                t_np,
-                ar_preds[:, :, target_idx],
-                trues[:, :, target_idx],
-                title=f"{target_name} — All Test Trajectories ({num_runs} runs)",
-                save_path=os.path.join(target_dir, "test_all_trajectories.png"),
-            )
 
     def _write_test_metrics(self, per_target_metrics):
         """Write the test metrics beside the figures they belong to.
