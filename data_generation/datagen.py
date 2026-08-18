@@ -1,9 +1,13 @@
 """Random-history pin-cell depletion — the pipeline behind the CASL datasets.
 
-Each worker builds one fuel pin, draws a fresh operating history (power,
-temperatures, moderator density, boron) from the ranges the config gives,
-depletes it step by step, and writes the resulting concentrations to its own
-HDF5 file in `data_generation/data/`.
+Each worker builds one fuel pin — `pin_sim`, the same model the BEAVRS pipelines
+run — draws a fresh operating history (power, temperatures, moderator density,
+boron) from the ranges the config gives, depletes it step by step, and writes the
+resulting concentrations to its own HDF5 file in `data_generation/data/`.
+
+The randomised history is what makes this pipeline different from the BEAVRS
+ones, and it is why the model is stepped one `integrate()` call at a time: the
+operating state lives on the materials, and it changes between steps.
 
     uv run --extra sim python data_generation/datagen.py \
         --config data_generation/configs/casl_pincell.yaml -n 4 -c 16
@@ -12,36 +16,18 @@ The config describes the simulation; the flags describe the machine. `--help`
 works without OpenMC installed, because argparse runs before the import.
 """
 
-import argparse
+from cli import sweep_parser
 
 # Parse argv and set OMP_NUM_THREADS BEFORE importing OpenMC, which reads the
 # variable at import time. This ordering is why E402 is scoped off for this
-# file in pyproject.toml.
-parser = argparse.ArgumentParser(
+# file in pyproject.toml. `cli` is pure argparse, so importing it up here costs
+# nothing and needs no OpenMC.
+args = sweep_parser(
     description="Randomised-history pin-cell depletion data generation",
-    formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-)
-parser.add_argument(
-    "--config",
-    required=True,
-    help="simulation config, e.g. data_generation/configs/casl_pincell.yaml",
-)
-parser.add_argument(
-    "-n", "--runs", type=int, default=4, help="rounds of parallel workers"
-)
-parser.add_argument(
-    "-c", "--cores", type=int, default=16, help="parallel worker processes per round"
-)
-parser.add_argument(
-    "-t", "--threads", type=int, default=1, help="OpenMP threads per worker"
-)
-parser.add_argument(
-    "-s", "--seed", type=int, default=None, help="master seed (None = random)"
-)
-parser.add_argument(
-    "--out", default=None, help="output directory (default: data_generation/data)"
-)
-args = parser.parse_args()
+    config_example="data_generation/configs/casl_pincell.yaml",
+    default_runs=4,
+    default_cores=16,
+).parse_args()
 
 import os
 
@@ -56,41 +42,18 @@ from loguru import logger
 
 import config as config_module
 import dataset_io
+import pin_sim
 from common import (
     DAY_IN_SECONDS,
+    deplete_one_step,
     depletion_results_frame,
     run_sweep,
     save_results,
     setup_paths,
     specific_burnup,
 )
-from reactor_sim import (
-    create_pincell_geometry,
-    create_pincell_materials,
-    create_pincell_settings,
-    set_pincell_volumes,
-    update_water_composition,
-)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-
-def setup_reactor_model(cfg, results_dir):
-    fuel, clad, water = create_pincell_materials(cfg)
-    set_pincell_volumes(
-        fuel, clad, water, radii=cfg["geometry_radii"], pitch=cfg["geometry_pitch"]
-    )
-
-    materials = openmc.Materials([fuel, clad, water])
-    geometry = create_pincell_geometry(
-        materials, radii=cfg["geometry_radii"], pitch=cfg["geometry_pitch"]
-    )
-    settings = create_pincell_settings(cfg)
-
-    geometry.export_to_xml(path=results_dir)
-    settings.export_to_xml(path=results_dir)
-
-    return fuel, clad, water, materials, geometry, settings
 
 
 def generate_random_conditions(cfg):
@@ -113,19 +76,6 @@ def generate_random_conditions(cfg):
     }
 
 
-def run_depletion_step(model, chain_file, time_step, power_watts, prev_results=None):
-    if prev_results and os.path.exists(prev_results):
-        operator = openmc.deplete.CoupledOperator(
-            model, chain_file, prev_results=openmc.deplete.Results(prev_results)
-        )
-    else:
-        operator = openmc.deplete.CoupledOperator(model, chain_file)
-
-    openmc.deplete.PredictorIntegrator(
-        operator, [time_step], [power_watts], timestep_units="s"
-    ).integrate()
-
-
 def run_depletion_simulation(
     model_parts, chain_file, conditions, fuel_mass_g, worker_id, results_dir
 ):
@@ -135,26 +85,30 @@ def run_depletion_simulation(
     changes between steps, so the materials have to be re-exported and the model
     rebuilt each time.
     """
-    fuel, clad, water, materials, geometry, settings = model_parts
+    mats, materials, geometry, settings, _tallies = model_parts
+    _fuel, _gap, _clad, water = mats
     num_steps = len(conditions["time_steps"])
 
     for i in range(num_steps):
         logger.info(f"Worker {worker_id} | step {i + 1}/{num_steps}")
 
-        fuel.temperature = conditions["fuel_temps"][i]
-        water.temperature = conditions["mod_temps"][i]
-        clad.temperature = conditions["clad_temps"][i]
-        update_water_composition(
+        pin_sim.set_temperatures(
+            mats,
+            fuel_temp=conditions["fuel_temps"][i],
+            clad_temp=conditions["clad_temps"][i],
+            mod_temp=conditions["mod_temps"][i],
+        )
+        pin_sim.update_water_composition(
             water, conditions["boron_ppm"][i], conditions["mod_densities"][i]
         )
         materials.export_to_xml(path=results_dir)
 
-        run_depletion_step(
+        deplete_one_step(
             openmc.model.Model(geometry, materials, settings),
             chain_file,
             conditions["time_steps"][i],
             conditions["power"][i] * fuel_mass_g,
-            prev_results="depletion_results.h5" if i > 0 else None,
+            continue_from="depletion_results.h5" if i > 0 else None,
         )
 
 
@@ -179,8 +133,8 @@ def generate_data(cfg):
 
     np.random.seed(cfg["seed"])
 
-    model_parts = setup_reactor_model(cfg, results_dir)
-    fuel = model_parts[0]
+    model_parts = pin_sim.build_and_export_model(cfg, results_dir)
+    fuel = model_parts[0][0]
     os.chdir(results_dir)
 
     fuel_mass_g = cfg["fuel_density"] * fuel.volume

@@ -21,6 +21,16 @@ from loguru import logger
 HOUR_IN_SECONDS = 3600
 DAY_IN_SECONDS = 24 * HOUR_IN_SECONDS
 
+# `model.symmetry` -> the fraction of one pin cell the model contains. Both
+# values describe the same infinite lattice of identical pins: `quarter` cuts on
+# the two symmetry planes through the pin centre, which costs a quarter of the
+# tracking. Areas scale by exactly this fraction, the water box included, since
+# (pitch/2)**2 is a quarter of pitch**2.
+#
+# It lives here rather than in `pin_sim` so the value can be validated in CI,
+# which has no OpenMC build.
+SYMMETRY_FRACTION = {"full": 1.0, "quarter": 0.25}
+
 # Section -> keys. Unknown keys are an error rather than a warning: a typo in a
 # config is otherwise discovered after a job has been queued for a day, and the
 # run it produces is quietly not the one that was intended.
@@ -30,6 +40,7 @@ SCHEMA = {
         "fuel_density",
         "geometry_radii",
         "geometry_pitch",
+        "symmetry",
         # Fixed reactor state. The CASL pipeline samples these per step and
         # gives ranges under `depletion` instead, so they are optional here.
         "fuel_temp",
@@ -71,7 +82,13 @@ SCHEMA = {
 }
 
 REQUIRED = {
-    "model": {"enrichment", "fuel_density", "geometry_radii", "geometry_pitch"},
+    "model": {
+        "enrichment",
+        "fuel_density",
+        "geometry_radii",
+        "geometry_pitch",
+        "symmetry",
+    },
     "transport": {"particles", "batches", "inactive"},
     "depletion": {"chain_file"},
 }
@@ -135,6 +152,34 @@ def _check(path, raw):
                     f"`{section}`; flattening would lose one"
                 )
             seen[key] = section
+
+    _check_model_values(path, raw.get("model") or {})
+
+
+def _check_model_values(path, model):
+    """Reject values a section-and-key check cannot catch.
+
+    Both of these otherwise surface inside OpenMC, minutes into a run: an
+    unknown symmetry as a KeyError on a lookup table in `pin_sim`, and a radii
+    list of the wrong length as a pin cell missing a region.
+    """
+    symmetry = model.get("symmetry")
+    if symmetry not in SYMMETRY_FRACTION:
+        raise SystemExit(
+            f"{path}: `model.symmetry` is {symmetry!r}; "
+            f"expected one of {sorted(SYMMETRY_FRACTION)}"
+        )
+
+    radii = model.get("geometry_radii")
+    if not isinstance(radii, list) or len(radii) != 3:
+        raise SystemExit(
+            f"{path}: `model.geometry_radii` must be three radii in cm — "
+            f"[fuel outer, gap outer, clad outer] — but is {radii!r}"
+        )
+    if list(radii) != sorted(radii):
+        raise SystemExit(
+            f"{path}: `model.geometry_radii` {radii!r} must increase outwards"
+        )
 
 
 def create_worker_configs(base_config, num_workers, master_seed=None):

@@ -16,6 +16,10 @@ many workers on how many cores, and nothing else.
 | `quarter_datagen.py` | `configs/beavrs_quarterpin.yaml` | BEAVRS Cycle 1's *measured* power history on a quarter pin cell, with flux/fission/capture tallies. One `integrate()` for the whole cycle. |
 | `zoom_datagen.py` | `configs/beavrs_zoom.yaml` | Re-runs a window of that cycle at hourly resolution, starting from a daily run's depleted compositions. One `integrate()` per step, so low-power steps can drop to reduced fidelity. |
 
+All three build the **same pin cell**, from `pin_sim.py`: fuel, helium gap,
+Zircaloy cladding, borated water, reflective on all sides. What differs is the
+*history* — sampled per step versus measured and fixed — and `model.symmetry`.
+
 ```bash
 # generate
 uv run --extra sim python data_generation/datagen.py \
@@ -62,19 +66,45 @@ any CI coverage at all (`tests/test_datagen_io.py`).
 
 | Needs OpenMC | Pure Python |
 |---|---|
-| `common.py` — paths, the sweep driver, results extraction | `config.py` — load/validate a config, derive worker configs |
-| `quarter_sim.py`, `reactor_sim.py` — the two OpenMC models | `dataset_io.py` — HDF5 writer, merge, provenance manifest |
-| `tally_io.read_statepoint_tallies` (imports openmc locally) | `power_history.py` — parse and resample the BEAVRS history |
+| `common.py` — paths, the sweep driver, one depletion step, results extraction | `config.py` — load/validate a config, derive worker configs |
+| `pin_sim.py` — the OpenMC model, for every pipeline | `cli.py` — the `-n/-c/-t/-s/--out` flags the sweeps share |
+| `tally_io.read_statepoint_tallies` (imports openmc locally) | `dataset_io.py` — HDF5 writer, merge, provenance manifest |
+| | `power_history.py` — parse and resample the BEAVRS history |
 | | `nuclides.py` — which nuclides are tallied, and why |
+| | `tally_io.py` — the tally column schema and the power-fraction maths |
 
-The two model modules prefix every function `quarterpin_` / `pincell_`. They
-used to export `create_materials` and `create_settings` under the same names
-while returning different numbers of materials, which is a trap worth closing.
+## One model, two histories
 
-Note the two models genuinely differ beyond geometry: the quarter-pin model has
-a helium gap and the pin-cell model does not, and only the pin-cell model
-carries boron in the water. That predates this code and is not a refactoring
-artefact.
+Every pipeline builds its model from `pin_sim.py`, and the only thing that
+distinguishes one pin cell from another is `model.symmetry`:
+
+| | `symmetry: full` | `symmetry: quarter` |
+|---|---|---|
+| what is modelled | the whole cell, boundaries at ±pitch/2 | one quadrant, boundaries at 0 and +pitch/2 |
+| regions | fuel, He gap, Zr-4 clad, water — identical | identical |
+| areas | π r², pitch² | a quarter of each |
+| cost | 4× the tracking | — |
+
+Both describe the same infinite lattice of identical pins. A geometry difference
+between two pipelines leaves no trace in the generated columns, so nothing
+downstream could catch one; `tests/test_datagen_io.py`'s
+`test_every_shipped_config_models_the_same_pin` holds the shared values equal
+instead, on the configs themselves.
+
+Symmetry is a config key rather than a property of the script, so **an entry
+point is chosen by the history it applies, not by the geometry**:
+`datagen.py --config <a quarter-pin config>` is a sampled history on a quarter
+pin, and it works.
+
+What still differs between the pipelines is the **operating history**, and that
+is deliberate:
+
+| | CASL (`datagen.py`) | BEAVRS (`quarter_datagen.py`, `zoom_datagen.py`) |
+|---|---|---|
+| power | sampled per step from a range | measured, from `beavrs_cycle1_power.csv` |
+| temperatures, moderator density | sampled per step | fixed for the run, under `model` |
+| boron | sampled per step, 0–1000 ppm | none — pure H₂O |
+| tallies | none | flux, per-nuclide fission and (n,γ) |
 
 ## Inputs not in this repository
 

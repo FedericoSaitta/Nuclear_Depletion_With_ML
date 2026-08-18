@@ -10,7 +10,9 @@ from fresh fuel:
 
 Unlike `quarter_datagen.py` this steps one `integrate()` call per timestep,
 which is what lets it swap in reduced-fidelity transport for steps below
-`transport.power_threshold`, where transport statistics do not matter.
+`transport.power_threshold`, where transport statistics do not matter. The model
+itself is whatever `pin_sim` builds from the config, so it is the same pin cell
+the daily run depleted.
 
     DAILY=data_generation/results/worker_1_<hash>/depletion_results.h5
     uv run --extra sim python data_generation/zoom_datagen.py \
@@ -61,16 +63,15 @@ from loguru import logger
 
 import config as config_module
 import dataset_io
+import pin_sim
 import tally_io
-from common import DAY_IN_SECONDS, depletion_results_frame, setup_paths
-from nuclides import CAPTURE_NUCLIDES, FISSION_NUCLIDES
-from power_history import resample_power
-from quarter_sim import (
-    create_quarterpin_geometry,
-    create_quarterpin_settings,
-    create_quarterpin_tallies,
-    set_quarterpin_volumes,
+from common import (
+    DAY_IN_SECONDS,
+    deplete_one_step,
+    depletion_results_frame,
+    setup_paths,
 )
+from power_history import resample_power
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -116,58 +117,65 @@ def load_depleted_materials(daily_results_path, start_day, daily_dt):
 
 
 def build_model_from_exported(materials_path, cfg):
-    """Rebuild the quarter-pin model around the exported depleted materials.
+    """Rebuild the pin-cell model around the exported depleted materials.
 
-    Temperatures are not stored in materials.xml, so they are reapplied from the
-    config here — the geometry and tallies are then the same ones
-    `quarter_datagen` builds.
+    Only the compositions come from the daily run. Temperatures are not stored
+    in materials.xml so they are reapplied from the config, and the geometry,
+    settings and tallies are the ones `pin_sim` builds for any config — this is
+    the same pin cell, continued.
+
+    The moderator composition is deliberately *not* rewritten: water is not
+    depletable, so what the daily run exported is already this config's water,
+    and leaving it alone keeps the continuation exact.
     """
     materials = openmc.Materials.from_xml(materials_path)
     by_name = {mat.name: mat for mat in materials}
 
-    fuel = by_name.get("uo2")
-    if fuel is None:
+    names = ("uo2", "gap", "clad", "water")
+    missing = [name for name in names if name not in by_name]
+    if missing:
         raise SystemExit(
-            f"No 'uo2' material in {materials_path} — is it a quarter-pin daily run?"
+            f"{materials_path} has no {missing} material(s) — is it a daily run "
+            f"from quarter_datagen.py?"
         )
-    gap, clad, water = by_name.get("gap"), by_name.get("clad"), by_name.get("water")
+    mats = tuple(by_name[name] for name in names)
 
+    fuel = mats[0]
     fuel.depletable = True
-    fuel.temperature = cfg["fuel_temp"]
-    if gap:
-        gap.temperature = cfg["fuel_temp"]
-    if clad:
-        clad.temperature = cfg["clad_temp"]
-    if water:
-        water.temperature = cfg["mod_temp"]
+    pin_sim.set_temperatures(
+        mats,
+        fuel_temp=cfg["fuel_temp"],
+        clad_temp=cfg["clad_temp"],
+        mod_temp=cfg["mod_temp"],
+    )
 
+    symmetry = cfg["symmetry"]
     radii, pitch = cfg["geometry_radii"], cfg["geometry_pitch"]
-    set_quarterpin_volumes(fuel, gap, clad, water, radii, pitch)
-    geometry = create_quarterpin_geometry((fuel, gap, clad, water), radii, pitch)
-    settings = create_quarterpin_settings(cfg)
-    tallies = create_quarterpin_tallies(fuel)
+    pin_sim.set_volumes(mats, radii, pitch, symmetry)
+    geometry = pin_sim.create_geometry(mats, radii, pitch, symmetry)
+    settings = pin_sim.create_settings(cfg, symmetry, tally_output=True)
+    tallies = pin_sim.create_tallies(fuel)
 
-    return fuel, materials, geometry, settings, tallies
+    return mats, materials, geometry, settings, tallies
 
 
-def _decay_settings(cfg, settings, results_dir):
-    """Reduced-fidelity settings for a step with no meaningful transport."""
-    decay = openmc.Settings()
-    decay.particles = cfg["decay_particles"]
-    decay.inactive = cfg["decay_inactive"]
-    decay.batches = cfg["decay_batches"]
-    decay.verbosity = 1
-    decay.output = {"tallies": False}
+def _decay_settings(cfg, results_dir):
+    """Reduced-fidelity settings for a step with no meaningful transport.
 
-    source = openmc.IndependentSource()
-    source.space = openmc.stats.Point((0.05, 0.05, 0))
-    source.angle = openmc.stats.Isotropic()
-    source.energy = openmc.stats.Watt()
-    decay.source = source
-
-    decay.temperature = settings.temperature
-    if settings.seed is not None:
-        decay.seed = settings.seed
+    The settings the config's `transport` section describes, with the particle
+    counts swapped for the `decay_*` ones. Seed, temperature method and source
+    point come along unchanged, which is the point of building them through
+    `pin_sim` rather than by hand.
+    """
+    decay = pin_sim.create_settings(
+        {
+            **cfg,
+            "particles": cfg["decay_particles"],
+            "batches": cfg["decay_batches"],
+            "inactive": cfg["decay_inactive"],
+        },
+        cfg["symmetry"],
+    )
     decay.export_to_xml(path=results_dir)
     return decay
 
@@ -187,11 +195,11 @@ def run_zoom_depletion(
     model_parts, chain_file, powers, dt_seconds, fuel_mass_g, cfg, results_dir
 ):
     """Deplete the window one step at a time, extracting tallies as it goes."""
-    _fuel, materials, geometry, settings, tallies = model_parts
+    _mats, materials, geometry, settings, tallies = model_parts
     num_steps = len(powers)
     threshold = cfg["power_threshold"]
 
-    step_data = {key: [] for key in tally_io.step_keys()}
+    step_data = tally_io.new_step_data()
 
     for i in range(num_steps):
         decay_only = powers[i] < threshold
@@ -202,42 +210,26 @@ def run_zoom_depletion(
 
         if decay_only:
             model = openmc.model.Model(
-                geometry, materials, _decay_settings(cfg, settings, results_dir)
+                geometry, materials, _decay_settings(cfg, results_dir)
             )
         else:
             settings.export_to_xml(path=results_dir)
             model = openmc.model.Model(geometry, materials, settings, tallies)
 
-        previous = "depletion_results.h5" if i > 0 else None
-        if previous and os.path.exists(previous):
-            operator = openmc.deplete.CoupledOperator(
-                model, chain_file, prev_results=openmc.deplete.Results(previous)
-            )
-        else:
-            operator = openmc.deplete.CoupledOperator(model, chain_file)
-
-        openmc.deplete.PredictorIntegrator(
-            operator, [dt_seconds], [powers[i] * fuel_mass_g], timestep_units="s"
-        ).integrate()
+        deplete_one_step(
+            model,
+            chain_file,
+            dt_seconds,
+            powers[i] * fuel_mass_g,
+            continue_from="depletion_results.h5" if i > 0 else None,
+        )
 
         tally = (
             tally_io.zero_tally()
             if decay_only
             else _read_step_tallies(settings.batches)
         )
-        fractions = tally_io.compute_fission_power_fractions(tally)
-
-        step_data["flux"].append(tally["flux"])
-        step_data["flux_std"].append(tally["flux_std"])
-        for nuc in FISSION_NUCLIDES:
-            step_data[f"{nuc}_fission"].append(tally[f"{nuc}_fission"])
-            step_data[f"{nuc}_fission_std"].append(tally[f"{nuc}_fission_std"])
-            step_data[f"{nuc}_fission_power_frac"].append(
-                fractions[f"{nuc}_fission_power_frac"]
-            )
-        for nuc in CAPTURE_NUCLIDES:
-            step_data[f"{nuc}_capture"].append(tally[f"{nuc}_capture"])
-            step_data[f"{nuc}_capture_std"].append(tally[f"{nuc}_capture_std"])
+        fractions = tally_io.append_step(step_data, tally)
 
         if not decay_only:
             logger.info(
@@ -277,7 +269,8 @@ if __name__ == "__main__":
     dt_seconds = cfg["delta_t_days"] * DAY_IN_SECONDS
 
     model_parts = build_model_from_exported(materials_path, cfg)
-    fuel, materials, geometry, settings, _tallies = model_parts
+    mats, materials, geometry, settings, _tallies = model_parts
+    fuel = mats[0]
 
     # Same cross-sections / chain / working-directory setup every worker gets;
     # this pipeline is single-process, so it uses one fixed "worker" name.

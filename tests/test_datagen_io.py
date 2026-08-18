@@ -322,7 +322,34 @@ def test_every_shipped_config_loads(name):
     assert cfg["enrichment"] > 0
     assert cfg["particles"] > 0
     assert cfg["chain_file"].endswith(".xml")
-    assert len(cfg["geometry_radii"]) >= 2
+    assert len(cfg["geometry_radii"]) == 3
+    assert cfg["symmetry"] in datagen_config.SYMMETRY_FRACTION
+
+
+def test_every_shipped_config_models_the_same_pin():
+    """Every pipeline must describe the same fuel pin.
+
+    A geometry difference between two configs leaves no trace in the generated
+    columns, so nothing downstream could catch one -- which is why it is
+    asserted here, on the configs themselves. Symmetry is the only model
+    difference allowed, and it changes how much of the lattice is tracked, not
+    what is in it.
+    """
+    shared = ("enrichment", "fuel_density", "geometry_radii", "geometry_pitch")
+    configs = {
+        name: datagen_config.load(os.path.join(CONFIG_DIR, name))
+        for name in (
+            "casl_pincell.yaml",
+            "beavrs_quarterpin.yaml",
+            "beavrs_zoom.yaml",
+            "smoke_pincell.yaml",
+        )
+    }
+
+    reference = configs["beavrs_quarterpin.yaml"]
+    for name, cfg in configs.items():
+        for key in shared:
+            assert cfg[key] == reference[key], f"{name} disagrees on {key}"
 
 
 def test_an_unknown_key_is_refused(tmp_path):
@@ -330,8 +357,8 @@ def test_an_unknown_key_is_refused(tmp_path):
     queue, having silently run with the default instead."""
     path = tmp_path / "c.yaml"
     path.write_text(
-        "model: {enrichment: 3.1, fuel_density: 10.4, geometry_radii: [1, 2],\n"
-        "        geometry_pitch: 1.0, particels: 500}\n"
+        "model: {enrichment: 3.1, fuel_density: 10.4, geometry_radii: [1, 2, 3],\n"
+        "        geometry_pitch: 1.0, symmetry: full, particels: 500}\n"
         "transport: {particles: 100, batches: 10, inactive: 2}\n"
         "depletion: {chain_file: chain.xml}\n"
     )
@@ -342,8 +369,8 @@ def test_an_unknown_key_is_refused(tmp_path):
 def test_a_missing_required_key_is_refused(tmp_path):
     path = tmp_path / "c.yaml"
     path.write_text(
-        "model: {enrichment: 3.1, fuel_density: 10.4, geometry_radii: [1, 2],\n"
-        "        geometry_pitch: 1.0}\n"
+        "model: {enrichment: 3.1, fuel_density: 10.4, geometry_radii: [1, 2, 3],\n"
+        "        geometry_pitch: 1.0, symmetry: full}\n"
         "transport: {particles: 100, batches: 10}\n"
         "depletion: {chain_file: chain.xml}\n"
     )
@@ -351,11 +378,49 @@ def test_a_missing_required_key_is_refused(tmp_path):
         datagen_config.load(path)
 
 
+def _model_config(model_line):
+    return (
+        f"model: {{{model_line}}}\n"
+        "transport: {particles: 100, batches: 10, inactive: 2}\n"
+        "depletion: {chain_file: chain.xml}\n"
+    )
+
+
+def test_an_unknown_symmetry_is_refused(tmp_path):
+    """`symmetry` indexes a lookup table in `pin_sim`; an unknown value used to
+    surface as a KeyError minutes into a run."""
+    path = tmp_path / "c.yaml"
+    path.write_text(
+        _model_config(
+            "enrichment: 3.1, fuel_density: 10.4, geometry_radii: [1, 2, 3], "
+            "geometry_pitch: 1.0, symmetry: half"
+        )
+    )
+    with pytest.raises(SystemExit, match="symmetry"):
+        datagen_config.load(path)
+
+
+@pytest.mark.parametrize("radii", ["[1, 2]", "[1, 2, 3, 4]", "[1, 3, 2]"])
+def test_bad_geometry_radii_are_refused(tmp_path, radii):
+    """Three radii, increasing outwards: fuel, gap, cladding. Two of them would
+    be read as a pin with no cladding, and the run would reach OpenMC before
+    anything noticed."""
+    path = tmp_path / "c.yaml"
+    path.write_text(
+        _model_config(
+            f"enrichment: 3.1, fuel_density: 10.4, geometry_radii: {radii}, "
+            "geometry_pitch: 1.0, symmetry: full"
+        )
+    )
+    with pytest.raises(SystemExit, match="geometry_radii"):
+        datagen_config.load(path)
+
+
 def test_an_unknown_section_is_refused(tmp_path):
     path = tmp_path / "c.yaml"
     path.write_text(
-        "model: {enrichment: 3.1, fuel_density: 10.4, geometry_radii: [1, 2],\n"
-        "        geometry_pitch: 1.0}\n"
+        "model: {enrichment: 3.1, fuel_density: 10.4, geometry_radii: [1, 2, 3],\n"
+        "        geometry_pitch: 1.0, symmetry: full}\n"
         "transport: {particles: 100, batches: 10, inactive: 2}\n"
         "depletion: {chain_file: chain.xml}\n"
         "runtime: {device: cpu}\n"

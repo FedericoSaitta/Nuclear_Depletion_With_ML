@@ -1,6 +1,6 @@
 """The nuclide lists the BEAVRS tallies are scored over.
 
-Kept apart from `quarter_sim`, which builds the OpenMC objects, so that the
+Kept apart from `pin_sim`, which builds the OpenMC objects, so that the
 column schema can be imported — and tested — without OpenMC installed. That is
 the whole reason this file exists: CI has no OpenMC build and no nuclear data,
 so anything that needs them is untestable there.

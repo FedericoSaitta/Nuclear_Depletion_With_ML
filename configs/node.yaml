@@ -38,7 +38,7 @@ dataset:
 
 model:
   kind: NODE
-  name: matrix_ode_7x7_breeding_chain
+  name: BEST_7x7_matrix_NODE
   matrix_ode: true
   layers: [128, 128]
   dropout_probability: 0.0

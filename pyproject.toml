@@ -149,13 +149,13 @@ extend-select = ["I", "UP", "B", "SIM", "C4", "RET"]
 # this, isort reads them as third-party and interleaves them with numpy and
 # openmc, which hides the fact that they are local.
 known-first-party = [
+  "cli",
   "common",
   "config",
   "dataset_io",
   "nuclides",
+  "pin_sim",
   "power_history",
-  "quarter_sim",
-  "reactor_sim",
   "tally_io",
 ]
 

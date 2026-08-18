@@ -25,11 +25,13 @@ __all__ = [
     "DAY_IN_SECONDS",
     "HOUR_IN_SECONDS",
     "create_worker_configs",
+    "deplete_one_step",
     "depletion_results_frame",
     "run_parallel_simulations",
     "run_sweep",
     "save_results",
     "setup_paths",
+    "specific_burnup",
 ]
 
 
@@ -112,6 +114,26 @@ def run_sweep(worker_fn, base_config, num_runs, num_workers, master_seed=None):
             f"{elapsed:.1f}s"
         )
     return used
+
+
+def deplete_one_step(model, chain_file, dt_seconds, power_watts, continue_from=None):
+    """Deplete *model* through a single timestep.
+
+    Both step-at-a-time pipelines — the sampled-history one, because the
+    operating state changes between steps, and the zoom one, because the
+    transport fidelity does — call this once per step, continuing from the
+    `depletion_results.h5` the previous call left behind.
+    """
+    if continue_from and os.path.exists(continue_from):
+        operator = openmc.deplete.CoupledOperator(
+            model, chain_file, prev_results=openmc.deplete.Results(continue_from)
+        )
+    else:
+        operator = openmc.deplete.CoupledOperator(model, chain_file)
+
+    openmc.deplete.PredictorIntegrator(
+        operator, [dt_seconds], [power_watts], timestep_units="s"
+    ).integrate()
 
 
 def depletion_results_frame(results, label, per_step=None, time_offset_days=0.0):

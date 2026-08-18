@@ -24,6 +24,10 @@ temperatures, moderator density and boron concentration from configured ranges
 `casl_3305_runs_inter.h5` holds 3,305 such runs — 333,805 rows × 238 columns,
 one column per nuclide in the depletion chain plus the operating state.
 
+The CASL and BEAVRS pipelines share one pin model — fuel, helium gap,
+Zircaloy-4 cladding, water — so a surrogate trained on one can be held against
+the other. See `data_generation/README.md`, "One model, two histories".
+
 The physics being learned is the **breeding chain**:
 
 ```

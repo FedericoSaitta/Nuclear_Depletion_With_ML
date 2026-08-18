@@ -111,6 +111,6 @@ jobs:
         run: |
           cd data_generation
           UV_PROJECT_ENVIRONMENT=../.venv-sim uv run --extra sim python -c "
-          import common, config, dataset_io, nuclides, power_history
-          import quarter_sim, reactor_sim, tally_io
+          import cli, common, config, dataset_io, nuclides, power_history
+          import pin_sim, tally_io
           print('all data_generation modules import')"

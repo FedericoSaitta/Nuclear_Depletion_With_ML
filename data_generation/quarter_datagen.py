@@ -16,36 +16,18 @@ The config describes the simulation; the flags describe the machine. `--help`
 works without OpenMC installed, because argparse runs before the import.
 """
 
-import argparse
+from cli import sweep_parser
 
 # Parse argv and set OMP_NUM_THREADS BEFORE importing OpenMC, which reads the
 # variable at import time. This ordering is why E402 is scoped off for this
-# file in pyproject.toml.
-parser = argparse.ArgumentParser(
+# file in pyproject.toml. `cli` is pure argparse, so importing it up here costs
+# nothing and needs no OpenMC.
+args = sweep_parser(
     description="BEAVRS Cycle 1 quarter-pin depletion data generation",
-    formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-)
-parser.add_argument(
-    "--config",
-    required=True,
-    help="simulation config, e.g. data_generation/configs/beavrs_quarterpin.yaml",
-)
-parser.add_argument(
-    "-n", "--runs", type=int, default=1, help="rounds of parallel workers"
-)
-parser.add_argument(
-    "-c", "--cores", type=int, default=1, help="parallel worker processes per round"
-)
-parser.add_argument(
-    "-t", "--threads", type=int, default=1, help="OpenMP threads per worker"
-)
-parser.add_argument(
-    "-s", "--seed", type=int, default=None, help="master seed (None = random)"
-)
-parser.add_argument(
-    "--out", default=None, help="output directory (default: data_generation/data)"
-)
-args = parser.parse_args()
+    config_example="data_generation/configs/beavrs_quarterpin.yaml",
+    default_runs=1,
+    default_cores=1,
+).parse_args()
 
 import os
 
@@ -60,6 +42,7 @@ from loguru import logger
 
 import config as config_module
 import dataset_io
+import pin_sim
 import tally_io
 from common import (
     DAY_IN_SECONDS,
@@ -70,38 +53,8 @@ from common import (
 )
 from nuclides import CAPTURE_NUCLIDES, FISSION_NUCLIDES
 from power_history import resample_power
-from quarter_sim import (
-    create_quarterpin_geometry,
-    create_quarterpin_materials,
-    create_quarterpin_settings,
-    create_quarterpin_tallies,
-    set_quarterpin_volumes,
-)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-
-def setup_reactor_model(cfg, results_dir):
-    """Build and export the quarter-pin reactor model."""
-    fuel, gap, clad, water = create_quarterpin_materials(cfg)
-    set_quarterpin_volumes(
-        fuel, gap, clad, water, radii=cfg["geometry_radii"], pitch=cfg["geometry_pitch"]
-    )
-
-    materials = openmc.Materials([fuel, gap, clad, water])
-    geometry = create_quarterpin_geometry(
-        (fuel, gap, clad, water),
-        radii=cfg["geometry_radii"],
-        pitch=cfg["geometry_pitch"],
-    )
-    settings = create_quarterpin_settings(cfg)
-    tallies = create_quarterpin_tallies(fuel)
-
-    geometry.export_to_xml(path=results_dir)
-    settings.export_to_xml(path=results_dir)
-    materials.export_to_xml(path=results_dir)
-
-    return fuel, materials, geometry, settings, tallies
 
 
 def _statepoints_by_step(results_dir):
@@ -131,7 +84,7 @@ def run_depletion_with_tallies(
     *powers* are specific powers in W/g, one per step. Zeros pass straight
     through; OpenMC treats them as decay-only internally.
     """
-    _fuel, materials, geometry, settings, tallies = model_parts
+    _mats, materials, geometry, settings, tallies = model_parts
     num_steps = len(powers)
 
     model = openmc.model.Model(geometry, materials, settings, tallies)
@@ -150,7 +103,7 @@ def run_depletion_with_tallies(
         timestep_units="s",
     ).integrate()
 
-    step_data = {key: [] for key in tally_io.step_keys()}
+    step_data = tally_io.new_step_data()
     statepoints = _statepoints_by_step(results_dir)
 
     for i in range(num_steps):
@@ -161,20 +114,7 @@ def run_depletion_with_tallies(
             tally = (
                 tally_io.read_statepoint_tallies(path) if path else tally_io.nan_tally()
             )
-
-        fractions = tally_io.compute_fission_power_fractions(tally)
-
-        step_data["flux"].append(tally["flux"])
-        step_data["flux_std"].append(tally["flux_std"])
-        for nuc in FISSION_NUCLIDES:
-            step_data[f"{nuc}_fission"].append(tally[f"{nuc}_fission"])
-            step_data[f"{nuc}_fission_std"].append(tally[f"{nuc}_fission_std"])
-            step_data[f"{nuc}_fission_power_frac"].append(
-                fractions[f"{nuc}_fission_power_frac"]
-            )
-        for nuc in CAPTURE_NUCLIDES:
-            step_data[f"{nuc}_capture"].append(tally[f"{nuc}_capture"])
-            step_data[f"{nuc}_capture_std"].append(tally[f"{nuc}_capture_std"])
+        tally_io.append_step(step_data, tally)
 
     return step_data
 
@@ -191,8 +131,8 @@ def generate_data(cfg):
     logger.info(f"Worker {worker_id} | fission tallies: {FISSION_NUCLIDES}")
     logger.info(f"Worker {worker_id} | capture tallies: {CAPTURE_NUCLIDES}")
 
-    model_parts = setup_reactor_model(cfg, results_dir)
-    fuel = model_parts[0]
+    model_parts = pin_sim.build_and_export_model(cfg, results_dir, with_tallies=True)
+    fuel = model_parts[0][0]
     os.chdir(results_dir)
 
     fuel_mass_g = cfg["fuel_density"] * fuel.volume

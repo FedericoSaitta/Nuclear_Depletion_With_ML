@@ -18,6 +18,7 @@ model:
   fuel_density: 10.4           # g/cm3 UO2
   geometry_radii: [0.39218, 0.40005, 0.45720]
   geometry_pitch: 1.25984      # cm
+  symmetry: quarter
 
   fuel_temp: 900.0             # K
   mod_temp: 580.0              # K
