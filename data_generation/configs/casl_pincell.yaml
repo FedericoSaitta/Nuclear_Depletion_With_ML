@@ -20,17 +20,21 @@ model:
   geometry_radii: [0.39218, 0.40005, 0.45720]
   geometry_pitch: 1.25984      # cm
   # The whole cell, boundaries at +/-pitch/2. The BEAVRS configs model a quarter
-  # of the same lattice; nothing else about the two models differs.
+  # of the same lattice; nothing else about the two pin models differs.
   symmetry: full
 
 transport:
   particles: 5000
-  batches: 50
+  batches: 60
   inactive: 10
   temp_method: interpolation   # or `nearest`
   use_wmp: false               # windowed multipole; overrides temp_method
 
 depletion:
+  # The CASL PWR chain: 228 nuclides. The BEAVRS config uses the much larger
+  # chain_endfb71_pwr.xml, which is why a BEAVRS dataset carries 3819 nuclide
+  # columns where a sweep from here carries 228. This set is a subset of that
+  # one, so the two align on column name.
   chain_file: chain_casl_pwr.xml
   num_steps: 100
   delta_t_days: 10

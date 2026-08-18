@@ -3,8 +3,9 @@
 # Unlike the CASL config there is no sampling here — the power history is the
 # measured one, read from `beavrs_cycle1_power.csv` and interpolated onto a
 # uniform grid. The reactor state is held fixed below, so power is the only
-# thing that varies along a run. That, and `symmetry`, are the whole difference
-# between this model and the CASL one.
+# thing that varies along a run. That, `symmetry`, and the depletion chain are
+# the whole difference between this config and the CASL one — the pin itself is
+# identical.
 #
 #   uv run --extra sim python data_generation/quarter_datagen.py \
 #       --config data_generation/configs/beavrs_quarterpin.yaml -c 1 -t 40
@@ -18,7 +19,8 @@ model:
   geometry_radii: [0.39218, 0.40005, 0.45720]
   geometry_pitch: 1.25984      # cm
   # One quadrant, cut on the symmetry planes through the pin centre. The CASL
-  # config models the whole cell of the same lattice; nothing else differs.
+  # config models the whole cell of the same lattice; nothing else about the
+  # two pin models differs.
   symmetry: quarter
 
   # Fixed reactor state. No boron: the water is pure H2O.
@@ -28,13 +30,17 @@ model:
   mod_density: 0.74            # g/cm3
 
 transport:
-  particles: 20000
-  batches: 80                  # active batches = batches - inactive
-  inactive: 20
+  particles: 50000
+  batches: 60                  # active batches = batches - inactive
+  inactive: 15
   temp_method: interpolation
 
 depletion:
-  chain_file: chain_casl_pwr.xml
+  # The full ENDF/B-VII.1 PWR chain: 3819 nuclides, against the 228 of the
+  # chain_casl_pwr.xml the CASL config uses. This is what the published
+  # beavrs_cycle1_daily.h5 was depleted with, and it is why that file carries
+  # 3819 nuclide columns where the CASL file carries 228.
+  chain_file: chain_endfb71_pwr.xml
   delta_t_days: 1.0
   power_file: beavrs_cycle1_power.csv
   rated_power: 41.7            # W/g at 100 % rated power

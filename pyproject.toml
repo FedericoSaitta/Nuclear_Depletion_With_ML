@@ -1,5 +1,5 @@
 # ============================================================================
-#  Nuclear_Transport_With_ML — single dependency source of truth.
+#  Nuclear_Depletion_With_ML — single dependency source of truth.
 #
 #  The repo has two disjoint halves (verified: no shared imports):
 #     src/nuclear_surrogates/ → torch / lightning / torchdiffeq  [extra: ml]

@@ -15,7 +15,7 @@ from loguru import logger
 def parse_power_history(filepath):
     """Parse a BEAVRS Cycle 1 power history into (days, percent) arrays.
 
-    The committed `beavrs_cycle1_power.csv` is 575 bare ``day,percent`` rows with
+    The committed `beavrs_cycle1_power.csv` is 527 bare ``day,percent`` rows with
     no header. The banner and header handling below is for the file as it comes
     out of the BEAVRS release, which prefixes a "Cycle 1" line and a
     "Day, Percent" header — both forms parse, so a freshly downloaded table can

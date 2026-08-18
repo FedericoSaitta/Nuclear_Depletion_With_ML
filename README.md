@@ -1,6 +1,6 @@
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21975132.svg)](https://doi.org/10.5281/zenodo.21975132)
 
-# Nuclear_Transport_With_ML
+# Nuclear_Depletion_With_ML
 
 Machine-learning surrogates for OpenMC fuel-depletion calculations. A Monte-Carlo
 depletion run of a PWR pin cell takes hours to weeks; a trained surrogate
@@ -31,8 +31,8 @@ Requires [uv](https://docs.astral.sh/uv/). Python itself is provisioned by uv â€
 not need to install or `module load` anything.
 
 ```bash
-git clone https://github.com/FedericoSaitta/Nuclear_Transport_With_ML.git
-cd Nuclear_Transport_With_ML
+git clone https://github.com/FedericoSaitta/Nuclear_Depletion_With_ML.git
+cd Nuclear_Depletion_With_ML
 uv sync --extra ml
 ```
 
@@ -228,7 +228,7 @@ wsl
 sudo apt update && sudo apt install -y g++ cmake libhdf5-dev git
 curl -LsSf https://astral.sh/uv/install.sh | sh && source ~/.bashrc
 
-cd /mnt/c/Users/<you>/path/to/Nuclear_Transport_With_ML
+cd /mnt/c/Users/<you>/path/to/Nuclear_Depletion_With_ML
 echo 'export UV_PROJECT_ENVIRONMENT=$HOME/venvs/nuc-sim' >> ~/.bashrc
 source ~/.bashrc
 uv sync --extra sim

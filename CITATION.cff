@@ -16,12 +16,13 @@ contributors:
     given-names: "Stuart"
     affiliation: "The University of Manchester"
     role: "lecturer"
+    orcid: "https://orcid.org/0009-0000-5970-0835"
 
 version: "0.1.0"
-date-released: "2026-08-15"
+date-released: "2026-08-18"
 
-repository-code: "https://github.com/FedericoSaitta/Nuclear_Transport_With_ML"
-url: "https://github.com/FedericoSaitta/Nuclear_Transport_With_ML.git"
+repository-code: "https://github.com/FedericoSaitta/Nuclear_Depletion_With_ML"
+url: "https://github.com/FedericoSaitta/Nuclear_Depletion_With_ML.git"
 
 keywords:
   - "nuclear depletion"
