@@ -17,9 +17,9 @@ dataset:
   # Fractions of whole runs. The NODE partitions by a seeded random
   # permutation of runs; the DNN splits sequentially in time.
   split:
-    train: 0.6
-    val: 0.2
-    test: 0.2
+    train: 0.8
+    val: 0.1
+    test: 0.1
 
   inputs:
     power_W_g: MinMax
