@@ -7,7 +7,7 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression
 }
 
-uv python install                      # honours .python-version -> CPython 3.12
+uv python install                      # honours requires-python -> CPython 3.12
 uv sync --extra ml --locked            # ~3 GB of CUDA wheels on first run
 
 uv run python -c @"
@@ -18,4 +18,4 @@ print(f'cuda       {torch.cuda.is_available()}  {torch.cuda.get_device_name(0) i
 "@
 
 Write-Host ""
-Write-Host "Ready.  Train with:  uv run nucml --config configs/main_config.yaml"
+Write-Host "Ready.  Train with:  uv run nucml train --config configs/node.yaml --data datasets/<file>.h5"

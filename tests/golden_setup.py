@@ -70,27 +70,34 @@ def fixtures_present() -> bool:
     return all(os.path.exists(os.path.join(FIX, f)) for f in REQUIRED_FIXTURES)
 
 
-def build_inference_cfg(preprocessor_path=PREPROCESSOR, train_h5=None, output_dir=None):
+def build_inference_cfg(preprocessor_path=PREPROCESSOR, output_dir=None):
     """Config for evaluating the frozen NODE on the 10-run mini fixture.
 
-    With *preprocessor_path* the fitted scalers are loaded and the training file
-    is never opened. Passing ``preprocessor_path=None`` plus *train_h5* selects
-    the historical path that re-fits them — which is how the fixture
-    preprocessor itself is generated.
+    The fitted scalers are loaded from *preprocessor_path* and the training
+    file is never opened — there is no other way to run inference, by design.
+    `make_golden.freeze_preprocessor` is what produces that file.
+
+    Every path is set here, absolute. The frozen fixture config is never asked
+    to supply one, which is why it survives untouched across the move to a
+    path-free config schema — and why the goldens it pins cannot move with it.
     """
-    from nuclear_surrogates.utils.paths import resolve_config_paths
-
     cfg = OmegaConf.load(CONFIG)
-    resolve_config_paths(cfg, CONFIG)
-    cfg.runtime.update(mode="inference", device="cpu", num_workers=0, plots=False)
-    if output_dir is not None:
-        cfg.runtime.output_dir = str(output_dir)
+    # The frozen config carries no runtime block — a config describes a model.
+    # 42 is the seed the committed goldens were generated under; it reaches the
+    # NODE datamodule's run permutation, so it is load-bearing, not decoration.
+    cfg.runtime = {
+        "device": "cpu",
+        "num_workers": 0,
+        "analyses": False,
+        "seed": 42,
+        "output_dir": str(output_dir) if output_dir is not None else "results",
+    }
     cfg.dataset.path_to_inference_data = MINI_H5
-
-    if preprocessor_path:
-        cfg.dataset.preprocessor_path = preprocessor_path
-    else:
-        cfg.dataset.path_to_data = train_h5 or TRAIN_H5
+    cfg.dataset.preprocessor_path = preprocessor_path
+    # Empty, not absent: the datamodules read it by attribute even in inference
+    # mode, where nothing opens it. `read_bundle` blanks it the same way, so a
+    # bundle can never reopen the file it was trained on.
+    cfg.dataset.path_to_data = ""
     return cfg
 
 
@@ -121,4 +128,4 @@ def matrix_probes(model):
     torch.manual_seed(0)
     y_probe = torch.rand(3, 7)
     f_probe = torch.rand(3, 1)
-    return model.func._build_matrix(f_probe, y_probe).detach().numpy()
+    return model.func.build_matrix(f_probe, y_probe).detach().numpy()

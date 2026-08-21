@@ -1,23 +1,24 @@
-# The paper's 7x7 matrix NODE, as it was actually trained.
+# The paper's 7x7 matrix Neural ODE, as trained.
 #
-# The train block below was recovered from the checkpoint's own embedded
-# hyperparameters (`hyper_parameters` in
-# best-matrix_ode_7x7_breeding_chain-epoch=2367.ckpt) — the values previously
-# committed here had drifted from the run they claimed to describe. The model
-# block was verified against the same source and matched exactly.
+# This file describes the MODEL and nothing else — no paths, no device, no
+# mode. Those are command-line flags, so this same file trains on a laptop and
+# on the cluster:
 #
-# Paths are resolved relative to THIS FILE, not to the working directory.
+#   nucml train --config configs/node.yaml --data datasets/casl_3305_runs_inter.h5
+#
+# `dataset.train.batch_size` is not a free knob for a NODE: it changes both the
+# number of optimiser steps and the adaptive solver's step controller, which is
+# shared across whatever is in the batch. Raising it for speed produces a
+# different run, which must not be reported as the paper's.
 dataset:
-  path_to_data: ../datasets/casl_3305_runs_inter.h5   # training data (fits the scalers)
-  path_to_inference_data: ../datasets/casl_3305_runs_inter.h5
-  fraction_of_data: 0.1
+  fraction_of_data: 1.0
 
   # Fractions of whole runs. The NODE partitions by a seeded random
   # permutation of runs; the DNN splits sequentially in time.
   split:
-    train: 0.6
-    val: 0.2
-    test: 0.2
+    train: 0.8
+    val: 0.1
+    test: 0.1
 
   inputs:
     power_W_g: MinMax
@@ -30,20 +31,23 @@ dataset:
     Pu241: MinMax
     Pu242: MinMax
 
-  target_delta_conc: False
   train:
     batch_size: 64
   val:
     batch_size: 300
 
 model:
-  name: matrix_ode_7x7_breeding_chain
+  kind: NODE
+  name: BEST_7x7_matrix_NODE
   matrix_ode: true
   layers: [128, 128]
   dropout_probability: 0.0
   activation: gelu
-  output_activation: none
   residual_connections: false
+
+  # No `output_activation` here: a matrix ODE applies its own sign constraints
+  # to the network's output, so ODEFuncMatrix hardcodes "none" and would
+  # silently discard whatever this said.
 
   # Target order: U238(0), U239(1), Np239(2), Pu239(3), Pu240(4), Pu241(5), Pu242(6)
   # Physical chain: U238 -> U239 -> Np239 -> Pu239 -> Pu240 -> Pu241 -> Pu242
@@ -67,24 +71,10 @@ train:
   num_epochs: 5000
   early_stopping_patience: 75
   grad_clip: 0.0
-  drop_last: false
 
+  # `step_size` is read only by fixed-step solvers (rk4); dopri5 chooses its
+  # own steps from the error estimate. The published run carried the key with
+  # no effect, so dropping it changes nothing about the model this describes.
   solver: dopri5
   rtol: 1e-5
   atol: 1e-7
-  step_size: 0.01
-
-runtime:
-  mode: train
-  model: NODE
-  # Checkpoint to load for mode: train_from_ckp / inference. Resolved like the
-  # dataset paths above, so a relative value is taken from this file's directory.
-  ckp_path: ""
-  device: cpu
-  seed: 42
-  num_workers: 0
-
-  # Both resolved relative to this file, so output lands in the same place no
-  # matter which directory the run was launched from.
-  output_dir: ../results
-  model_database: ../Chain_Model.db

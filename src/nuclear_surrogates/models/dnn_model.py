@@ -5,9 +5,9 @@ import numpy as np
 import torch
 from loguru import logger
 from omegaconf import OmegaConf
-from sklearn.metrics import mean_absolute_error, r2_score
 
 from nuclear_surrogates import evaluation
+from nuclear_surrogates.datamodule.dataset_helper import ordered_names
 from nuclear_surrogates.models.model_architectures import Deep_Neural_Network
 from nuclear_surrogates.models.model_helper import get_loss_fn
 from nuclear_surrogates.utils import metrics, plot
@@ -65,8 +65,6 @@ class DNN_Model(L.LightningModule):
     def _init_tracking_variables(self):
         self.train_losses = []
         self.val_losses = []
-        self.val_r2_scores = []
-        self.val_mae_scores = []
         self.test_predictions = []
         self.test_labels = []
         self.test_inputs = []
@@ -74,12 +72,24 @@ class DNN_Model(L.LightningModule):
         self.val_preds_epoch = []
         self.val_targets_epoch = []
 
+    @property
+    def draw_analyses(self):
+        """Whether to emit the evaluation figures and run the post-hoc analyses.
+
+        `--no-analyses` turns this off. The line it draws is regenerability:
+        everything gated on it can be recreated later with `nucml plots` from
+        the bundle, so skipping it during a hyperparameter sweep costs nothing
+        permanent. The training loss curve is deliberately **not** gated — it is
+        written by `on_train_end`, which `plots` never reaches, so it is the one
+        figure that would be gone for good. Metrics are computed either way.
+        """
+        return self.cfg.runtime.get("analyses", True)
+
     # ── Training ─────────────────────────────────────────────────────────────
 
     def training_step(self, batch, batch_idx):
         x, y = batch
         loss = self.loss_fn(self.model(x), y)
-        # Deliberately not logged to the SQLite database: only final results are.
         self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
         return loss
 
@@ -87,6 +97,8 @@ class DNN_Model(L.LightningModule):
         self.train_losses.append(self.trainer.callback_metrics["train_loss"].item())
 
     def on_train_end(self):
+        # Not gated on `draw_analyses`: `nucml plots` cannot regenerate this one,
+        # because it never runs `fit`. See `draw_analyses`.
         plot.plot_losses(self.train_losses, self.val_losses, self.result_dir)
 
     # ── Validation ───────────────────────────────────────────────────────────
@@ -112,13 +124,11 @@ class DNN_Model(L.LightningModule):
         all_preds = np.concatenate(self.val_preds_epoch, axis=0)
         all_targets = np.concatenate(self.val_targets_epoch, axis=0)
 
-        r2 = r2_score(all_targets, all_preds, multioutput="uniform_average")
+        r2 = float(metrics.r2(all_targets, all_preds).mean())
         self.log("val_r2", r2, prog_bar=True)
-        self.val_r2_scores.append(r2)
 
-        mae = mean_absolute_error(all_targets, all_preds, multioutput="uniform_average")
+        mae = float(metrics.mae(all_targets, all_preds).mean())
         self.log("val_mae", mae, prog_bar=True)
-        self.val_mae_scores.append(mae)
 
         self.val_preds_epoch = []
         self.val_targets_epoch = []
@@ -150,7 +160,11 @@ class DNN_Model(L.LightningModule):
 
     def on_test_epoch_end(self):
         datamodule = self.trainer.datamodule
-        target_names = list(datamodule.target.keys())
+        # Array order, not config-dict order: the prediction columns are laid
+        # out by target_index_map, and a config listing targets in a different
+        # order than they appear among the inputs would otherwise mislabel
+        # every per-target metric and figure.
+        target_names = ordered_names(datamodule.target_index_map)
 
         test_data = self._prepare_test_data()
         y_true_test = test_data["labels"]
@@ -159,29 +173,15 @@ class DNN_Model(L.LightningModule):
             f"Test set shape - True: {y_true_test.shape}, Pred: {y_pred_test.shape}"
         )
 
-        mae_arr, rmse_arr, r2_arr = self._compute_and_log_overall_metrics(
-            y_true_test, y_pred_test
+        per_target_metrics, mae_arr, rmse_arr, r2_arr = evaluation.report_per_target(
+            y_true_test,
+            y_pred_test,
+            target_names,
+            self.result_dir,
+            self.log,
+            steps_per_run=datamodule.samples_per_run,
+            figures=self.draw_analyses,
         )
-
-        per_target_metrics = []
-        for idx, target_name in enumerate(target_names):
-            self._plot_single_output(
-                target_name,
-                y_true_test[:, idx],
-                y_pred_test[:, idx],
-                mae_arr[idx],
-                rmse_arr[idx],
-                r2_arr[idx],
-                datamodule.samples_per_run,
-            )
-            per_target_metrics.append(
-                {
-                    "name": target_name,
-                    "mae": float(mae_arr[idx]),
-                    "rmse": float(rmse_arr[idx]),
-                    "r2": float(r2_arr[idx]),
-                }
-            )
 
         # Everything below works on (runs, steps, targets) arrays in physical
         # units, which is the shape the shared report functions expect.
@@ -192,17 +192,42 @@ class DNN_Model(L.LightningModule):
         evaluation.report_mare_comparison(
             trues, ar_preds, tf_preds, target_names, self.log, per_target_metrics
         )
-        self._compute_feature_importance(
-            target_names, datamodule, datamodule.test_dataloader()
-        )
-        evaluation.report_prediction_comparisons(
-            trues, ar_preds, tf_preds, target_names, self.result_dir
-        )
-        evaluation.report_error_growth(
-            trues, ar_preds, tf_preds, target_names, self.result_dir, self.log
-        )
+        if self.draw_analyses:
+            self._compute_feature_importance(
+                target_names, datamodule, datamodule.test_dataloader()
+            )
+            evaluation.report_prediction_comparisons(
+                trues, ar_preds, tf_preds, target_names, self.result_dir
+            )
+            evaluation.report_error_growth(
+                trues, ar_preds, tf_preds, target_names, self.result_dir, self.log
+            )
+            evaluation.report_trajectories(
+                # No time axis: the DNN is a one-step map and has no notion of
+                # how long a step is. Counting steps is the honest x-axis here.
+                np.arange(trues.shape[1]),
+                trues,
+                ar_preds,
+                self._forcing_series(test_data, datamodule),
+                target_names,
+                self.result_dir,
+                xlabel="Time step",
+            )
 
-        self._log_to_database(mae_arr, rmse_arr, r2_arr, per_target_metrics)
+        self._write_test_metrics(mae_arr, rmse_arr, r2_arr, per_target_metrics)
+
+    def _forcing_series(self, test_data, datamodule):
+        """The first input column per run, in physical units — the forcing.
+
+        Mirrors the NODE, which plots `inputs[:, :, 0]`. Column 0 of
+        `col_index_map` is the forcing for both models by construction: the
+        config lists it before the isotope concentrations.
+        """
+        samples_per_run = datamodule.samples_per_run
+        unscaled = datamodule.input_scaler.inverse_transform(test_data["inputs"])
+        forcing_idx = ordered_names(datamodule.col_index_map)[0]
+        series = unscaled[:, datamodule.col_index_map[forcing_idx]]
+        return series.reshape(len(series) // samples_per_run, samples_per_run)
 
     def _prepare_test_data(self):
         """Consolidate test data from batches."""
@@ -212,28 +237,6 @@ class DNN_Model(L.LightningModule):
             "predictions": np.concatenate(self.test_predictions, axis=0),
             "labels": np.concatenate(self.test_labels, axis=0),
         }
-
-    def _compute_and_log_overall_metrics(self, y_true, y_pred):
-        """Per-output MAE, RMSE and R²; the averages go to the progress bar."""
-        mae_per_output = metrics.mae(y_true, y_pred)
-        rmse_per_output = metrics.rmse(y_true, y_pred)
-        r2_per_output = metrics.r2(y_true, y_pred)
-
-        self.log("Mean Absolute Error (avg)", float(mae_per_output.mean()))
-        self.log("Root Mean Squared Error (avg)", float(rmse_per_output.mean()))
-        self.log("R-squared coefficient (avg)", float(r2_per_output.mean()))
-
-        return mae_per_output, rmse_per_output, r2_per_output
-
-    def _plot_single_output(
-        self, target_name, y_true, y_pred, mae, rmse, r2, samples_per_run
-    ):
-        output_dir = os.path.join(self.result_dir, target_name)
-        os.makedirs(output_dir, exist_ok=True)
-        plot.plot_predictions_vs_actuals(y_true, y_pred, mae, rmse, r2, output_dir)
-        plot.plot_residuals_combined(
-            y_true, y_pred, output_dir, steps_per_run=samples_per_run
-        )
 
     # ── Trajectory assembly ──────────────────────────────────────────────────
 
@@ -340,16 +343,15 @@ class DNN_Model(L.LightningModule):
 
     # ── Bookkeeping ──────────────────────────────────────────────────────────
 
-    def _log_to_database(self, mae_arr, rmse_arr, r2_arr, per_target_metrics):
-        if not hasattr(self.trainer.logger, "update_final_results"):
-            return
+    def _write_test_metrics(self, mae_arr, rmse_arr, r2_arr, per_target_metrics):
+        """Write the test metrics beside the figures they belong to.
 
-        self.trainer.logger.update_final_results(
-            train_losses=self.train_losses,
-            val_losses=self.val_losses,
-            val_r2_scores=self.val_r2_scores,
-            val_mae_scores=self.val_mae_scores,
-            test_metrics={
+        These are the only run outputs the bundle cannot carry: `write_bundle`
+        runs before `trainer.test`, so at bundle time they do not exist yet.
+        """
+        evaluation.write_test_metrics(
+            self.result_dir,
+            {
                 "mae_avg": float(mae_arr.mean()),
                 "rmse_avg": float(rmse_arr.mean()),
                 "r2_avg": float(r2_arr.mean()),

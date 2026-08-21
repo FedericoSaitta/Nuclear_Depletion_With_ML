@@ -20,34 +20,35 @@ logs/
 *.err
 *.log
 
-# Figures, experiment databases, generated HTML
+# Figures and generated HTML
 *.png
-*.db
 *.html
 
-# Simulation output. Scoped, not blanket: data_generation/*.csv (power
-# histories) and util/util_results/*.xml (trimmed chains) are inputs worth
-# tracking, and a blanket rule is what made them un-committable before.
+# Simulation output. Scoped, not blanket: data_generation/*.csv holds the
+# measured power histories, which are inputs worth tracking, and a blanket rule
+# is what made them un-committable before.
 data_generation/data/
 data_generation/results/
-util/results/
 /data/
 /datasets/
 /results/
-# Model bundles are build output: `nucml-package` regenerates one from a
-# checkpoint + its config. Publish a specific bundle deliberately (Zenodo,
-# a release) rather than tracking the whole directory.
+/predictions/
+# Model bundles are run output: a training run writes its own. Publish a
+# specific bundle deliberately (Zenodo, a release) rather than tracking the
+# whole directory.
 /bundles/
 *.h5
 *.hdf5
 
-# OpenMC exports and per-run XML (the tracked chains under
-# util/util_results/ are re-added explicitly below)
+# OpenMC exports and per-run XML. Depletion chains live in the untracked
+# data/ download; util/reduce_decay_chains.py regenerates any trimmed variant.
 *.xml
-!util/util_results/**/*.xml
 
 # Test fixtures are deliberately tracked — they are the golden safety net
 !tests/fixtures/**
+
+# Documentation images are tracked
+!README_images/**
 
 # uv environments
 /.venv/
@@ -55,5 +56,3 @@ util/results/
 
 # OpenMC source + build tree (rebuilt by scripts/install_openmc.sh)
 /external/
-.claude/
-

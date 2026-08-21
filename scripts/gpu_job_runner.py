@@ -4,6 +4,7 @@ Every site-specific value is an environment variable with a default, so the
 script carries no one machine's account details:
 
     SLURM_PARTITION=gpuA SLURM_WALLTIME=0-4 python scripts/gpu_job_runner.py
+    NUCML_CONFIG=configs/dnn.yaml NUCML_DATA=datasets/other.h5 python scripts/gpu_job_runner.py
 """
 
 import os
@@ -18,7 +19,8 @@ JOB_NAME = os.environ.get("SLURM_JOB_NAME", "gpu_job")
 # Unset by default: SLURM then mails the submitting user, which is correct on
 # any account. Set SLURM_MAIL_USER to override.
 EMAIL = os.environ.get("SLURM_MAIL_USER")
-CONFIG = os.environ.get("NUCML_CONFIG", "configs/main_config.yaml")
+CONFIG = os.environ.get("NUCML_CONFIG", "configs/node.yaml")
+DATA = os.environ.get("NUCML_DATA", "datasets/casl_3305_runs_inter.h5")
 
 
 def create_slurm_script(output_file="submit_gpu_job.sh"):
@@ -29,7 +31,8 @@ def create_slurm_script(output_file="submit_gpu_job.sh"):
     slurm_script = f"""#!/bin/bash --login
 #SBATCH -p {PARTITION}                    # GPU partition
 #SBATCH --gres=gpu:{GPUS}                 # Request {GPUS} GPU(s)
-#SBATCH --ntasks-per-node={CPUS}          # Number of tasks per node
+#SBATCH -n 1                              # One task: a single training process
+#SBATCH -c {CPUS}                         # CPU cores for that task (dataloader workers)
 #SBATCH -t {WALLTIME}                     # Wallclock time limit
 #SBATCH --mail-type=ALL                   # Email notifications{mail_user}
 #SBATCH -J {JOB_NAME}                     # Job name
@@ -40,9 +43,10 @@ export PATH="$HOME/.local/bin:$PATH"
 cd "$SLURM_SUBMIT_DIR"
 
 # torch wheels bundle their own CUDA runtime, so no `module load cuda` is needed.
-uv run --extra ml --no-dev --locked nucml --config {CONFIG}
-
-kill %1
+# --device and --workers come from the allocation above rather than from the
+# config, which is why one config now serves both the laptop and the cluster.
+uv run --extra ml --no-dev --locked nucml train \\
+    --config {CONFIG} --data {DATA} --device cuda --workers {CPUS}
 """
 
     # Create logs directory if it doesn't exist
@@ -89,6 +93,7 @@ def main():
     print(f"  Partition: {PARTITION}")
     print(f"  Email: {EMAIL or 'submitting user (SLURM default)'}")
     print(f"  Config: {CONFIG}")
+    print(f"  Data: {DATA}")
     print()
 
     # Create the Slurm script

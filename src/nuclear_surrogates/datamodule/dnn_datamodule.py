@@ -7,7 +7,10 @@ from torch.utils.data import DataLoader
 import nuclear_surrogates.datamodule.data_scalers as data_scalers
 import nuclear_surrogates.datamodule.dataset_helper as data_help
 import nuclear_surrogates.utils.plot as plot
-from nuclear_surrogates.datamodule.preprocessor import Preprocessor
+from nuclear_surrogates.datamodule.preprocessor import (
+    Preprocessor,
+    require_fitted_scalers,
+)
 from nuclear_surrogates.utils.paths import result_dir
 
 
@@ -18,6 +21,9 @@ class DNN_Datamodule(L.LightningDataModule):
         super().__init__()
 
         self.path_to_data = cfg_object.dataset.path_to_data
+        self.path_to_inference_data = cfg_object.dataset.get(
+            "path_to_inference_data", None
+        )
         self.fraction_of_data = cfg_object.dataset.fraction_of_data
         self.train_batch_size = cfg_object.dataset.train.batch_size
         self.val_batch_size = cfg_object.dataset.val.batch_size
@@ -30,12 +36,13 @@ class DNN_Datamodule(L.LightningDataModule):
         self.seed = cfg_object.runtime.get("seed", 42)
 
         # When set, the fitted scalers are LOADED rather than re-derived.
+        # Required for inference; during training it is how `nucml plots`
+        # replays a run against the scalers that run was trained with.
         self.preprocessor_path = cfg_object.dataset.get("preprocessor_path", None)
         self.preprocessor = None
-        self.make_plots = cfg_object.runtime.get("plots", True)
+        self.make_plots = cfg_object.runtime.get("analyses", True)
 
-        # `modes.inference` sets this; setup() then refuses to run, because the
-        # DNN has no inference branch.
+        # `modes.inference` sets this; setup() then takes _setup_inference.
         self.inference_mode = False
 
         self.inputs = data_scalers.create_scaler_dict(cfg_object.dataset["inputs"])
@@ -54,15 +61,6 @@ class DNN_Datamodule(L.LightningDataModule):
             return
         self._has_setup = True
 
-        if self.inference_mode:
-            raise NotImplementedError(
-                "DNN inference mode is not implemented. Without a branch here it "
-                "would silently evaluate the TRAINING file's own test split, so a "
-                "cross-dataset claim made that way would be false. Use "
-                "runtime.model=NODE, or implement the branch mirroring "
-                "NODE_Datamodule._setup_inference."
-            )
-
         logger.info("Setting up the data module...")
 
         # Inputs first, then any target that is not also an input. Passing these
@@ -71,9 +69,22 @@ class DNN_Datamodule(L.LightningDataModule):
             k for k in self.target if k not in self.inputs
         ]
 
+        if self.inference_mode:
+            self._setup_inference(all_columns)
+        else:
+            self._setup_training(all_columns)
+
+    # ── Reading ──────────────────────────────────────────────────────────────
+
+    def _read_pairs(self, path, fraction, all_columns):
+        """Read one file into the (state_t -> state_t+1) pairs the DNN consumes.
+
+        `create_timeseries_targets` drops each run's last row, which has no
+        successor inside its own run, so no pair ever straddles a run boundary.
+        """
         data_df, self.run_length, self.time_array = data_help.read_data(
-            self.path_to_data,
-            self.fraction_of_data,
+            path,
+            fraction,
             drop_run_label=True,
             columns=all_columns,
         )
@@ -99,6 +110,12 @@ class DNN_Datamodule(L.LightningDataModule):
         # One (t -> t+1) pair per timestep except the last of each run, which has
         # no successor inside the run.
         self.samples_per_run = self.run_length - 1
+        return X, data_help.ensure_2d(Y)
+
+    # ── Training ─────────────────────────────────────────────────────────────
+
+    def _setup_training(self, all_columns):
+        X, Y = self._read_pairs(self.path_to_data, self.fraction_of_data, all_columns)
 
         # Split by whole runs, sequentially in time.
         train_frac, val_frac, test_frac = self.split
@@ -121,11 +138,6 @@ class DNN_Datamodule(L.LightningDataModule):
 
         # Fit (or load) the scalers, then apply them. Fitting happens on the
         # training split only — val/test are transform-only.
-        y_train, y_val, y_test = (
-            data_help.ensure_2d(y_train),
-            data_help.ensure_2d(y_val),
-            data_help.ensure_2d(y_test),
-        )
         span = float(self.time_array[: self.run_length - 1][-1] - self.time_array[0])
 
         if self.preprocessor_path:
@@ -155,9 +167,6 @@ class DNN_Datamodule(L.LightningDataModule):
             self.target_scaler.transform(y_test),
         )
 
-        self.X_test = X_test
-        self.Y_test = y_test
-
         if self.make_plots:
             self._plot_distributions(X_train, y_train, "Scaled")
 
@@ -169,6 +178,49 @@ class DNN_Datamodule(L.LightningDataModule):
         logger.info(f"Training dataset size: {len(y_train)}")
         logger.info(f"Validation dataset size: {len(y_val)}")
         logger.info(f"Test dataset size: {len(y_test)}")
+
+    # ── Inference ────────────────────────────────────────────────────────────
+
+    def _setup_inference(self, all_columns):
+        """Evaluate a frozen model on the whole of `path_to_inference_data`.
+
+        The counterpart of `NODE_Datamodule._setup_inference`, and simpler:
+        the DNN is a one-step map rather than an integration, so there is no
+        time axis to renormalise. `t_days` never reaches the forward pass —
+        `predict_step` and `test_step` only go through `target_scaler` — so the
+        NODE's `_training_time_unit` correction has no analogue here and must
+        not be copied in.
+
+        What does have to match training is `dataset.target_delta_conc`, since
+        it decides whether the targets are concentrations or differences. It
+        travels in the bundle's config, so a bundle is consistent by
+        construction.
+        """
+        if not self.path_to_inference_data:
+            raise SystemExit(
+                "Inference mode needs dataset.path_to_inference_data. "
+                "With a bundle, pass --data <file>."
+            )
+
+        require_fitted_scalers(self.preprocessor_path)
+        logger.info("Inference mode: loading fitted scalers from the bundle")
+        self.preprocessor = Preprocessor.load(self.preprocessor_path)
+        self.input_scaler = self.preprocessor.input_scaler
+        self.target_scaler = self.preprocessor.target_scaler
+
+        # The whole file, not a fraction of it, and no split: every pair is test.
+        X, Y = self._read_pairs(self.path_to_inference_data, 1.0, all_columns)
+        X = self.input_scaler.transform(X)
+        Y = self.target_scaler.transform(Y)
+
+        # Empty but correctly shaped, so Lightning can still build the loaders.
+        empty_X = np.zeros((0, X.shape[1]), dtype=X.dtype)
+        empty_y = np.zeros((0, Y.shape[1]), dtype=Y.dtype)
+        self.train_dataset, self.val_dataset, self.test_dataset = (
+            data_help.create_tensor_datasets(empty_X, empty_X, X, empty_y, empty_y, Y)
+        )
+        n_runs = len(Y) // self.samples_per_run if self.samples_per_run else 0
+        logger.info(f"Test dataset size: {len(Y)} pairs from {n_runs} runs")
 
     def _plot_distributions(self, inputs, targets, prefix):
         plot.plot_data_distributions(

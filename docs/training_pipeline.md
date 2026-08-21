@@ -18,10 +18,15 @@ A **run** is one simulated fuel pin, depleted by OpenMC under a randomly drawn
 operating history: 100 depletion steps of 10 days each, so 101 sampled time
 points spanning 990 days. Every step draws fresh power, fuel/moderator/clad
 temperatures, moderator density and boron concentration from configured ranges
-(`data_generation/datagen.py`).
+(`data_generation/datagen.py`, configured by
+`data_generation/configs/casl_pincell.yaml`).
 
 `casl_3305_runs_inter.h5` holds 3,305 such runs — 333,805 rows × 238 columns,
 one column per nuclide in the depletion chain plus the operating state.
+
+The CASL and BEAVRS pipelines share one pin model — fuel, helium gap,
+Zircaloy-4 cladding, water — so a surrogate trained on one can be held against
+the other. See `data_generation/README.md`, "One model, two histories".
 
 The physics being learned is the **breeding chain**:
 
@@ -52,9 +57,12 @@ Both models go through the same path (`datamodule/dataset_helper.py`):
    The fitted state is persisted as a `Preprocessor` (`preprocessor.json`) so a
    checkpoint can be served without the training file.
 
-The two models split differently, which is a known wart (`AUDIT.md` P5):
+The two models split differently, which is a known wart (see §8). The
+splits below are each model's default when `dataset.split` is absent; the
+scalers are the ones `configs/dnn.yaml` and `configs/node.yaml` set, not a
+property of either model:
 
-| | split | strategy | scalers |
+| | split | strategy | scalers (as shipped) |
 |---|---|---|---|
 | DNN | 80 / 10 / 10 | sequential by run | per-column mix (quantile, robust, standard, MinMax) |
 | NODE | 60 / 20 / 20 | random by run, seeded | MinMax throughout |
@@ -126,10 +134,10 @@ obtains states by integrating it:
 
 with `y` the seven scaled concentrations and `u(t)` the power, held
 piecewise-constant between grid points (zero-order hold,
-`ForcedODEFunc._interpolate_forcing`).
+`ForcedODEFunc.interpolate_forcing`).
 
 `A` is not a free 7×7 matrix. It is produced by an MLP and then **constrained**
-(`ODEFuncMatrix._build_matrix`):
+(`ODEFuncMatrix.build_matrix`):
 
 - **Sparsity.** 36 of the 49 entries are forced to zero by
   `model.matrix_zero_entries`, leaving only the physically allowed transitions —
@@ -219,7 +227,7 @@ A frequent source of confusion, worth stating plainly:
 
 `metrics.mare` is `mean|error| / max|truth|` — normalised by a single global
 maximum, not per sample. Despite the name it is not mean absolute *relative*
-error (`AUDIT.md` P7).
+error (see §8).
 
 ---
 
@@ -353,22 +361,44 @@ different questions, and both belong in a write-up:
 
 ## 7. What a run leaves behind
 
-`results/<model.name>/` after `nucml --config ...`:
+`<--out>/<model.name>/` after `nucml train --config ... --data ...`
+(`--out` defaults to `results/`):
 
 ```
 best-<name>-epoch=NN.ckpt        best-validation-loss checkpoint
 model-bundle/                    the run's record — see below
+test_metrics.json                per-isotope MAE / RMSE / R² / MARE, averaged too
 <target>/                        per-isotope figures, one directory each
   predictions_vs_actual.png      scatter against truth
   residuals_combined*.png        residual structure, linear and log-log
   <t>_prediction_comparison.png  truth vs TF vs AR for one run
-  <t>_{MAE,MALE}_growth_*.png    error against timestep — the §6 evidence
+  <t>_{MAE,MALE}_growth_linear.png  error against timestep — the §6 evidence
+  test_traj_N.png                a couple of individual test runs
+  test_all_trajectories.png      every test run overlaid, with mean |residual|
   {r2,mse}_score_importance.png  permutation importance (DNN)
   jacobian_*                     sensitivity analysis (NODE)
   stepwise_importance*           per-step permutation importance (NODE)
 depletion_matrix_{mean,evolution}.png   the learned A, in physical units (NODE)
+stepwise_importance.md           importance tables, ready to paste (NODE)
 training_loss_log.png            loss curves, plus NFE for the NODE
 ```
+
+Both models emit the same figures except where the physics differs: permutation
+feature importance is a DNN output, and the Jacobian sweep, the depletion matrix
+and the per-step importance need the ODE's right-hand side so they exist only for
+the NODE. Everything else — the scatter, the residuals, the growth curves, the
+trajectories — is drawn by the same code for both, so the head-to-head comparison
+in §6 is like-for-like.
+
+`--no-analyses` skips all of it, figures and analyses alike, while still writing
+`test_metrics.json` and the bundle. That is the flag for a hyperparameter sweep,
+where the Jacobian and importance passes re-integrate the whole test set for
+output nobody reads.
+
+The one thing it does **not** skip is `training_loss_log.png`, and the reason is
+the rule the flag follows: it suppresses exactly what `nucml plots` can put back.
+`plots` replays `trainer.test` against a bundle and never runs `fit`, so the loss
+curve is the single figure that could not be recovered without retraining.
 
 The **bundle** is the unit of publication — a checkpoint alone is half a model,
 because the other half is the fitted scalers:
@@ -383,21 +413,57 @@ model-bundle/
 └── metadata.json             git SHA, seed, dataset SHA-256, library versions
 ```
 
-A row in `Chain_Model.db` records the run's identity and results and points at
-this directory via `bundle_path`; the configuration itself is read from
-`config.resolved.yaml` rather than duplicated into columns.
+`metadata.json` records the *validation* metrics, because the bundle is written
+before `trainer.test` runs. The test metrics — the per-isotope MAE, RMSE, R² and
+the TF/AR MARE pair — land in `test_metrics.json` beside the figures instead.
+
+To run the model again, point one of the three bundle verbs at the directory:
+
+```bash
+uv run nucml infer --bundle results/<model_name>/model-bundle \
+                   --data   datasets/new_runs.h5 \
+                   --out    predictions/
+```
+
+To redraw this run's own figures instead of evaluating new data, use `plots` and
+pass the dataset it was trained on. That rebuilds the run's train/val/test
+split, keeps only the test share, and replays it with the bundle's weights and
+scalers — the same runs the published figures came from, verified against
+`split_indices.json` before anything is drawn.
+
+To keep training from these weights, `finetune` warm-starts a fresh run from
+them: weights only, so the optimizer and LR schedule restart.
+
+`read_bundle` repoints the bundle's config at the bundle's own weights and
+scalers and clears `dataset.path_to_data`, so the run cannot fall back on a
+training file the bundle does not ship. The config is needed alongside the
+weights because both models build their architecture from it — and for the NODE
+the solver and its tolerances change the numbers, not just the runtime — which
+is why `config.resolved.yaml` is in the bundle rather than assumed.
 
 ---
 
 ## 8. Known caveats
 
-Recorded in full in `AUDIT.md`; the ones that bear on reading these results:
+These bear directly on how the results above should be read. None is fixed,
+because fixing any of them moves a published number.
 
-- **P5** — the DNN and NODE use different split protocols and different amounts
-  of data, so their headline numbers are not a like-for-like comparison.
-- **P6** — every number is a single training run on a single split; there is no
-  spread.
-- **P7** — `mare` is normalised by a global maximum, not per sample.
-- **P1/P2** — the depletion-matrix figure's conversion to physical units carries
-  a 1% time-span bias and drops the MinMax offset, which makes the U238 column
-  uninterpretable as a rate.
+- **The DNN/NODE comparison is not level.** They use different split protocols
+  (sequential in time vs a seeded permutation of whole runs) and different
+  amounts of data, so their headline numbers are not like-for-like.
+- **No spread on any number.** Every result is a single training run on a single
+  split. There are no repeats and no error bars on the model comparison.
+- **`mare` is misnamed.** It is `mean|error| / max|truth|` — normalised by one
+  global maximum, not per sample — so it is not mean absolute *relative* error.
+  Published numbers depend on the current definition, so it must not drift.
+- **The depletion-matrix figure's unit conversion is approximate.** It hardcodes
+  a 1000-day span against 990 days of data (a 1% bias) and drops the MinMax
+  offset, which leaves the U238 column uninterpretable as a rate. The matrix the
+  network builds is unaffected; only the conversion applied before plotting is.
+- **The solver tolerance is below what the arithmetic delivers.** States are
+  float32 (eps ≈ 1.2e-7), so the `atol` the goldens were generated at asks for
+  more precision than the representation carries.
+- **Fast-decay chain entries are unidentifiable at 10-day sampling.** U239 and
+  Np239 are at equilibrium at every sampled point, so their concentrations are
+  slaved to the local capture rate rather than to the trajectory's history.
+  `tests/test_golden_eval.py` states this as an assertion rather than prose.

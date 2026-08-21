@@ -38,6 +38,15 @@ jobs:
       # they actually run here rather than skipping.
       - name: Tests
         run: uv run --extra ml pytest -v -m "not golden_train"
+      # The generation entry points parse argv before importing OpenMC, so
+      # `--help` works in this environment. That makes the CLI surface — and,
+      # via tests/test_datagen_io.py, the HDF5 format contract between the two
+      # halves — checkable here, on a runner that has no OpenMC build.
+      - name: Data-generation CLIs parse
+        run: |
+          for script in datagen quarter_datagen zoom_datagen merge_runs; do
+            uv run --extra ml python "data_generation/$script.py" --help > /dev/null
+          done
       - name: Lint
         run: |
           uv run --extra ml ruff check .
@@ -95,3 +104,13 @@ jobs:
       # The OpenMC tests need the 7 GB nuclear-data library, which CI does not
       # have — this job proves the *environment* builds, not the physics.
       - run: UV_PROJECT_ENVIRONMENT=.venv-sim uv run python -c "import openmc.deplete; print(openmc.__version__)"
+      # With OpenMC present, the modules that need it import too — which the ML
+      # job above cannot check. Between the two, every data_generation module is
+      # imported somewhere in CI.
+      - name: Data-generation modules import against OpenMC
+        run: |
+          cd data_generation
+          UV_PROJECT_ENVIRONMENT=../.venv-sim uv run --extra sim python -c "
+          import cli, common, config, dataset_io, nuclides, power_history
+          import pin_sim, tally_io
+          print('all data_generation modules import')"

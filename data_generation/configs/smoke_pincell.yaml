@@ -1,0 +1,42 @@
+# Smallest runnable pin-cell config: 3 depletion steps at low particle count.
+# Generates nothing scientifically useful — it exists so the whole generation
+# path can be exercised in a minute or two, which is the only way to check the
+# physics half of this repo on a machine that has the nuclear data.
+#
+#   uv run --extra sim python data_generation/datagen.py \
+#       --config data_generation/configs/smoke_pincell.yaml -n 1 -c 1 -t 2 -s 0
+#
+#   uv run --extra sim python data_generation/merge_runs.py \
+#       data_generation/data /tmp/smoke.h5 --drop-empty
+#
+# Physics is identical to casl_pincell.yaml; only the step count and the
+# transport statistics are cut. The counterpart on the ML side is
+# configs/smoke_node.yaml.
+
+model:
+  enrichment: 3.1              # % U-235
+  fuel_density: 10.4           # g/cm3 UO2
+  geometry_radii: [0.39218, 0.40005, 0.45720]
+  geometry_pitch: 1.25984      # cm
+  symmetry: full
+
+transport:
+  # 200 particles gives a k-eff with several percent uncertainty. That is fine:
+  # this config checks that the pipeline runs, not what it computes.
+  particles: 200
+  batches: 10
+  inactive: 3
+  temp_method: interpolation
+  use_wmp: false
+
+depletion:
+  chain_file: chain_casl_pwr.xml
+  num_steps: 3
+  delta_t_days: 10
+
+  power: [0, 41.4]             # W/g specific power
+  t_fuel: [600, 1200]          # K
+  t_mod: [550, 600]            # K
+  t_clad: [570, 670]           # K
+  rho_mod: [0.74, 1.00]        # g/cm3
+  boron_ppm: [0, 1000]

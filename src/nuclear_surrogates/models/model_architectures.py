@@ -78,7 +78,7 @@ class ForcedODEFunc(nn.Module):
         idx = torch.searchsorted(self.t_points, t_clamped.unsqueeze(0)).squeeze() - 1
         return idx.clamp(0, len(self.t_points) - 2)
 
-    def _interpolate_forcing(self, t):
+    def interpolate_forcing(self, t):
         """Piecewise-constant (zero-order hold) forcing interpolation.
 
         Returns the forcing at the left endpoint of t's interval, held constant
@@ -109,7 +109,7 @@ class ODEFuncForced(ForcedODEFunc):
 
     def forward(self, t, y):
         self.nfe += 1
-        forcing = self._interpolate_forcing(t)  # (batch, n_input)
+        forcing = self.interpolate_forcing(t)  # (batch, n_input)
         combined = torch.cat([forcing, y], dim=-1)  # (batch, n_input + n_target)
         return self.net(combined)
 
@@ -163,7 +163,7 @@ class ODEFuncMatrix(ForcedODEFunc):
             residual=cfg.model.residual_connections,
         )
 
-    def _build_matrix(self, forcing, y):
+    def build_matrix(self, forcing, y):
         """Build the constrained depletion matrix from forcing and state inputs.
 
         Returns: (batch, n_target, n_target) matrix with negative diagonal,
@@ -187,6 +187,6 @@ class ODEFuncMatrix(ForcedODEFunc):
 
     def forward(self, t, y):
         self.nfe += 1
-        forcing = self._interpolate_forcing(t)  # (batch, n_input)
-        A = self._build_matrix(forcing, y)  # (batch, n_target, n_target)
+        forcing = self.interpolate_forcing(t)  # (batch, n_input)
+        A = self.build_matrix(forcing, y)  # (batch, n_target, n_target)
         return torch.bmm(A, y.unsqueeze(-1)).squeeze(-1)  # (batch, n_target)

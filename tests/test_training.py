@@ -13,9 +13,9 @@ Two tiers, deliberately separated:
   contract test cannot see, but is only reproducible on a fixed runner image, so
   CI runs it in its own Linux-only job.
 
-`trainer.fit` is driven directly rather than through `modes.train_and_test`,
-which chains an expensive `trainer.test` (Jacobians, permutation importance,
-dozens of figures) that these tests do not need.
+`trainer.fit` is driven directly rather than through `modes.train`, which chains
+an expensive `trainer.test` (Jacobians, permutation importance, dozens of
+figures) that these tests do not need.
 """
 
 import json
@@ -31,21 +31,29 @@ CONFIGS = {
     "DNN": os.path.join(REPO, "configs", "smoke_dnn.yaml"),
     "NODE": os.path.join(REPO, "configs", "smoke_node.yaml"),
 }
+MINI_H5 = os.path.join(REPO, "tests", "fixtures", "mini_casl_10runs.h5")
 GOLDEN_TRAIN = os.path.join(REPO, "tests", "fixtures", "golden_train.json")
 
 
 def load_cfg(kind, tmp_path, **overrides):
-    """Smoke config, redirected so a test writes nothing outside tmp_path."""
-    from nuclear_surrogates.utils.paths import resolve_config_paths
+    """A smoke config plus the runtime block `main.py` would synthesise.
 
-    path = CONFIGS[kind]
-    cfg = OmegaConf.load(path)
-    resolve_config_paths(cfg, path)
-    cfg.runtime.output_dir = str(tmp_path / "results")
-    cfg.runtime.model_database = str(tmp_path / "experiments.db")
-    cfg.runtime.device = "cpu"
-    cfg.runtime.num_workers = 0
-    cfg.runtime.plots = False
+    Configs carry no paths and no `runtime` section any more, so what the CLI
+    would build from its flags is built here instead — redirected into tmp_path
+    so a test writes nothing outside it.
+
+    `seed: 0` is what the smoke configs used to declare, and
+    `fixtures/golden_train.json` pins a loss trajectory produced at it.
+    """
+    cfg = OmegaConf.load(CONFIGS[kind])
+    cfg.dataset.path_to_data = MINI_H5
+    cfg.runtime = {
+        "output_dir": str(tmp_path / "results"),
+        "device": "cpu",
+        "num_workers": 0,
+        "analyses": False,
+        "seed": 0,
+    }
     for key, value in overrides.items():
         OmegaConf.update(cfg, key, value)
     return cfg
@@ -58,7 +66,7 @@ def build(cfg):
     from nuclear_surrogates.main import MODELS
 
     L.seed_everything(cfg.runtime.seed, workers=True)
-    model_cls, dm_cls = MODELS[cfg.runtime.model]
+    model_cls, dm_cls = MODELS[cfg.model.kind]
     return model_cls(cfg), dm_cls(cfg)
 
 
@@ -298,13 +306,158 @@ def test_run_writes_split_indices_and_a_bundle(tmp_path):
     assert metadata["libraries"]["torch"]
 
 
-def test_dnn_inference_mode_fails_loudly(tmp_path):
-    """The DNN has no inference branch. It must raise rather than quietly
-    evaluate the training file's own test split."""
-    _, dm = build(load_cfg("DNN", tmp_path))
+@pytest.mark.parametrize("kind", ["DNN", "NODE"])
+def test_inference_without_fitted_scalers_is_refused(kind, tmp_path):
+    """A checkpoint without its scalers is half a model, and half a model does
+    not run.
+
+    Inference used to refit on `path_to_data` whenever `preprocessor_path` was
+    absent, behind a warning. There is now no fallback at all: evaluating a
+    checkpoint against scalers it was never trained with is worse than not
+    running, because the resulting numbers look fine.
+    """
+    cfg = load_cfg(kind, tmp_path)
+    cfg.dataset.path_to_inference_data = cfg.dataset.path_to_data
+    _, dm = build(cfg)
     dm.inference_mode = True
-    with pytest.raises(NotImplementedError, match="DNN inference mode"):
+    with pytest.raises(SystemExit, match="preprocessor_path"):
         dm.setup(stage="test")
+
+
+@pytest.mark.parametrize("kind", ["DNN", "NODE"])
+def test_inference_from_a_bundle_never_opens_the_training_file(kind, tmp_path):
+    """The point of a bundle: weights and scalers travel without the dataset.
+
+    Trains a tiny model, bundles it, then evaluates that bundle on a different
+    file and asserts the only file opened is the inference one. `test_golden`
+    pins the same property for the frozen NODE; this covers both models on a
+    bundle built end to end by the code under test.
+    """
+    import nuclear_surrogates.datamodule.dataset_helper as data_help
+    from nuclear_surrogates.bundle import read_bundle
+    from nuclear_surrogates.main import MODELS
+    from nuclear_surrogates.models import modes
+
+    cfg = load_cfg(kind, tmp_path, **{"train.num_epochs": 1})
+    _, dm, trainer = train(cfg)
+
+    ckpt = tmp_path / "trained.ckpt"
+    trainer.save_checkpoint(ckpt)
+    bundle = modes._write_run_bundle(dm, cfg, modes.result_dir(cfg), str(ckpt))
+
+    inference_cfg, loaded = read_bundle(bundle)
+    inference_cfg.dataset.path_to_inference_data = cfg.dataset.path_to_data
+    inference_cfg.runtime = {**cfg.runtime, "output_dir": str(tmp_path / "served")}
+
+    assert loaded.metadata["model_kind"] == kind
+    assert not inference_cfg.dataset.path_to_data, "training path must be cleared"
+    assert loaded.weights.parent == loaded.path
+    assert str(loaded.path) == os.path.abspath(bundle)
+
+    opened = []
+    real_read = data_help.read_data
+
+    def spy(path, *args, **kwargs):
+        opened.append(path)
+        return real_read(path, *args, **kwargs)
+
+    data_help.read_data = spy
+    try:
+        model_cls, dm_cls = MODELS[kind]
+        served = dm_cls(inference_cfg)
+        served.inference_mode = True
+        served.setup(stage="test")
+    finally:
+        data_help.read_data = real_read
+
+    # Only one fixture exists, so the two paths name the same file — but the
+    # refit branch reads twice (training file, then inference file), so
+    # "exactly one open" is still what distinguishes the two paths.
+    assert opened == [inference_cfg.dataset.path_to_inference_data], (
+        f"inference opened {opened} — a bundle must not reach for the "
+        f"training dataset"
+    )
+    assert len(served.test_dataset) > 0
+    assert len(served.train_dataset) == 0, "inference must not build a train split"
+
+
+# ── plots ────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("kind", ["DNN", "NODE"])
+def test_plots_replays_the_runs_own_test_split(kind, tmp_path):
+    """Redrawing a finished run's figures must use that run's own test runs.
+
+    The split is rebuilt from the seed rather than replayed from the recorded
+    indices, so this pins that the rebuild lands on exactly what the bundle
+    recorded — otherwise the figures would be of a different subset while
+    still being labelled as the published run's.
+    """
+    import json as _json
+
+    from nuclear_surrogates.bundle import read_bundle
+    from nuclear_surrogates.main import MODELS
+    from nuclear_surrogates.models import modes
+
+    cfg = load_cfg(kind, tmp_path, **{"train.num_epochs": 1})
+    _, dm, trainer = train(cfg)
+
+    ckpt = tmp_path / "trained.ckpt"
+    trainer.save_checkpoint(ckpt)
+    bundle = modes._write_run_bundle(dm, cfg, modes.result_dir(cfg), str(ckpt))
+
+    replay_cfg, loaded = read_bundle(bundle)
+    replay_cfg.dataset.path_to_data = cfg.dataset.path_to_data
+    replay_cfg.runtime = {**cfg.runtime, "output_dir": str(tmp_path / "redrawn")}
+
+    # The seed is the one runtime value a bundle carries forward, because the
+    # split this test checks is a function of it.
+    assert loaded.seed == cfg.runtime.seed
+
+    _, dm_cls = MODELS[kind]
+    replayed = dm_cls(replay_cfg)
+    replayed.setup(stage="fit")
+
+    with open(os.path.join(bundle, "split_indices.json")) as f:
+        recorded = _json.load(f)
+    for key in ("train", "val", "test"):
+        assert list(replayed.split_info[key]) == list(
+            recorded[key]
+        ), f"{key} split drifted from the bundle's record"
+
+    # And the replay must use the run's scalers, not a fresh fit of its own.
+    modes._verify_split_matches_bundle(replayed, loaded)
+    assert replayed.preprocessor.to_dict() == dm.preprocessor.to_dict()
+
+
+def test_plots_refuses_a_split_that_does_not_match(tmp_path):
+    """A mismatch means these are not the published run's runs. Fail, don't draw."""
+    from pathlib import Path
+
+    from nuclear_surrogates.bundle import Bundle
+    from nuclear_surrogates.models import modes
+
+    cfg = load_cfg("NODE", tmp_path, **{"train.num_epochs": 1})
+    _, dm = build(cfg)
+    dm.setup(stage="fit")
+    bundle = modes._write_run_bundle(dm, cfg, modes.result_dir(cfg), ckpt_path=None)
+
+    # Built directly rather than via read_bundle: this run wrote no weights, and
+    # only the directory matters for locating split_indices.json.
+    loaded = Bundle(Path(bundle), None, None, {}, cfg.runtime.seed)
+    dm.split_info = {**dm.split_info, "test": [999]}
+    with pytest.raises(SystemExit, match="split_indices.json"):
+        modes._verify_split_matches_bundle(dm, loaded)
+
+
+def test_plots_needs_the_training_dataset(tmp_path):
+    """It carves the test split out of the training file, so it cannot run
+    without it — unlike `infer`, which needs only the bundle."""
+    from nuclear_surrogates.main import _build_parser
+
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["plots", "--bundle", str(tmp_path)])
 
 
 # ── evaluation epoch ─────────────────────────────────────────────────────────
@@ -320,7 +473,7 @@ def test_dnn_test_epoch_reports_and_plots_every_target(tmp_path):
     """
     import lightning as L
 
-    cfg = load_cfg("DNN", tmp_path, **{"train.num_epochs": 1})
+    cfg = load_cfg("DNN", tmp_path, **{"train.num_epochs": 1, "runtime.analyses": True})
     model, dm, _ = train(cfg)
 
     trainer = L.Trainer(
@@ -348,14 +501,67 @@ def test_dnn_test_epoch_reports_and_plots_every_target(tmp_path):
         for figure in (
             "predictions_vs_actual.png",
             "residuals_combined.png",
+            "residuals_combined_loglog.png",
             f"{target}_prediction_comparison.png",
             f"{target}_MAE_growth_linear.png",
-            f"{target}_MALE_growth_log.png",
+            f"{target}_MALE_growth_linear.png",
+            # The DNN draws trajectories too now. It used to compute the arrays
+            # and throw them away, which left the head-to-head against the NODE
+            # without comparable figures.
+            "test_traj_1.png",
+            "test_all_trajectories.png",
             "r2_score_importance.png",
         ):
             assert os.path.exists(
                 os.path.join(target_dir, figure)
             ), f"{target}: {figure} was not written"
+
+        # The log-scaled twins are gone: MALE is already Mean Absolute *Log*
+        # Error, so a log axis on it plotted log-of-log, and nothing referenced
+        # the MAE one.
+        for gone in (f"{target}_MAE_growth_log.png", f"{target}_MALE_growth_log.png"):
+            assert not os.path.exists(
+                os.path.join(target_dir, gone)
+            ), f"{target}: {gone} should no longer be written"
+
+
+@pytest.mark.parametrize("kind", ["DNN", "NODE"])
+def test_no_analyses_writes_metrics_but_no_figures(kind, tmp_path):
+    """`--no-analyses` is the flag a hyperparameter sweep wants.
+
+    It has to suppress every figure *and* the expensive post-hoc passes —
+    permutation importance, Jacobians, the depletion matrix — while still
+    producing the metrics that decide whether the trial was any good.
+    """
+    import lightning as L
+
+    cfg = load_cfg(kind, tmp_path, **{"train.num_epochs": 1})
+    assert cfg.runtime.analyses is False
+    model, dm, _ = train(cfg)
+
+    L.Trainer(
+        accelerator="cpu",
+        logger=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+    ).test(model, datamodule=dm)
+
+    results = tmp_path / "results"
+    written = sorted(p.name for p in results.rglob("*.png"))
+    # The loss curve is the one exception, and the rule behind it is
+    # regenerability: `nucml plots` never runs `fit`, so this figure cannot be
+    # recreated from the bundle the way every other one can.
+    assert written == [
+        "training_loss_log.png"
+    ], f"{kind}: --no-analyses should leave only the loss curve, got {written[:6]}"
+    assert not list(
+        results.rglob("stepwise_importance.*")
+    ), f"{kind}: the importance tables are analysis output and must be skipped too"
+
+    metrics_file = results / cfg.model.name / "test_metrics.json"
+    payload = json.loads(metrics_file.read_text())
+    assert len(payload["per_target"]) == len(cfg.dataset.targets)
+    assert np.isfinite(payload["mae_avg"])
 
 
 # ── pinned trajectory ────────────────────────────────────────────────────────

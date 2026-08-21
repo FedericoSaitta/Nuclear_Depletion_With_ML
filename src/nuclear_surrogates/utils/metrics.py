@@ -1,8 +1,21 @@
-"""Metrics, permutation importance, and the DNN autoregressive rollout."""
+"""Metrics, permutation importance, and the DNN autoregressive rollout.
+
+The per-output metrics wrap scikit-learn rather than re-deriving the formulas;
+the wrappers exist to fix `multioutput="raw_values"` (every caller wants the
+per-target array) and to log loudly when a result contains NaN or Inf, which
+sklearn passes through silently. `mare` stays hand-rolled: it is this project's
+own (mis)named quantity — see its docstring.
+"""
 
 import numpy as np
 import torch
 from loguru import logger
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+    root_mean_squared_error,
+)
 from tqdm import tqdm
 
 from nuclear_surrogates.datamodule.dataset_helper import ensure_2d
@@ -29,24 +42,29 @@ def _metric(name, result):
 
 def mae(y_true, y_pred):
     """Mean Absolute Error per output."""
-    return _metric("MAE", np.mean(np.abs(y_true - y_pred), axis=0))
+    return _metric("MAE", mean_absolute_error(y_true, y_pred, multioutput="raw_values"))
 
 
 def mse(y_true, y_pred):
     """Mean Squared Error per output."""
-    return _metric("MSE", np.mean((y_true - y_pred) ** 2, axis=0))
+    return _metric("MSE", mean_squared_error(y_true, y_pred, multioutput="raw_values"))
 
 
 def rmse(y_true, y_pred):
     """Root Mean Squared Error per output."""
-    return _metric("RMSE", np.sqrt(mse(y_true, y_pred)))
+    return _metric(
+        "RMSE", root_mean_squared_error(y_true, y_pred, multioutput="raw_values")
+    )
 
 
 def r2(y_true, y_pred):
-    """R² (Coefficient of Determination) per output."""
-    ss_res = np.sum((y_true - y_pred) ** 2, axis=0)
-    ss_tot = np.sum((y_true - np.mean(y_true, axis=0)) ** 2, axis=0)
-    return _metric("R2", np.where(ss_tot != 0, 1 - ss_res / ss_tot, 0.0))
+    """R² (Coefficient of Determination) per output.
+
+    sklearn's `force_finite` default already handles a zero-variance truth
+    column (0.0 for an imperfect fit, 1.0 for a perfect one) instead of
+    dividing by zero.
+    """
+    return _metric("R2", r2_score(y_true, y_pred, multioutput="raw_values"))
 
 
 def mare(y_true, y_pred):
@@ -54,7 +72,7 @@ def mare(y_true, y_pred):
 
     Despite the name this is NOT mean absolute *relative* error: it divides by a
     single global maximum, not per-sample. Published numbers depend on it, so
-    the definition must not drift — see AUDIT.md.
+    the definition must not drift — see `docs/training_pipeline.md` §8.
     """
     y_true, y_pred = np.asarray(y_true), np.asarray(y_pred)
     max_abs = np.max(np.abs(y_true))

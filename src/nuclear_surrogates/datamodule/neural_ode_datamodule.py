@@ -10,12 +10,17 @@ from torch.utils.data import DataLoader, TensorDataset
 import nuclear_surrogates.datamodule.data_scalers as data_scalers
 import nuclear_surrogates.datamodule.dataset_helper as data_help
 import nuclear_surrogates.utils.plot as plot
-from nuclear_surrogates.datamodule.preprocessor import Preprocessor
+from nuclear_surrogates.datamodule.preprocessor import (
+    Preprocessor,
+    require_fitted_scalers,
+)
 from nuclear_surrogates.utils.paths import result_dir
 
-# The physical span the NODE's normalised time axis is measured against.
-# Historically hardcoded; the data's true span is 990 days, and correcting the
-# figures that consume this would move published numbers — see AUDIT.md.
+# The nominal training span recorded in a bundle's `t_days`. Historically
+# hardcoded at 1000 while the data actually spans 990 days; it is kept at 1000
+# so existing bundles and the depletion-matrix figure's unit conversion are
+# unchanged. It is NOT the number the time axis is normalised by
+# — see `_training_time_unit`.
 DEFAULT_TRAINING_T_DAYS = 1000.0
 
 
@@ -41,6 +46,30 @@ def _data_span(traj: _Trajectories) -> float:
     """Physical span of one run, in days, as the data actually records it."""
     raw_t = traj.time_array[: traj.actual_steps]
     return float(raw_t[-1] - raw_t[0])
+
+
+def _training_time_unit(preprocessor) -> float:
+    """The physical span that training's normalised time t=1 corresponds to.
+
+    Training normalises its own grid to exactly [0, 1]
+    (`(raw_t - raw_t[0]) / (raw_t[-1] - raw_t[0])`), so the unit is the span of
+    the data it was fitted on — `t_days_data_span`, 990 days for the CASL runs.
+
+    Inference used to divide by `t_days` instead, which is the nominal 1000, so
+    the same 990-day grid came out as [0, 0.99]: every step was integrated over
+    a 1 % shorter interval than the model was trained on, and a frozen
+    checkpoint did not reproduce its own training-mode trajectories. Bundles
+    written before `t_days_data_span` existed fall back to `t_days` and keep
+    their old behaviour.
+    """
+    span = getattr(preprocessor, "t_days_data_span", None)
+    if span is None:
+        logger.warning(
+            "preprocessor has no t_days_data_span (bundle predates it) — "
+            "normalising inference time by the nominal t_days instead"
+        )
+        return float(preprocessor.t_days)
+    return float(span)
 
 
 def _to_trajectory_tensor(input_scaled, target_scaled):
@@ -71,7 +100,7 @@ class NODE_Datamodule(L.LightningDataModule):
         # training dataset, and what removes the train/serve skew.
         self.preprocessor_path = cfg_object.dataset.get("preprocessor_path", None)
         self.preprocessor = None
-        self.make_plots = cfg_object.runtime.get("plots", True)
+        self.make_plots = cfg_object.runtime.get("analyses", True)
 
         self.train_batch_size = cfg_object.dataset.train.batch_size
         self.val_batch_size = cfg_object.dataset.val.batch_size
@@ -223,18 +252,25 @@ class NODE_Datamodule(L.LightningDataModule):
             f"Train: {n_train}, Val: {n_val}, Test: {num_runs - n_train - n_val} runs"
         )
 
-        # Fitted on the training split only — no leakage from val/test.
+        # Fitted on the training split only — no leakage from val/test. The
+        # load branch is `nucml plots` replaying a finished run against the
+        # scalers that run was trained with, rather than a fresh fit that would
+        # only coincidentally agree with them.
         train_input_raw, train_target_raw = splits["train"]
-        self.preprocessor = Preprocessor.fit(
-            self.inputs,
-            self.target,
-            train_input_raw.reshape(-1, traj.n_input_features),
-            train_target_raw.reshape(-1, traj.n_target_features),
-            self.col_index_map,
-            self.target_index_map,
-            t_days=DEFAULT_TRAINING_T_DAYS,
-            t_days_data_span=_data_span(traj),
-        )
+        if self.preprocessor_path:
+            logger.info("Loading fitted scalers from the bundle rather than fitting")
+            self.preprocessor = Preprocessor.load(self.preprocessor_path)
+        else:
+            self.preprocessor = Preprocessor.fit(
+                self.inputs,
+                self.target,
+                train_input_raw.reshape(-1, traj.n_input_features),
+                train_target_raw.reshape(-1, traj.n_target_features),
+                self.col_index_map,
+                self.target_index_map,
+                t_days=DEFAULT_TRAINING_T_DAYS,
+                t_days_data_span=_data_span(traj),
+            )
         self.input_scaler = self.preprocessor.input_scaler
         self.target_scaler = self.preprocessor.target_scaler
 
@@ -272,35 +308,14 @@ class NODE_Datamodule(L.LightningDataModule):
     def _setup_inference(self, all_columns):
         """Evaluate a frozen model on `path_to_inference_data`.
 
-        With `dataset.preprocessor_path` set, the fitted scalers are loaded and
-        `path_to_data` is never opened — which is what lets a checkpoint be
-        evaluated without shipping the training dataset. Without it, the
-        historical behaviour is kept: scalers are re-fit on `path_to_data`.
+        The fitted scalers come from `dataset.preprocessor_path` and nowhere
+        else, so `path_to_data` is never opened — which is what lets a
+        checkpoint be evaluated without shipping the training dataset.
         """
-        if self.preprocessor_path:
-            logger.info("Inference mode: loading fitted scalers from the bundle")
-            self.preprocessor = Preprocessor.load(self.preprocessor_path)
-            training_T = self.preprocessor.t_days
-        else:
-            logger.warning(
-                "Inference mode with no dataset.preprocessor_path: re-fitting "
-                "scalers on path_to_data. These are NOT the scalers the "
-                "checkpoint was trained with."
-            )
-            fit_traj = self._read_trajectories(
-                self.path_to_data, self.fraction_of_data, all_columns
-            )
-            self.preprocessor = Preprocessor.fit(
-                self.inputs,
-                self.target,
-                fit_traj.input_flat,
-                fit_traj.target_flat,
-                fit_traj.col_index_map,
-                fit_traj.target_index_map,
-                t_days=DEFAULT_TRAINING_T_DAYS,
-                t_days_data_span=_data_span(fit_traj),
-            )
-            training_T = DEFAULT_TRAINING_T_DAYS
+        require_fitted_scalers(self.preprocessor_path)
+        logger.info("Inference mode: loading fitted scalers from the bundle")
+        self.preprocessor = Preprocessor.load(self.preprocessor_path)
+        training_T = _training_time_unit(self.preprocessor)
 
         self.input_scaler = self.preprocessor.input_scaler
         self.target_scaler = self.preprocessor.target_scaler

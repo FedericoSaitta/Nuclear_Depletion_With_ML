@@ -1,0 +1,37 @@
+cff-version: 1.2.0
+message: "If you use this software in your research, please cite it as follows."
+
+title: "Nuclear Transport With Machine Learning"
+
+authors:
+  - family-names: "Castañeda Rodriguez"
+    given-names: "Abel"
+
+  - family-names: "Saitta"
+    given-names: "Federico"
+    orcid: "https://orcid.org/0009-0001-6063-1184"
+
+contributors:
+  - family-names: "Christie"
+    given-names: "Stuart"
+    affiliation: "The University of Manchester"
+    role: "lecturer"
+    orcid: "https://orcid.org/0009-0000-5970-0835"
+
+version: "0.1.0"
+date-released: "2026-08-18"
+
+repository-code: "https://github.com/FedericoSaitta/Nuclear_Depletion_With_ML"
+url: "https://github.com/FedericoSaitta/Nuclear_Depletion_With_ML.git"
+
+keywords:
+  - "nuclear depletion"
+  - "machine learning"
+  - "OpenMC"
+  - "nuclear engineering"
+  - "neural networks"
+  - "neural ODE"
+
+abstract: >
+  Machine-learning methods for nuclear depletion calculations,
+  including model training, evaluation, and OpenMC-based data generation.

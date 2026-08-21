@@ -1,11 +1,11 @@
 # Smallest runnable DNN config — the single-step (state_t -> state_t+1)
 # surrogate, on the committed 10-run test fixture. See configs/smoke_node.yaml
-# for the rationale.
+# for the rationale, including why `--seed 0`.
 #
-#   uv run nucml --config configs/smoke_dnn.yaml
+#   uv run nucml train --config configs/smoke_dnn.yaml \
+#                      --data tests/fixtures/mini_casl_10runs.h5 \
+#                      --seed 0 --no-analyses
 dataset:
-  # Paths are resolved relative to THIS FILE, not to the working directory.
-  path_to_data: ../tests/fixtures/mini_casl_10runs.h5
   fraction_of_data: 1.0
 
   # Fractions of whole runs, split sequentially in time.
@@ -39,6 +39,7 @@ dataset:
     batch_size: 128
 
 model:
+  kind: DNN
   name: smoke_dnn
   layers: [16, 16]
   dropout_probability: 0.0
@@ -54,14 +55,3 @@ train:
   num_epochs: 3
   grad_clip: 0.0
   drop_last: false
-
-runtime:
-  mode: train
-  model: DNN
-  ckp_path: ""
-  device: cpu
-  seed: 0
-  num_workers: 0
-  plots: false
-  output_dir: ../results
-  model_database: ../Chain_Model.db
