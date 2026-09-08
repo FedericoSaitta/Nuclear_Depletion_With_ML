@@ -183,6 +183,189 @@ def test_split_info_partitions_every_run_exactly_once():
     assert sorted(allocated) == list(range(info["n_runs"]))
 
 
+# ── splitting: random_by_run ─────────────────────────────────────────────────
+
+
+def test_random_by_run_deals_out_the_shared_permutation():
+    """The DNN's test runs must be the NODE's test runs.
+
+    Both models partition `run_permutation(n_runs, seed)` at the same two
+    boundaries, so with one seed they hold out the same runs and their metrics
+    are computed on the same data. This is the whole point of the strategy: if
+    this drifts, the head-to-head comparison quietly stops being paired.
+    """
+    X, Y = _split_fixture(n_runs=10, steps=100)
+    *_, info = dataset_helper.timeseries_train_val_test_split(
+        X, Y, 0.8, 0.1, 0.1, steps_per_run=100, strategy="random_by_run", seed=42
+    )
+    perm = dataset_helper.run_permutation(10, 42).tolist()
+
+    assert info["strategy"] == "random_by_run"
+    assert info["train"] == perm[:8]
+    assert info["val"] == perm[8:9]
+    assert info["test"] == perm[9:]
+
+
+def test_random_by_run_moves_the_test_set_off_the_file_tail():
+    """Sequential always holds out the last runs; random must not."""
+    X, Y = _split_fixture(n_runs=50, steps=20)
+    kwargs = {"steps_per_run": 20, "rng": np.random.default_rng(0)}
+    *_, seq = dataset_helper.timeseries_train_val_test_split(
+        X, Y, 0.8, 0.1, 0.1, **kwargs
+    )
+    *_, rnd = dataset_helper.timeseries_train_val_test_split(
+        X, Y, 0.8, 0.1, 0.1, strategy="random_by_run", seed=42, **kwargs
+    )
+    assert seq["test"] == list(range(45, 50))
+    assert rnd["test"] != seq["test"]
+
+
+def test_random_by_run_needs_a_seed():
+    """An unseeded permutation could not be rebuilt from a bundle."""
+    X, Y = _split_fixture()
+    with pytest.raises(ValueError, match="needs a seed"):
+        dataset_helper.timeseries_train_val_test_split(
+            X, Y, 0.8, 0.1, 0.1, steps_per_run=100, strategy="random_by_run"
+        )
+
+
+def test_random_by_run_reorders_runs_but_not_timesteps():
+    """Runs may be dealt out in any order; the steps inside one may not move."""
+    X, Y = _split_fixture(n_runs=10, steps=100, n_features=1)
+    X_tr, *_ = dataset_helper.timeseries_train_val_test_split(
+        X, Y, 0.8, 0.1, 0.1, steps_per_run=100, strategy="random_by_run", seed=4
+    )
+    for run in range(8):
+        block = X_tr[run * 100 : (run + 1) * 100, 0]
+        assert np.all(np.diff(block) > 0), "timestep order was scrambled"
+
+
+def test_random_by_run_partitions_every_run_exactly_once():
+    X, Y = _split_fixture()
+    *_, info = dataset_helper.timeseries_train_val_test_split(
+        X, Y, 0.8, 0.1, 0.1, steps_per_run=100, strategy="random_by_run", seed=11
+    )
+    allocated = info["train"] + info["val"] + info["test"]
+    assert sorted(allocated) == list(range(info["n_runs"]))
+
+
+def test_sequential_is_still_the_default():
+    """Adding the argument must not move an archived run's partition."""
+    X, Y = _split_fixture()
+    *_, info = dataset_helper.timeseries_train_val_test_split(
+        X, Y, 0.8, 0.1, 0.1, steps_per_run=100, rng=np.random.default_rng(0)
+    )
+    assert info["strategy"] == "sequential_by_run"
+    assert info["train"] == list(range(8))
+    assert info["test"] == [9]
+
+
+def test_split_strategy_defaults_when_config_is_silent():
+    """A config written before the key existed keeps its model's behaviour."""
+    from omegaconf import OmegaConf
+
+    silent = OmegaConf.create({"dataset": {"fraction_of_data": 1.0}})
+    fractions_only = OmegaConf.create(
+        {"dataset": {"split": {"train": 0.8, "val": 0.1, "test": 0.1}}}
+    )
+    for cfg in (silent, fractions_only):
+        assert (
+            dataset_helper.split_strategy(cfg, default="sequential_by_run")
+            == "sequential_by_run"
+        )
+        assert (
+            dataset_helper.split_strategy(cfg, default="random_by_run")
+            == "random_by_run"
+        )
+
+
+def test_split_strategy_read_from_config():
+    from omegaconf import OmegaConf
+
+    cfg = OmegaConf.create(
+        {
+            "dataset": {
+                "split": {
+                    "strategy": "random_by_run",
+                    "train": 0.8,
+                    "val": 0.1,
+                    "test": 0.1,
+                }
+            }
+        }
+    )
+    assert dataset_helper.split_strategy(cfg, "sequential_by_run") == "random_by_run"
+    assert dataset_helper.split_fractions(cfg, (0.6, 0.2, 0.2)) == (0.8, 0.1, 0.1)
+
+
+def test_split_strategy_rejects_an_unknown_name():
+    """A typo must fail loudly, not fall back to the default partition."""
+    from omegaconf import OmegaConf
+
+    cfg = OmegaConf.create({"dataset": {"split": {"strategy": "randmo_by_run"}}})
+    with pytest.raises(ValueError, match="Unknown dataset.split.strategy"):
+        dataset_helper.split_strategy(cfg, "sequential_by_run")
+
+
+# ── delta -> absolute conversion ─────────────────────────────────────────────
+
+
+def _true_series():
+    """Two runs of four steps, each a clean arithmetic ramp."""
+    return np.array([[1.0, 2.0, 3.0, 4.0], [10.0, 12.0, 14.0, 16.0]])
+
+
+def test_integrate_deltas_reproduces_truth_from_exact_deltas():
+    from nuclear_surrogates import evaluation
+
+    true = _true_series()
+    deltas = np.diff(true, axis=1, append=true[:, -1:] * 2)  # last one is unused
+    out = evaluation.integrate_deltas(deltas, true[:, 0])
+    np.testing.assert_allclose(out, true)
+
+
+def test_integrate_deltas_starts_at_the_initial_concentration():
+    """The NODE's trajectory starts at the true y(0); the DNN's must too.
+
+    Before this, the DNN's series was c(0) + cumsum, i.e. c(1)...c(N) — one step
+    later than the NODE's window at both ends, which gave the two models
+    different MARE denominators and misaligned error-growth curves.
+    """
+    from nuclear_surrogates import evaluation
+
+    initial = np.array([1.0, 10.0])
+    deltas = np.array([[1.0, 1.0, 1.0, 99.0], [2.0, 2.0, 2.0, 99.0]])
+    out = evaluation.integrate_deltas(deltas, initial)
+
+    np.testing.assert_array_equal(out[:, 0], initial)
+    assert out.shape == deltas.shape
+    np.testing.assert_allclose(out, [[1, 2, 3, 4], [10, 12, 14, 16]])
+
+
+def test_teacher_forcing_does_not_accumulate_its_errors():
+    """Each step is one prediction from the *true* state, as the NODE's is.
+
+    A constant bias on every delta must leave a constant offset, not one that
+    grows down the trajectory — a cumsum would give 1, 2, 3 * the bias.
+    """
+    from nuclear_surrogates import evaluation
+
+    true = _true_series()
+    exact = np.diff(true, axis=1, append=true[:, -1:])
+    out = evaluation.teacher_forced_from_deltas(exact + 0.5, true)
+
+    np.testing.assert_array_equal(out[:, 0], true[:, 0])
+    np.testing.assert_allclose(out[:, 1:] - true[:, 1:], 0.5)
+
+
+def test_teacher_forcing_reproduces_truth_from_exact_deltas():
+    from nuclear_surrogates import evaluation
+
+    true = _true_series()
+    exact = np.diff(true, axis=1, append=true[:, -1:])
+    np.testing.assert_allclose(evaluation.teacher_forced_from_deltas(exact, true), true)
+
+
 # ── scaling ──────────────────────────────────────────────────────────────────
 
 

@@ -25,13 +25,46 @@ MALE_EPSILON = 1e-20
 TEST_METRICS_NAME = "test_metrics.json"
 
 
-def deltas_to_absolute(deltas, initial):
+def align_to_initial(series, initial):
+    """Shift a c(1)…c(N) series onto the c(0)…c(N-1) grid.
+
+    The DNN's targets are one step ahead of its inputs, so every series it
+    produces starts at c(1) and ends one step past where the NODE's data stops.
+    Prepending the true c(0) and dropping that last step puts both models on the
+    same 100 points — which they must be on, since MARE normalises by the
+    maximum truth in the window and the error-growth curves index by step.
+    """
+    return np.concatenate([np.asarray(initial)[:, None], series[:, :-1]], axis=1)
+
+
+def integrate_deltas(deltas, initial):
     """Integrate per-step concentration changes into absolute concentrations.
 
     *deltas* is ``(runs, steps)``, *initial* the ``(runs,)`` concentration each
-    run starts from.
+    run starts from. The result starts **at** ``initial`` — c(0), c(1) …
+    c(steps-1) — the same grid the NODE reports on, whose trajectory likewise
+    begins at the true y(0).
     """
-    return np.asarray(initial)[:, None] + np.cumsum(deltas, axis=1)
+    return align_to_initial(
+        np.asarray(initial)[:, None] + np.cumsum(deltas, axis=1), initial
+    )
+
+
+def teacher_forced_from_deltas(deltas, true_conc):
+    """Absolute concentrations one step ahead of the **true** state.
+
+    The DNN twin of `analysis.rollout.teacher_forced_predictions`, matched to it
+    step for step: the first point is copied from truth because it has no
+    predecessor, and every later point is a single prediction added to the true
+    concentration rather than to an accumulated one.
+
+    This is what makes MARE(TF) a one-step quantity for both models. Adding the
+    deltas to each other instead — c(0) plus every predicted delta — is an
+    open-loop integrator whose errors compound along the trajectory, so it
+    measures drift rather than one-step accuracy and is not what the NODE's
+    teacher-forced number reports.
+    """
+    return align_to_initial(true_conc + deltas, true_conc[:, 0])
 
 
 def error_growth_curves(trues, ar_preds, tf_preds, epsilon=MALE_EPSILON):

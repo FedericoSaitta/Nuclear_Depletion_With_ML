@@ -173,20 +173,28 @@ class DNN_Model(L.LightningModule):
             f"Test set shape - True: {y_true_test.shape}, Pred: {y_pred_test.shape}"
         )
 
+        # Everything below works on (runs, steps, targets) arrays in physical
+        # units, which is the shape the shared report functions expect.
+        trues, ar_preds, tf_preds = self._build_trajectories(
+            test_data, y_pred_test, datamodule, target_names
+        )
+
+        # R2/MAE/RMSE are taken on the free-running trajectory in atom/b-cm,
+        # flattened over runs and steps — the same call the NODE makes with the
+        # same arguments (`neural_ode.on_test_epoch_end`). They used to be taken
+        # on `y_pred_test`, the raw one-step output, which under
+        # `target_delta_conc` is a *change* per 10-day step: a different
+        # quantity in different units from the NODE's, so the two models'
+        # headline numbers could not be read side by side.
+        n_target = trues.shape[2]
         per_target_metrics, mae_arr, rmse_arr, r2_arr = evaluation.report_per_target(
-            y_true_test,
-            y_pred_test,
+            trues.reshape(-1, n_target),
+            ar_preds.reshape(-1, n_target),
             target_names,
             self.result_dir,
             self.log,
             steps_per_run=datamodule.samples_per_run,
             figures=self.draw_analyses,
-        )
-
-        # Everything below works on (runs, steps, targets) arrays in physical
-        # units, which is the shape the shared report functions expect.
-        trues, ar_preds, tf_preds = self._build_trajectories(
-            test_data, y_pred_test, datamodule, target_names
         )
 
         evaluation.report_mare_comparison(
@@ -243,11 +251,16 @@ class DNN_Model(L.LightningModule):
     def _build_trajectories(self, test_data, y_pred_test, datamodule, target_names):
         """Roll out autoregressively, then shape everything as (runs, steps, targets).
 
+        Every series comes back as absolute concentrations on the grid
+        c(0) … c(N-1), which is the grid the NODE reports on, so the two models'
+        metrics and figures line up step for step.
+
         With `target_delta_conc` the model works in concentration *changes*, so
-        each run's series is integrated back to absolute concentrations from the
-        initial concentration carried in that run's first input row. A target
-        that is not also an input has no such initial value, and is left as
-        deltas — which is what the comparison then reports.
+        each run is integrated from the initial concentration carried in its
+        first input row. The teacher-forced series is built one step from the
+        *true* state rather than by accumulating predictions, matching
+        `analysis.rollout.teacher_forced_predictions` — see
+        `evaluation.teacher_forced_from_deltas`.
         """
         X_test = test_data["inputs"]
         samples_per_run = datamodule.samples_per_run
@@ -268,29 +281,45 @@ class DNN_Model(L.LightningModule):
 
         trues, ar_preds, tf_preds = [], [], []
         for idx, target_name in enumerate(target_names):
-            series = [
-                ar_trues_dict[target_name].reshape(shape),
-                ar_preds_dict[target_name].reshape(shape),
-                y_pred_test[:, idx].reshape(shape),
-            ]
+            true_series = ar_trues_dict[target_name].reshape(shape)
+            ar_series = ar_preds_dict[target_name].reshape(shape)
+            tf_series = y_pred_test[:, idx].reshape(shape)
+
+            # Every series needs this run's true starting concentration: to
+            # integrate from under `target_delta_conc`, and to sit on the
+            # NODE's grid either way. A target that is not also an input does
+            # not have one. That used to fall through to a warning and leave the
+            # channel in delta units, which now silently mixes units inside an
+            # averaged R2 — so refuse instead. Every shipped config lists all
+            # seven targets among its inputs.
+            if target_name not in datamodule.col_index_map:
+                raise ValueError(
+                    f"target {target_name!r} is not also an input, so its "
+                    f"initial concentration is unknown and its trajectory "
+                    f"cannot be put in absolute units. Add it to "
+                    f"`dataset.inputs`."
+                )
+            initial = self._initial_concentrations(
+                X_test, datamodule, target_name, samples_per_run
+            )
 
             if datamodule.delta_conc:
-                if target_name in datamodule.col_index_map:
-                    initial = self._initial_concentrations(
-                        X_test, datamodule, target_name, samples_per_run
-                    )
-                    series = [evaluation.deltas_to_absolute(s, initial) for s in series]
-                else:
-                    logger.warning(
-                        f"{target_name} is not an input, so its initial "
-                        f"concentration is unknown — reporting deltas instead of "
-                        f"absolute concentrations."
-                    )
+                true_series = evaluation.integrate_deltas(true_series, initial)
+                ar_series = evaluation.integrate_deltas(ar_series, initial)
+                # Built from the integrated truth, so it is one step from the
+                # true state rather than from an accumulated prediction.
+                tf_series = evaluation.teacher_forced_from_deltas(
+                    tf_series, true_series
+                )
+            else:
+                true_series, ar_series, tf_series = (
+                    evaluation.align_to_initial(s, initial)
+                    for s in (true_series, ar_series, tf_series)
+                )
 
-            for collection, values in zip(
-                (trues, ar_preds, tf_preds), series, strict=False
-            ):
-                collection.append(values)
+            trues.append(true_series)
+            ar_preds.append(ar_series)
+            tf_preds.append(tf_series)
 
         return tuple(
             np.stack(arrays, axis=-1) for arrays in (trues, ar_preds, tf_preds)

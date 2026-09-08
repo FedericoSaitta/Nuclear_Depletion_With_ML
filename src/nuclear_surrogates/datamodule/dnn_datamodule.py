@@ -47,8 +47,14 @@ class DNN_Datamodule(L.LightningDataModule):
 
         self.inputs = data_scalers.create_scaler_dict(cfg_object.dataset["inputs"])
         self.target = data_scalers.create_scaler_dict(cfg_object.dataset["targets"])
-        # Sequential 80/10/10 unless the config says otherwise.
+        # 80/10/10, sequentially by run, unless the config says otherwise.
+        # `random_by_run` puts the DNN on the NODE's exact test runs; the
+        # historical sequential split stays the default, so an archived bundle
+        # still rebuilds the partition it was trained with.
         self.split = data_help.split_fractions(cfg_object, default=(0.8, 0.1, 0.1))
+        self.strategy = data_help.split_strategy(
+            cfg_object, default="sequential_by_run"
+        )
         self.delta_conc = cfg_object.dataset.target_delta_conc
         self.train_drop_last = cfg_object.train.drop_last
 
@@ -117,7 +123,7 @@ class DNN_Datamodule(L.LightningDataModule):
     def _setup_training(self, all_columns):
         X, Y = self._read_pairs(self.path_to_data, self.fraction_of_data, all_columns)
 
-        # Split by whole runs, sequentially in time.
+        # Split by whole runs, never mid-run — see `split_strategy`.
         train_frac, val_frac, test_frac = self.split
         X_train, X_val, X_test, y_train, y_val, y_test, split_info = (
             data_help.timeseries_train_val_test_split(
@@ -129,6 +135,8 @@ class DNN_Datamodule(L.LightningDataModule):
                 steps_per_run=self.samples_per_run,
                 shuffle_within_train=True,
                 rng=np.random.default_rng(self.seed),
+                strategy=self.strategy,
+                seed=self.seed,
             )
         )
         self.split_info = split_info

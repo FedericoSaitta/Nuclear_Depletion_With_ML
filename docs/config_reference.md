@@ -50,18 +50,28 @@ be describing a machine rather than a model, and the test suite rejects it.
 `fraction × total` whole runs of the file (`dataset_helper.read_data`), so
 `0.1` means the first 10 % of runs, not a random 10 %.
 
-**`split`** partitions whole runs, never mid-run. When the key is absent each
-model falls back to its historical default, which is why the two differ:
+**`split`** partitions whole runs, never mid-run. It carries the three
+fractions plus `strategy`, and both models support both strategies:
 
-| | default | strategy |
-|---|---|---|
-| DNN | 0.8 / 0.1 / 0.1 | sequential by run, training runs shuffled |
-| NODE | 0.6 / 0.2 / 0.2 | seeded random permutation of runs |
+| `strategy` | partition |
+|---|---|
+| `sequential_by_run` | contiguous slices in file order, so the test set is the tail of the file; the training runs are then shuffled |
+| `random_by_run` | a seeded permutation of whole runs (`dataset_helper.run_permutation`), partitioned at the same boundaries by both models |
 
-The partition actually used is written to
-`<--out>/<model.name>/model-bundle/split_indices.json`. That the two
-models split differently is a known limitation of the head-to-head comparison
-— see `docs/training_pipeline.md` §8.
+Under `random_by_run`, **one seed and one run count put both models on the same
+test runs**, which is what makes a DNN-vs-NODE comparison paired rather than
+merely matched. All three shipped model configs set it, and
+`tests/test_configs.py` asserts they agree.
+
+When a key is absent each model falls back to its historical default —
+`sequential_by_run` at 0.8 / 0.1 / 0.1 for the DNN, `random_by_run` at
+0.6 / 0.2 / 0.2 for the NODE — so a config written before these keys existed,
+including the `config.resolved.yaml` archived inside an older bundle, still
+rebuilds the partition it was trained with. An unrecognised strategy raises
+rather than falling back.
+
+`random_by_run` needs a seed; it comes from `--seed`, and the partition actually
+used is written to `<--out>/<model.name>/model-bundle/split_indices.json`.
 
 **Scalers** (case-insensitive): `MinMax`, `Standard`, `Robust`, `MaxAbs`,
 `Normalizer`, `Quantile`, `Power`, `none`. Each is fitted **per column** and on
@@ -83,8 +93,14 @@ scalers.
 **`target_delta_conc: true`** makes the target `c(t+1) − c(t)`. This matters
 for isotopes like U238 that change by only a few percent over the full history:
 asked for `c(t+1)` directly, a network scores R² ≈ 1 by copying its input.
-Absolute concentrations are recovered by cumulative summation at evaluation
-time (`evaluation.deltas_to_absolute`).
+
+Absolute concentrations are recovered at evaluation time, and *how* depends on
+the rollout: `evaluation.integrate_deltas` sums the predictions for the
+free-running trajectory, while `evaluation.teacher_forced_from_deltas` adds each
+prediction to the true concentration for the one-step one. Both start at the
+true c(0), so they land on the grid the NODE reports on — see
+`docs/training_pipeline.md` §5. Every target must therefore also be an input, so
+that its initial concentration is known; a config that breaks this is refused.
 
 ---
 

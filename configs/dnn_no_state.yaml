@@ -1,0 +1,78 @@
+# The paper's head-to-head DNN: the same one-step surrogate as configs/dnn.yaml,
+# but seeing only what the NODE sees.
+#
+#   nucml train --config configs/dnn_no_state.yaml --data datasets/casl_3305_runs_inter.h5
+#
+# configs/dnn.yaml additionally feeds the network fuel/moderator/clad
+# temperature, moderator density and boron. The NODE has none of those — its
+# only forcing is power — so a DNN carrying them wins the comparison partly on
+# information the other model was never given. This file drops them, which makes
+# the two models' inputs identical and the comparison a statement about the
+# architectures. It is also the only variant that can be evaluated on BEAVRS,
+# whose dataset does not contain those five columns at all.
+#
+# configs/dnn.yaml remains as the ablation: the difference between the two is
+# what the thermal-hydraulic state is worth.
+#
+# The hyperparameters are inherited unchanged from the Optuna study, which was
+# run against the 13-input model. They are therefore tuned for a network with
+# more inputs than this one has, and the paper should say so.
+dataset:
+  fraction_of_data: 1.0
+
+  # Identical to configs/dnn.yaml and configs/node.yaml, so all three runs hold
+  # out the same runs — see the note in configs/dnn.yaml.
+  split:
+    strategy: random_by_run
+    train: 0.8
+    val: 0.1
+    test: 0.1
+
+  # Power plus the seven concentrations: the NODE's forcing plus the NODE's
+  # state, and nothing else.
+  inputs:
+    power_W_g: MinMax
+    U238: quantile
+    U239: MinMax
+    Np239: MinMax
+    Pu239: robust
+    Pu240: standard
+    Pu241: MinMax
+    Pu242: MinMax
+  targets:
+    U238: robust
+    U239: robust
+    Np239: standard
+    Pu239: standard
+    Pu240: robust
+    Pu241: robust
+    Pu242: robust
+
+  # Predict c(t+1) - c(t) rather than c(t+1). U238 changes by only a few percent
+  # over a full history, so a network asked for it directly scores R^2 ~ 1 by
+  # copying its input.
+  target_delta_conc: true
+
+  train:
+    batch_size: 512
+  val:
+    batch_size: 8192
+
+model:
+  kind: DNN
+  name: DNN_no_state_7_isotope
+  layers: [128, 128]
+  dropout_probability: 0.0
+  activation: tanh
+  output_activation: none
+  residual_connections: true
+
+train:
+  loss: huber
+  learning_rate: 0.0009134017134849459
+  weight_decay: 0.00013378788391636378
+  lr_scheduler_patience: 10
+  num_epochs: 500
+  early_stopping_patience: 20
+  grad_clip: 0.0
+  drop_last: false

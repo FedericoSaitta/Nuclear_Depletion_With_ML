@@ -13,9 +13,11 @@
 dataset:
   fraction_of_data: 1.0
 
-  # Fractions of whole runs. The NODE partitions by a seeded random
-  # permutation of runs; the DNN splits sequentially in time.
+  # Fractions of whole runs, and how those runs are dealt out. Both models now
+  # carry `strategy: random_by_run`, so with the same seed and run count they
+  # hold out the same runs and their metrics are directly comparable.
   split:
+    strategy: random_by_run
     train: 0.8
     val: 0.1
     test: 0.1

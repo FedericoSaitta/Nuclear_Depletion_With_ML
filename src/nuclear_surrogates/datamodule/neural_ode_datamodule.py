@@ -110,7 +110,10 @@ class NODE_Datamodule(L.LightningDataModule):
         # constructed outside main() (tests, packaging) splits identically.
         self.seed = cfg_object.runtime.get("seed", 42)
 
-        # Random-by-run 60/20/20 unless the config says otherwise.
+        # 60/20/20, randomly by run, unless the config says otherwise. The
+        # strategy is a config key on this side too, so a NODE run can be put on
+        # the DNN's sequential partition if one ever needs to be matched.
+        self.strategy = data_help.split_strategy(cfg_object, default="random_by_run")
         self.split = data_help.split_fractions(cfg_object, default=(0.6, 0.2, 0.2))
 
         self.inputs = data_scalers.create_scaler_dict(cfg_object.dataset["inputs"])
@@ -220,7 +223,11 @@ class NODE_Datamodule(L.LightningDataModule):
             self._plot_distributions(traj.input_flat, traj.target_flat, "Raw")
 
         num_runs = traj.num_runs
-        perm = np.random.default_rng(self.seed).permutation(num_runs)
+        perm = (
+            data_help.run_permutation(num_runs, self.seed)
+            if self.strategy == "random_by_run"
+            else np.arange(num_runs)
+        )
         input_trajs = traj.input_trajs[perm]
         target_trajs = traj.target_trajs[perm]
 
@@ -231,7 +238,7 @@ class NODE_Datamodule(L.LightningDataModule):
         # perm[i] is the original run index now sitting at position i, so the
         # split is recorded in terms of runs as they appear in the source file.
         self.split_info = {
-            "strategy": "random_by_run",
+            "strategy": self.strategy,
             "fractions": list(self.split),
             "n_runs": num_runs,
             "steps_per_run": self.actual_steps,

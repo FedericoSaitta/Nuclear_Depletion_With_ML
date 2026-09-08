@@ -69,10 +69,19 @@ uv run nucml train --config configs/node.yaml --data datasets/casl_3305_runs_int
                    train.num_epochs=5 model.layers=[64,64]
 ```
 
-Two configs ship with the repo, one per paper model: `configs/node.yaml`
-(the constrained 7×7 matrix Neural ODE) and `configs/dnn.yaml`. Neither names a
-dataset — the HDF5 is not in the repository, so put one in `datasets/` (see
-[Downloading data](#downloading-data)) and pass it with `--data`.
+Three configs ship with the repo, one per paper model:
+
+| config | model |
+|---|---|
+| `configs/node.yaml` | the constrained 7×7 matrix Neural ODE |
+| `configs/dnn_no_state.yaml` | the one-step DNN on the NODE's inputs — the head-to-head comparison |
+| `configs/dnn.yaml` | the same DNN, plus the thermal-hydraulic state variables — the ablation |
+
+All three hold out the same runs (`split.strategy: random_by_run` at one seed),
+so their metrics are directly comparable; see `docs/training_pipeline.md` §2.
+None names a dataset — the HDF5 is not in the repository, so put one in
+`datasets/` (see [Downloading data](#downloading-data)) and pass it with
+`--data`.
 
 ### Train
 

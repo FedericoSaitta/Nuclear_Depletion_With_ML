@@ -101,6 +101,28 @@ def test_required_keys_present(name):
     assert not missing, f"{name} is missing {missing} — it would crash on first run"
 
 
+PAPER_CONFIGS = ["dnn.yaml", "dnn_no_state.yaml", "node.yaml"]
+
+
+def test_the_paper_configs_agree_on_how_runs_are_split():
+    """The head-to-head comparison is only paired while these three agree.
+
+    With one strategy, one seed and one dataset the models hold out the same
+    runs. Changing any of these back to `sequential_by_run` silently puts the
+    DNN on a disjoint test set from the NODE's, which is exactly the defect this
+    key was added to remove.
+    """
+    strategies = {
+        name: load(name)["dataset"]["split"].get("strategy") for name in PAPER_CONFIGS
+    }
+    assert set(strategies.values()) == {"random_by_run"}, strategies
+
+    fractions = {
+        name: load(name)["dataset"]["split"]["train"] for name in PAPER_CONFIGS
+    }
+    assert len(set(fractions.values())) == 1, fractions
+
+
 @pytest.mark.parametrize("name", CONFIG_FILES)
 def test_no_config_declares_a_path_or_a_runtime(name):
     """A config describes the model; the command line describes the run.

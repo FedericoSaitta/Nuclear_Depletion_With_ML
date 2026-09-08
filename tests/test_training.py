@@ -137,6 +137,95 @@ def _setup_only(cfg):
     return dm.split_info
 
 
+def test_both_models_hold_out_the_same_runs_under_random_by_run(tmp_path):
+    """The head-to-head comparison has to be paired, not merely matched.
+
+    The two models used to partition differently — the DNN sequentially, the
+    NODE by a seeded permutation — so at one seed, on one dataset, with
+    identical fractions, they were still scored on disjoint sets of runs. Under
+    `random_by_run` both deal out `dataset_helper.run_permutation`, so every
+    split must agree run for run. If this fails, the paper's DNN and NODE
+    columns are describing different test sets again.
+    """
+    splits = {
+        kind: _setup_only(
+            load_cfg(
+                kind,
+                tmp_path / kind,
+                **{"runtime.seed": 5, "dataset.split.strategy": "random_by_run"},
+            )
+        )
+        for kind in ("DNN", "NODE")
+    }
+
+    assert splits["DNN"]["strategy"] == "random_by_run"
+    assert splits["NODE"]["strategy"] == "random_by_run"
+    assert splits["DNN"]["n_runs"] == splits["NODE"]["n_runs"]
+    for part in ("train", "val", "test"):
+        assert splits["DNN"][part] == splits["NODE"][part], part
+
+
+def test_both_models_evaluate_the_same_100_points(tmp_path):
+    """The two models' ground truth must be the same numbers on the same grid.
+
+    The DNN's targets sit one step ahead of its inputs, so its trajectories
+    naturally run c(1)…c(N) — days 10-1000 — while the NODE drops the file's
+    last row and reports c(0)…c(N-1), days 0-990. The two were therefore scored
+    on windows offset by a full 10-day step, which gave `metrics.mare` different
+    denominators and misaligned every error-growth curve.
+    `evaluation.align_to_initial` removes the offset; this checks that it did,
+    by reconstructing each model's truth the way its own evaluation path does
+    and comparing them channel by channel.
+    """
+    from nuclear_surrogates import evaluation
+    from nuclear_surrogates.datamodule.dataset_helper import ordered_names
+
+    overrides = {"runtime.seed": 0, "dataset.split.strategy": "random_by_run"}
+    dnn = _fitted_datamodule(load_cfg("DNN", tmp_path / "dnn", **overrides))
+    node = _fitted_datamodule(load_cfg("NODE", tmp_path / "node", **overrides))
+
+    names = ordered_names(dnn.target_index_map)
+    assert names == ordered_names(node.target_index_map)
+
+    # DNN: inverse-transform the delta targets, integrate from the true c(0)
+    # carried in each run's first input row — `_build_trajectories` in miniature.
+    X, Y = (t.numpy() for t in dnn.test_dataset.tensors)
+    steps = dnn.samples_per_run
+    n_runs = len(X) // steps
+    deltas = dnn.target_scaler.inverse_transform(Y)
+    first_rows = dnn.input_scaler.inverse_transform(X[::steps])
+    dnn_true = np.stack(
+        [
+            evaluation.integrate_deltas(
+                deltas[:, i].reshape(n_runs, steps),
+                first_rows[:, dnn.col_index_map[name]],
+            )
+            for i, name in enumerate(names)
+        ],
+        axis=-1,
+    )
+
+    # NODE: the target half of each trajectory, unscaled.
+    trajectories = node.test_dataset.tensors[0].numpy()
+    targets = trajectories[:, :, node.n_input_features :]
+    runs, node_steps, n_target = targets.shape
+    node_true = node.target_scaler.inverse_transform(
+        targets.reshape(-1, n_target)
+    ).reshape(runs, node_steps, n_target)
+
+    assert dnn_true.shape == node_true.shape
+    for i, name in enumerate(names):
+        a, b = dnn_true[:, :, i], node_true[:, :, i]
+        # float32 throughout, and the DNN's route there is a 100-term cumsum.
+        assert np.max(np.abs(a - b)) <= 1e-5 * np.max(np.abs(b)), name
+
+
+def _fitted_datamodule(cfg):
+    _, dm = build(cfg)
+    dm.setup(stage="fit")
+    return dm
+
+
 @pytest.mark.parametrize("kind", ["DNN", "NODE"])
 def test_same_seed_gives_the_same_initial_weights(kind, tmp_path):
     first, _ = build(load_cfg(kind, tmp_path / "a", **{"runtime.seed": 3}))

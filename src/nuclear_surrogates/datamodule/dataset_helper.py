@@ -202,12 +202,14 @@ def create_timeseries_targets(
 # ── Train / val / test splitting ─────────────────────────────────────────────
 
 
+SPLIT_STRATEGIES = ("sequential_by_run", "random_by_run")
+
+
 def split_fractions(cfg, default):
     """Read `dataset.split` as (train, val, test), falling back to *default*.
 
-    The two models partition differently — the DNN sequentially, the NODE by a
-    seeded permutation — so each passes its own historical default. That keeps a
-    config written before this key existed behaving exactly as it did.
+    Only the fractions live here; which runs land in which split is
+    `split_strategy`'s business.
     """
     section = cfg.dataset.get("split") if "dataset" in cfg else None
     if section is None:
@@ -226,6 +228,39 @@ def split_fractions(cfg, default):
     return fractions
 
 
+def split_strategy(cfg, default):
+    """Read `dataset.split.strategy`, falling back to *default*.
+
+    Both models support both strategies, so a head-to-head comparison can hold
+    out the same runs. The default is each model's historical behaviour, so a
+    config written before this key existed — including the one archived inside a
+    bundle — still rebuilds the split it was trained with.
+    """
+    section = cfg.dataset.get("split") if "dataset" in cfg else None
+    strategy = default if section is None else section.get("strategy", default)
+    if strategy not in SPLIT_STRATEGIES:
+        raise ValueError(
+            f"Unknown dataset.split.strategy {strategy!r}. "
+            f"Choose from {list(SPLIT_STRATEGIES)}"
+        )
+    return strategy
+
+
+def run_permutation(num_runs, seed):
+    """The seeded run order both models partition by under `random_by_run`.
+
+    The DNN and the NODE have to draw the *same* permutation for their test sets
+    to contain the same runs, which is the entire point of the strategy. One
+    expression, called from both datamodules, so they cannot drift apart again.
+    """
+    return np.random.default_rng(seed).permutation(num_runs)
+
+
+def _run_gather(perm, steps_per_run):
+    """Row indices that reorder a flat (runs*steps, features) array by *perm*."""
+    return (perm[:, None] * steps_per_run + np.arange(steps_per_run)).ravel()
+
+
 def timeseries_train_val_test_split(
     X,
     Y,
@@ -235,16 +270,31 @@ def timeseries_train_val_test_split(
     steps_per_run=100,
     shuffle_within_train=True,
     rng=None,
+    strategy="sequential_by_run",
+    seed=None,
 ):
-    """Split by whole runs, sequentially in time, and shuffle the training runs.
+    """Split by whole runs — never mid-run — under one of two strategies.
 
-    *rng* is a ``numpy.random.Generator`` controlling the training-run shuffle.
-    Pass a seeded one for a reproducible run order; ``None`` draws from OS
-    entropy, which is what this function did before the seed was wired up.
+    ``"sequential_by_run"`` takes contiguous slices in file order and shuffles
+    the training runs afterwards; it is the historical behaviour and stays the
+    default, so a caller that predates this argument is unaffected.
 
-    Returns the six arrays plus a ``split_info`` dict recording which run
-    indices landed in which split, so a run's partition can be audited later.
+    ``"random_by_run"`` partitions a seeded permutation of the runs, which is
+    what `NODE_Datamodule` does. Both go through `run_permutation`, so the same
+    *seed* and run count put the same runs in the same splits for both models —
+    the head-to-head comparison is then paired rather than merely matched.
+
+    *rng* and *shuffle_within_train* apply only to the sequential strategy: the
+    permutation already randomises run order, and the training DataLoader
+    shuffles samples on top of it.
+
+    Returns the six arrays plus a ``split_info`` dict recording which original
+    run indices landed in which split, so a run's partition can be audited later.
     """
+    if strategy not in SPLIT_STRATEGIES:
+        raise ValueError(
+            f"Unknown split strategy {strategy!r}. Choose from {list(SPLIT_STRATEGIES)}"
+        )
     if rng is None:
         rng = np.random.default_rng()
 
@@ -264,10 +314,25 @@ def timeseries_train_val_test_split(
     n_test = total_runs - n_train - n_val
 
     logger.info(
-        f"Runs — train: {n_train}, val: {n_val}, test: {n_test}  (steps/run: {steps_per_run})"
+        f"Runs — train: {n_train}, val: {n_val}, test: {n_test}  "
+        f"(steps/run: {steps_per_run}, strategy: {strategy})"
     )
 
-    # Sequential split by run boundaries
+    # The run order the contiguous slices below cut through. `perm[i]` is the
+    # original index of the run now sitting at position i, which is what makes
+    # `split_info` readable against the source file either way.
+    if strategy == "random_by_run":
+        if seed is None:
+            raise ValueError(
+                "random_by_run needs a seed — the split is a function of it, and "
+                "an unseeded one could not be rebuilt from a bundle"
+            )
+        perm = run_permutation(total_runs, seed)
+        rows = _run_gather(perm, steps_per_run)
+        X, Y = X[rows], Y[rows]
+    else:
+        perm = np.arange(total_runs)
+
     t1 = n_train * steps_per_run
     t2 = t1 + n_val * steps_per_run
 
@@ -275,9 +340,10 @@ def timeseries_train_val_test_split(
     X_val, y_val = X[t1:t2], Y[t1:t2]
     X_test, y_test = X[t2:], Y[t2:]
 
-    # Shuffle entire runs (not individual timesteps) within training set
+    # Shuffle entire runs (not individual timesteps) within the training set.
+    # Redundant under random_by_run, where the permutation already did it.
     order = None
-    if shuffle_within_train and n_train > 1:
+    if strategy == "sequential_by_run" and shuffle_within_train and n_train > 1:
         order = rng.permutation(n_train)
         X_train = np.concatenate(
             [X_train[i * steps_per_run : (i + 1) * steps_per_run] for i in order]
@@ -292,13 +358,13 @@ def timeseries_train_val_test_split(
     )
 
     split_info = {
-        "strategy": "sequential_by_run",
+        "strategy": strategy,
         "fractions": [train_frac, val_frac, test_frac],
         "n_runs": total_runs,
         "steps_per_run": steps_per_run,
-        "train": list(range(n_train)),
-        "val": list(range(n_train, n_train + n_val)),
-        "test": list(range(n_train + n_val, total_runs)),
+        "train": perm[:n_train].tolist(),
+        "val": perm[n_train : n_train + n_val].tolist(),
+        "test": perm[n_train + n_val :].tolist(),
         "train_shuffle_order": None if order is None else order.tolist(),
     }
     return X_train, X_val, X_test, y_train, y_val, y_test, split_info

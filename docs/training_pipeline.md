@@ -57,12 +57,26 @@ Both models go through the same path (`datamodule/dataset_helper.py`):
    The fitted state is persisted as a `Preprocessor` (`preprocessor.json`) so a
    checkpoint can be served without the training file.
 
-The two models split differently, which is a known wart (see §8). The
-splits below are each model's default when `dataset.split` is absent; the
-scalers are the ones `configs/dnn.yaml` and `configs/node.yaml` set, not a
-property of either model:
+**How the runs are dealt out** is `dataset.split.strategy`, and both models
+support both values:
 
-| | split | strategy | scalers (as shipped) |
+- `sequential_by_run` — contiguous slices in file order, so the test set is the
+  tail of the file. The DNN's historical behaviour, and still the default when
+  the key is absent, so an archived bundle rebuilds the partition it was
+  trained with.
+- `random_by_run` — a seeded permutation of whole runs
+  (`dataset_helper.run_permutation`), partitioned at the same two boundaries by
+  both datamodules. **Given one seed and one run count, the DNN and the NODE
+  therefore hold out the same runs**, which is what makes the head-to-head
+  comparison paired rather than merely matched.
+
+All three shipped configs set `random_by_run` and 80 / 10 / 10; a test asserts
+they agree (`tests/test_configs.py`), because the moment they do not, the two
+models are being scored on different data. The defaults below apply only to a
+config that omits the keys, and the scalers are what each config sets rather
+than a property of either model:
+
+| | default split | default strategy | scalers (as shipped) |
 |---|---|---|---|
 | DNN | 80 / 10 / 10 | sequential by run | per-column mix (quantile, robust, standard, MinMax) |
 | NODE | 60 / 20 / 20 | random by run, seeded | MinMax throughout |
@@ -98,8 +112,9 @@ This matters because U238 changes by only a few percent across 990 days. Asked
 to predict `c(t+1)` directly, a network trivially scores R² ≈ 1 by copying its
 input — the interesting signal is a tiny residual on top of a large constant.
 Predicting Δc removes the constant and forces the network to model the part that
-is actually dynamics. The cost is that absolute concentration must be recovered
-by summing, which is exactly where §6 becomes interesting.
+is actually dynamics. The cost is that absolute concentration has to be
+reconstructed before the DNN can be compared with the NODE at all, and *how* it
+is reconstructed decides what the resulting number means — see §5 and §6.
 
 ### The training objective
 
@@ -116,8 +131,8 @@ language this is a **teacher-forced objective**: the network is only ever asked
 to take one step from ground truth.
 
 Optimiser AdamW (lr 9.134e-4, weight decay 1.338e-4), `ReduceLROnPlateau` on
-validation loss, early stopping after 20 stale epochs. The published model
-stopped at epoch 47 of a 500-epoch budget. Batch 512, full dataset.
+validation loss, early stopping after 20 stale epochs out of a 500-epoch
+budget. Batch 512, full dataset.
 
 ---
 
@@ -167,8 +182,8 @@ therefore trained on its own rollout** — the regime the user's question is
 reaching for — while the DNN is trained one step at a time.
 
 Optimiser AdamW (lr 0.004), dopri5 at `rtol 1e-5 / atol 1e-7`, batch 64,
-early stopping after 75 stale epochs; the published model stopped at epoch 2367.
-Only power is used as forcing, and only 10% of the dataset.
+early stopping after 75 stale epochs. Only power is used as forcing, over the
+whole dataset (`fraction_of_data: 1.0`).
 
 ### Consequence
 
@@ -182,180 +197,149 @@ Only power is used as forcing, and only 10% of the dataset.
 ## 5. How the models are evaluated
 
 After training, `trainer.test` reloads the best checkpoint and produces every
-figure and number. Two rollout modes are compared, and it is essential to know
-precisely what each one is.
+figure and number. Two rollout modes are compared, and both are defined
+identically for the two models — which is the point, since the paper puts their
+numbers side by side.
 
-**Teacher forcing (TF).** At every step the model is given the **true** state and
-predicts one step ahead:
-
-```
-    Δĉ_TF(t) = f_θ( c(t), u(t) )            ← c(t) is ground truth
-```
-
-**Autoregressive (AR).** The model is given **its own** evolving state
-(`metrics.model_autoregress`):
+**Teacher forcing (TF).** One step from the **true** state, every step:
 
 ```
-    Δĉ_AR(t) = f_θ( ĉ_AR(t), u(t) )          ĉ_AR(t+1) = ĉ_AR(t) + Δĉ_AR(t)
+    DNN     ĉ_TF(t+1) = c(t) + f_θ( c(t), u(t) )          c(t) is ground truth
+    NODE    ĉ_TF(t+1) = odeint( f_θ, c(t), [t, t+1] )     c(t) is ground truth
 ```
 
-Only the isotope columns are fed back; power, temperatures and boron keep their
-true values throughout, because those are prescribed inputs, not predictions.
+Both copy `ĉ_TF(0) = c(0)`, which has no predecessor.
+(`evaluation.teacher_forced_from_deltas`, `analysis.rollout.teacher_forced_predictions`.)
 
-**The step that decides everything.** To compare against measured
-*concentrations*, both prediction streams are converted from deltas to absolute
-values by cumulative summation from the same true initial concentration
-(`evaluation.deltas_to_absolute`, applied in `dnn_model._build_trajectories`):
+**Autoregressive (AR).** Free-running from the initial condition; the model is
+given **its own** evolving state:
 
 ```
-    c_TF(t) = c(0) + Σ_{s<t} Δĉ_TF(s)
-    c_AR(t) = c(0) + Σ_{s<t} Δĉ_AR(s)
+    DNN     ĉ_AR(t+1) = ĉ_AR(t) + f_θ( ĉ_AR(t), u(t) )    (metrics.model_autoregress)
+    NODE    ĉ_AR(·)   = odeint( f_θ, c(0), t_span )       one solve, whole trajectory
 ```
 
-So the "teacher-forced" curve is **not** a one-step quantity. It is an
-accumulation of 100 separately-predicted deltas. That is the crux of §6.
+For the DNN, only the isotope columns are fed back; power, temperatures and
+boron keep their true values, because those are prescribed inputs, not
+predictions.
+
+**Both models are reported on the same 100 points.** The DNN's targets are one
+step ahead of its inputs, so every series it produces naturally runs from c(1)
+to c(N) — a window shifted one 10-day step later than the NODE's, at both ends.
+`evaluation.align_to_initial` prepends the true c(0) and drops that last step,
+which puts both models on c(0) … c(N-1), days 0–990. Without it their MARE
+denominators are drawn from different windows and their error-growth curves are
+indexed off by one step.
 
 ### Which metric is computed on what
 
-A frequent source of confusion, worth stating plainly:
+The same table now applies to **both** models:
 
 | metric | computed on | meaning |
 |---|---|---|
-| R², MAE, RMSE | Δc, teacher-forced | one-step accuracy — what the loss optimised |
-| MARE (TF and AR) | absolute c, after cumsum | trajectory accuracy over 990 days |
-| MALE growth curves | absolute c, after cumsum | how error evolves along a run |
+| R², MAE, RMSE | absolute c, autoregressive | 990-day forecast accuracy |
+| MARE (TF) | absolute c, one step from truth | one-step accuracy |
+| MARE (AR) | absolute c, autoregressive | 990-day forecast accuracy |
+| MALE growth curves | absolute c, both rollouts | how error evolves along a run |
+
+Everything is in physical units (atom/b-cm), flattened over runs × steps, and
+averaged unweighted across the seven nuclides.
 
 `metrics.mare` is `mean|error| / max|truth|` — normalised by a single global
 maximum, not per sample. Despite the name it is not mean absolute *relative*
-error (see §8).
+error (see §8). Because its denominator comes from the truths in the test
+window, it is only comparable between models that share a test set — which,
+under `random_by_run`, they do.
+
+**A caveat on R², with the floor measured.** Every run in the CASL set starts
+from the *same* fresh-fuel composition, so the variance R² normalises by —
+pooled over runs × steps — is dominated by the depletion curve all 3305 runs
+share, not by their differing response to the power history. Which is the part a
+surrogate exists to predict.
+
+Quantify it with a no-model baseline: emit one ensemble-mean trajectory for
+every run, ignoring the power history entirely.
+
+| baseline | U238 | U239 | Np239 | Pu239 | Pu240 | Pu241 | Pu242 |
+|---|---|---|---|---|---|---|---|
+| R² | 0.977 | 0.048 | 0.053 | 0.987 | 0.979 | 0.974 | 0.947 |
+| MARE | 5.5e-4 | 1.9e-1 | 1.8e-1 | 2.4e-2 | 2.9e-2 | 3.1e-2 | 2.7e-2 |
+
+So R² = 0.99 on the actinide chain sits just above a floor of 0.95–0.99, while
+R² = 0.99 on U239 or Np239 is a long way above 0.05. The two do not mean the
+same thing. Quote the chain nuclides against that floor rather than against
+zero; U239 and Np239 are where the models demonstrably track the forcing, and
+they are also the two the fast-decay caveat in §8 applies to.
+
+The familiar "R² ≈ 1 by copying the input" worry is a *one-step* problem, and is
+what `target_delta_conc` exists to avoid (§3). It does not bite here: the AR
+rollout is never handed c(t), and freezing each run at its true c(0) scores
+between −0.8 and −5.8.
 
 ---
 
-## 6. Why autoregressive beats teacher forcing here
+## 6. Why the teacher-forced curve is built from the true state
 
-### The observation
+This is a methodological note, not a result. It records a construction that was
+tried, produced a striking-looking finding, and was rejected — because the
+finding was an artefact of the construction.
 
-From the `BEST_7_Isotope_DNN` run (331 test runs, R²_avg = 0.9883):
+### The rejected version
 
-| isotope | R² (one-step Δc) | MARE TF | MARE AR | TF / AR |
-|---|---|---|---|---|
-| U238 | 0.9888 | 0.000050 | 0.000049 | 1.02 |
-| **U239** | 0.9944 | 0.118618 | **0.017700** | **6.70** |
-| **Np239** | 0.9942 | 0.109115 | **0.017132** | **6.37** |
-| Pu239 | 0.9835 | 0.006296 | 0.005498 | 1.15 |
-| Pu240 | 0.9892 | 0.004759 | 0.003038 | 1.57 |
-| Pu241 | 0.9682 | 0.004126 | 0.003460 | 1.19 |
-| Pu242 | 0.9994 | 0.002418 | **0.002496** | **0.97** |
+The DNN predicts Δc, so an absolute-concentration curve has to be reconstructed
+somehow. The obvious route is to integrate:
 
-AR wins on six of seven, dramatically on the two fast isotopes — and *loses*,
-narrowly, on Pu242. That pattern is not noise; it is the mechanism.
+```
+    c_TF(t) = c(0) + Σ_{s<t} Δ̂( c(s), u(s) )        ← rejected
+```
 
-### The two error recursions
+Each Δ̂ is teacher-forced, but the *curve* is not: it is an accumulation of 100
+separately-predicted deltas. Under that definition, MARE(AR) beat MARE(TF) on
+six of seven nuclides, by 6.7× on U239 and 6.4× on Np239 — an eye-catching
+result, with a clean mechanism behind it.
+
+### The mechanism, which is real
 
 Write the true one-step map as `c(t+1) = F(c(t), u(t))` and the model as
-`F̂ = F + ε`, where `ε` is the model's one-step error. Define the trajectory
-error `e(t) = ĉ(t) − c(t)`.
-
-**Autoregressive.** The model is evaluated at its own state, so the true map's
-sensitivity enters:
+`F̂ = F + ε`. For the trajectory error `e(t) = ĉ(t) − c(t)`:
 
 ```
-    e(t+1) = F̂(ĉ(t)) − F(c(t))
-           = [F(ĉ(t)) − F(c(t))] + ε(ĉ(t))
-           ≈ J · e(t) + ε              where J = ∂F/∂c
+    AR        :  e(t+1) = J·e(t) + ε      →  ‖e‖ ≤ ‖ε‖ / (1 − ρ)   if ρ = ‖J‖ < 1
+    TF-cumsum :  e(t+1) =   e(t) + ε      →  e(T) = Σ ε(t)          unbounded
 ```
 
-**Teacher-forced, then accumulated.** The model is evaluated at the *true* state,
-so its output does not depend on the accumulated error at all:
+TF-cumsum is an open-loop integrator: its effective Jacobian is the identity, so
+every one-step error is banked permanently and nothing in the loop can notice
+the drift, because the model is always handed the true state. AR is a closed
+loop — if the rolled-out concentration drifts above truth the model sees an
+above-equilibrium state and predicts a more negative Δ — so its error reaches a
+bounded fixed point. Depletion is dissipative and its fast modes are strongly
+attracting, so here the feedback is *negative* feedback and it stabilises. The
+isotope ordering matched: U239 and Np239 relax to secular equilibrium almost
+instantly (`ρ ≈ 0`, the largest gap); Pu242 is terminal, essentially a pure
+integrator with `J ≈ I`, and was the one nuclide where AR stopped helping.
 
-```
-    ĉ_TF(t+1) = ĉ_TF(t) + Δ̂(c(t))
-    e(t+1)    = e(t) + ε(t)            — i.e. J is replaced by the identity
-```
+### Why it was rejected anyway
 
-### What that implies
+The comparison was between two different things. The NODE's teacher-forced
+number is a genuine one-step quantity — each point is a fresh solve seeded from
+truth (`rollout.py`) — so putting it next to a DNN number that accumulated 100
+deltas compared one-step accuracy against 990-day drift and called the
+difference an architecture difference.
 
-These are the same recursion with different Jacobians, and the difference is
-decisive:
+`evaluation.teacher_forced_from_deltas` now adds each predicted delta to the
+**true** concentration, matching the NODE step for step. Under that definition
+neither metric is measuring the other's horizon, and the pair answers the two
+questions it was meant to:
 
-```
-    AR :  e(t+1) = J·e(t) + ε     →   ‖e‖ ≤ ‖ε‖ / (1 − ρ)     if ρ = ‖J‖ < 1
-    TF :  e(t+1) =   e(t) + ε     →   e(T) = Σ ε(t)            unbounded
-```
+- MARE(TF): *how good is one step?*
+- MARE(AR): *how good is a 990-day forecast?*
 
-- **TF-cumsum is an open-loop integrator.** Its effective Jacobian is the
-  identity — marginally unstable. Every one-step error is banked permanently.
-  Zero-mean errors accumulate as a random walk (`~σ√T`); any systematic bias
-  accumulates linearly (`~bT`). Nothing in the loop can ever notice, let alone
-  correct, the drift, because the model is always handed the true state.
-- **AR is a closed loop.** If the rolled-out concentration drifts above truth,
-  the model — which has learned the real physics — sees an above-equilibrium
-  state and predicts a more negative Δ, pulling it back. The error reaches a
-  **bounded fixed point** set by the one-step error and the contraction rate.
-
-So AR wins **exactly when the underlying physics is contracting** (`ρ < 1`) and
-the model is accurate enough to inherit that contraction. Feeding a model its own
-output is usually described as a liability — error compounding — and it is, for
-chaotic or neutrally-stable systems. Depletion is neither: it is a dissipative
-system whose fast modes are strongly attracting. Here the feedback is *negative*
-feedback, and it stabilises.
-
-### The evidence matches, isotope by isotope
-
-The predicted ordering is that the AR advantage should track how strongly each
-isotope is attracted back to its own equilibrium:
-
-- **U239 and Np239 (6.7× and 6.4×).** Turning over 614 and 4.2 half-lives per
-  step, these relax to secular equilibrium almost instantly — `ρ ≈ 0`, the
-  strongest possible contraction. `U239_MAE_growth_linear.png` shows it exactly:
-  the TF curve climbs without bound to ~3.6e-9 while **the AR curve rises once
-  and then runs flat for all 100 steps**. That plateau is `‖ε‖/(1−ρ)`.
-- **Pu239, Pu240, Pu241 (1.2–1.6×).** Intermediate — governed by a balance of
-  capture and decay, so partially self-correcting.
-- **U238 (1.02×).** Depletes only a few percent; both methods are accurate to
-  5e-5 and there is nothing to separate them.
-- **Pu242 (0.97× — AR slightly worse).** The decisive counter-example. Pu242 is
-  the **terminal** nuclide: it is produced by Pu241 capture and has essentially
-  no loss channel, so it only ever accumulates. Its dynamics *are* a pure
-  integrator, `J ≈ I`. The theory therefore predicts AR should have no restoring
-  force and should degenerate to TF's behaviour — and
-  `Pu242_MAE_growth_linear.png` shows precisely that: the two curves lie on top
-  of one another, both growing without bound, neither saturating.
-
-One isotope where the physics offers no contraction is the one isotope where
-autoregressive rollout stops helping. That is a strong confirmation.
-
-### What this does and does not say about training
-
-A precise correction, because it matters for how the result is written up:
-
-- **AR and TF are not two training methods here.** Both columns come from *one*
-  model, trained *one* way — the DNN's one-step supervised objective. They differ
-  only in how that fixed model is rolled out at test time.
-- **The right conclusion** is about deployment and about metrics: for this
-  system, autoregressive rollout is the better way to *use* the model, and the
-  TF-cumsum curve is a poor proxy for trajectory accuracy. Reporting only the
-  teacher-forced number would understate the surrogate — the opposite of the
-  usual worry.
-- **The underlying intuition is still sound**, and the repository already acts on
-  it: the NODE *is* trained on its own rollout (§4), which is why its loss is
-  computed over whole trajectories. If you want a genuine training-method
-  comparison, that is the axis — one-step objective (DNN) versus multi-step
-  objective (NODE) — not the AR/TF columns of a single model.
-- **Do not generalise the sign of the effect.** AR beats TF-cumsum here because
-  depletion is contracting. On a system with `ρ > 1`, the same algebra predicts
-  the familiar compounding blow-up.
-
-### A caveat on the comparison itself
-
-TF and AR are compared on absolute concentration, which both reach by
-accumulation. If instead you compare them on the quantity the model actually
-predicts — Δc — teacher forcing wins trivially, since it is handed the true
-inputs. That comparison is the reported R² (0.9883). The two numbers answer
-different questions, and both belong in a write-up:
-
-- R² on Δc: *how good is one step?*
-- MARE on AR trajectories: *how good is a 990-day forecast?*
+The contraction argument above still holds and is still the reason AR does not
+blow up on this system — that is a genuine property of depletion, and worth
+stating. What it is not is evidence that AR beats teacher forcing. Do not
+generalise the sign either way: on a system with `ρ > 1` the same algebra gives
+the familiar compounding blow-up.
 
 ---
 
@@ -372,7 +356,7 @@ test_metrics.json                per-isotope MAE / RMSE / R² / MARE, averaged t
   predictions_vs_actual.png      scatter against truth
   residuals_combined*.png        residual structure, linear and log-log
   <t>_prediction_comparison.png  truth vs TF vs AR for one run
-  <t>_{MAE,MALE}_growth_linear.png  error against timestep — the §6 evidence
+  <t>_{MAE,MALE}_growth_linear.png  error against timestep, TF and AR
   test_traj_N.png                a couple of individual test runs
   test_all_trajectories.png      every test run overlaid, with mean |residual|
   {r2,mse}_score_importance.png  permutation importance (DNN)
@@ -387,8 +371,8 @@ Both models emit the same figures except where the physics differs: permutation
 feature importance is a DNN output, and the Jacobian sweep, the depletion matrix
 and the per-step importance need the ODE's right-hand side so they exist only for
 the NODE. Everything else — the scatter, the residuals, the growth curves, the
-trajectories — is drawn by the same code for both, so the head-to-head comparison
-in §6 is like-for-like.
+trajectories — is drawn by the same code, fed the same quantities on the same
+100-point window, so the head-to-head comparison of §5 is like-for-like.
 
 `--no-analyses` skips all of it, figures and analyses alike, while still writing
 `test_metrics.json` and the bundle. That is the flag for a hyperparameter sweep,
@@ -445,17 +429,49 @@ is why `config.resolved.yaml` is in the bundle rather than assumed.
 
 ## 8. Known caveats
 
-These bear directly on how the results above should be read. None is fixed,
-because fixing any of them moves a published number.
+These bear directly on how the results above should be read.
 
-- **The DNN/NODE comparison is not level.** They use different split protocols
-  (sequential in time vs a seeded permutation of whole runs) and different
-  amounts of data, so their headline numbers are not like-for-like.
+The four that made the DNN/NODE numbers incomparable are now fixed, and the fix
+moved every published DNN number — the results predating it cannot be mixed with
+the results after it. For the record, they were: the two models split
+differently (§2); the DNN's R²/MAE/RMSE were on one-step Δc while the NODE's
+were on absolute concentration from the full rollout, which are different
+quantities in different units (§5); the DNN's MARE(TF) accumulated 100 deltas
+while the NODE's was a genuine one step (§6); and the two were reported on
+100-point windows offset from each other by one 10-day step (§5).
+
+What remains:
+
+- **The comparison is level on data and metrics, not on everything.** The two
+  models still differ by design in ways worth stating rather than removing: the
+  objectives (Huber on scaled Δc vs MSE over whole scaled trajectories), the
+  target scalers, and the epoch budgets (500 / patience 20 vs 5000 / patience
+  75). Both select on `val_loss`, but those are different losses, so checkpoint
+  selection is not on a common criterion. The NODE logs no `val_r2`/`val_mae` at
+  all, which is why its `metadata.json` records infinities — they are absent
+  values, not results.
+- **`configs/dnn.yaml` sees five inputs the NODE does not** — fuel, moderator
+  and clad temperature, moderator density, boron. `configs/dnn_no_state.yaml` is
+  the matched-input variant, and the one to compare against the NODE; the other
+  is the ablation. BEAVRS has none of those five columns, so only the matched
+  variant can be evaluated there at all.
 - **No spread on any number.** Every result is a single training run on a single
   split. There are no repeats and no error bars on the model comparison.
 - **`mare` is misnamed.** It is `mean|error| / max|truth|` — normalised by one
   global maximum, not per sample — so it is not mean absolute *relative* error.
-  Published numbers depend on the current definition, so it must not drift.
+  Published numbers depend on the current definition, so it must not drift. Its
+  denominator is drawn from the truths in the test window, so it is only
+  comparable across models that share a test set.
+- **R² on absolute concentration has a high floor.** All runs share one initial
+  composition, so most of the pooled variance is the depletion curve they have
+  in common. A no-model baseline already reaches 0.95–0.99 on the actinide chain
+  (§5 tabulates it). R² is the right quantity for *comparing* the two models,
+  since it is now the same quantity for both, but on its own it overstates how
+  much either has learned about the power history.
+- **A run's numbers depend on the machine it was produced on.** `evaluation.py`
+  notes that Windows and Linux `log10` disagree by 1–3 ULPs, which is
+  percent-level on MALE. Both models should be regenerated on one machine at one
+  commit before their numbers are tabulated together.
 - **The depletion-matrix figure's unit conversion is approximate.** It hardcodes
   a 1000-day span against 990 days of data (a 1% bias) and drops the MinMax
   offset, which leaves the U238 column uninterpretable as a rate. The matrix the
