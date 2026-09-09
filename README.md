@@ -328,11 +328,37 @@ train:
 
 - **Training datasets** (`datasets/*.h5`) — the output of the OpenMC pipeline,
   produced by `data_generation/` and combined with
-  `data_generation/merge_runs.py`. Not redistributed with the repo.
+  `data_generation/merge_runs.py`. Too large to track in git, so they are
+  published as their own Zenodo record instead — see below.
 - **Nuclear data** (`data/`) — cross sections (7 GB) and depletion chains (30 MB)
   from <https://openmc.org/official-data-libraries/>, needed only for data
   generation. The cross-section download is an `.xml` file plus three folders
   (`neutron/`, `photon/`, `wmp/`); each depletion chain is a single `.xml`.
+
+### Data availability
+
+The two datasets both published models are trained and evaluated on are archived
+at **[10.5281/zenodo.22674764](https://doi.org/10.5281/zenodo.22674764)**
+(CC-BY-4.0):
+
+| File | What it is |
+|---|---|
+| `casl_3305_runs_inter.h5` | 3 305 randomised-history pin-cell depletions — the training set |
+| `beavrs_cycle1_daily.h5` | one BEAVRS Cycle 1 depletion on the measured power history |
+| `generation_inputs.zip` | the configs, depletion chains and power history that define both |
+
+That DOI pins the exact version; [10.5281/zenodo.22674763](https://doi.org/10.5281/zenodo.22674763)
+is the concept DOI and always resolves to the newest one. The record's `README.md`
+carries the column reference and the known limitations — read it before using the
+data.
+
+The BEAVRS evaluations run on a 10-day grid, which is not shipped because it is
+one command away from what is:
+
+```bash
+uv run --extra ml python util/resample_dataset.py \
+    datasets/beavrs_cycle1_daily.h5 datasets/beavrs_cycle1_10day.h5 --factor 10
+```
 
 ## Everyday commands
 

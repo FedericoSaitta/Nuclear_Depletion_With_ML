@@ -37,3 +37,24 @@ keywords:
 abstract: >
   Machine-learning methods for nuclear depletion calculations,
   including model training, evaluation, and OpenMC-based data generation.
+
+# The datasets both published models are trained and evaluated on. This is the
+# version DOI, which pins the exact files; 10.5281/zenodo.22674763 is the
+# concept DOI and follows future versions.
+references:
+  - type: data
+    title: "OpenMC PWR pin-cell depletion datasets for machine-learning surrogates"
+    authors:
+      - family-names: "Castañeda Rodriguez"
+        given-names: "Abel"
+        affiliation: "The University of Manchester"
+        orcid: "https://orcid.org/0009-0001-6035-7525"
+      - family-names: "Saitta"
+        given-names: "Federico"
+        affiliation: "The University of Manchester"
+        orcid: "https://orcid.org/0009-0001-6063-1184"
+    doi: "10.5281/zenodo.22674764"
+    year: 2026
+    publisher:
+      name: "Zenodo"
+    license: CC-BY-4.0
