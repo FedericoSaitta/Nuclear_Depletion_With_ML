@@ -18,6 +18,7 @@ an expensive `trainer.test` (Jacobians, permutation importance, dozens of
 figures) that these tests do not need.
 """
 
+import csv
 import json
 import os
 
@@ -613,6 +614,31 @@ def test_dnn_test_epoch_reports_and_plots_every_target(tmp_path):
                 os.path.join(target_dir, gone)
             ), f"{target}: {gone} should no longer be written"
 
+        # The numbers behind the importance bar charts, not just the picture.
+        # The NODE has always written its per-step sweep out as a CSV; the DNN's
+        # permutation sweep used to reach a PNG and nowhere else.
+        csv_path = os.path.join(target_dir, "permutation_importance.csv")
+        assert os.path.exists(csv_path), f"{target}: importance CSV was not written"
+        with open(csv_path, newline="") as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) == len(cfg.dataset.inputs), (
+            f"{target}: expected one importance row per input feature, got "
+            f"{len(rows)}"
+        )
+        assert {row["Feature"] for row in rows} == set(cfg.dataset.inputs)
+        for row in rows:
+            assert row["Type"] in ("Forcing", "State")
+            for metric in ("r2", "mse"):
+                assert np.isfinite(float(row[f"{metric}_importance_mean"]))
+                assert np.isfinite(float(row[f"{metric}_importance_pct"]))
+
+    table = os.path.join(result_dir, "permutation_importance.md")
+    assert os.path.exists(table), "the importance markdown table was not written"
+    with open(table, encoding="utf-8") as f:
+        written = f.read()
+    for target in cfg.dataset.targets:
+        assert f"`{target}`" in written, f"{target} is missing from {table}"
+
 
 @pytest.mark.parametrize("kind", ["DNN", "NODE"])
 def test_no_analyses_writes_metrics_but_no_figures(kind, tmp_path):
@@ -643,9 +669,10 @@ def test_no_analyses_writes_metrics_but_no_figures(kind, tmp_path):
     assert written == [
         "training_loss_log.png"
     ], f"{kind}: --no-analyses should leave only the loss curve, got {written[:6]}"
-    assert not list(
-        results.rglob("stepwise_importance.*")
-    ), f"{kind}: the importance tables are analysis output and must be skipped too"
+    for pattern in ("stepwise_importance.*", "permutation_importance.*"):
+        assert not list(
+            results.rglob(pattern)
+        ), f"{kind}: {pattern} is analysis output and must be skipped too"
 
     metrics_file = results / cfg.model.name / "test_metrics.json"
     payload = json.loads(metrics_file.read_text())

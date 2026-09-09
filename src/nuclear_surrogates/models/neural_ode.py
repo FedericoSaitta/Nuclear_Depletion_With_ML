@@ -317,7 +317,11 @@ class NODE_Model(L.LightningModule):
                 inputs_unscaled[:, :, 0],  # power, the first forcing input
                 target_names,
                 self.result_dir,
-                xlabel="Time",
+                # `t_span` is normalised by the *training* span, so it runs 0→1
+                # on the training set and past or short of 1 on anything else.
+                # The axis is a fraction of that span, not days.
+                xlabel="Time (Scaled)",
+                forcing_name=forcing_names[0],
             )
 
         self._write_test_metrics(per_target_metrics)

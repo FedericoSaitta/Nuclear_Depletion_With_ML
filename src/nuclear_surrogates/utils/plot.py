@@ -10,6 +10,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 from loguru import logger
+from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
 from nuclear_surrogates.utils import metrics
@@ -26,13 +27,70 @@ if not os.environ.get("MPLBACKEND"):
 # Figure resolution. Writing a PNG costs roughly linearly in dpi — measured at
 # ~380 ms per figure at 300 and ~175 ms at 150 — and a NODE test epoch writes
 # over a hundred of them, so this is the knob to turn if evaluation feels slow.
-FIGURE_DPI = 300  # per-target results that may end up in the write-up
-DIAGNOSTIC_DPI = 150  # sensitivity and importance grids, read on screen
+FIGURE_DPI = 400  # per-target results that may end up in the write-up
+DIAGNOSTIC_DPI = 200  # sensitivity and importance grids, read on screen
+
+# Typography, set once as rcParams rather than as a `fontsize=` on every call.
+# The figures below are drawn at 10-16 inches wide and then dropped into a
+# journal column a third that size, so matplotlib's 10 pt default lands at
+# around 3 pt on the page. Everything here is a *default*: the dense diagnostic
+# grids (Jacobian heatmaps, the depletion matrix) still pass explicit smaller
+# sizes for their in-cell annotations, because those have to fit a cell rather
+# than be read from across a room.
+PAPER_RC = {
+    "font.size": 16,
+    "axes.titlesize": 20,
+    "axes.labelsize": 19,
+    "xtick.labelsize": 17,
+    "ytick.labelsize": 17,
+    "legend.fontsize": 17,
+    "figure.titlesize": 21,
+    "axes.linewidth": 1.2,
+    "xtick.major.width": 1.2,
+    "ytick.major.width": 1.2,
+    "xtick.major.size": 6,
+    "ytick.major.size": 6,
+    "legend.framealpha": 0.9,
+    "legend.edgecolor": "0.6",
+}
+plt.rcParams.update(PAPER_RC)
 
 STATE_COLOR = "#2196F3"
 FORCING_COLOR = "#FF9800"
 TF_COLOR = "#2E86AB"
 AR_COLOR = "#A23B72"
+
+TRUTH_COLOR = "tab:blue"
+PREDICTION_COLOR = "tab:orange"
+
+# Concentrations are reported in atom/barn-cm everywhere a figure shows them,
+# because that is the unit the datasets carry and the unit the scalers invert
+# back to. Named once so a label cannot drift from the data.
+CONCENTRATION_UNIT = "atom / barn cm"
+
+# Forcing columns carry their unit in the column name (`power_W_g`,
+# `mod_temp_K`); this turns that into something readable on an axis. A name that
+# is not listed falls through unchanged rather than being guessed at.
+FORCING_LABELS = {
+    "power_W_g": "Power [W/g]",
+    "fuel_temp_K": "Fuel Temperature [K]",
+    "mod_temp_K": "Moderator Temperature [K]",
+    "clad_temp_K": "Clad Temperature [K]",
+    "mod_density_g_cm3": "Moderator Density [g/cm³]",
+    "boron_ppm": "Boron [ppm]",
+}
+
+
+def forcing_label(name):
+    """Axis label for a forcing column, falling back to the column name."""
+    if not name:
+        return "Forcing"
+    return FORCING_LABELS.get(name, name)
+
+
+def concentration_label(target_name):
+    """Axis label for an isotope concentration, e.g. ``Np239 [atom / barn cm]``."""
+    return f"{target_name} [{CONCENTRATION_UNIT}]"
 
 
 def _save(fig, path, message, dpi=FIGURE_DPI):
@@ -115,9 +173,9 @@ def plot_losses(train_losses, val_losses, save_dir, nfes=None):
         linewidth=2,
         color=AR_COLOR,
     )
-    ax_loss.set_xlabel("Epoch", fontsize=12)
-    ax_loss.set_ylabel("Log10(Loss)", fontsize=12)
-    ax_loss.set_title("Training and Validation Loss Over Time", fontsize=14)
+    ax_loss.set_xlabel("Epoch")
+    ax_loss.set_ylabel("Log10(Loss)")
+    ax_loss.set_title("Training and Validation Loss Over Time")
     ax_loss.grid(True, alpha=0.3)
 
     if nfes and len(nfes) == len(train_losses):
@@ -130,18 +188,14 @@ def plot_losses(train_losses, val_losses, save_dir, nfes=None):
             linestyle="--",
             alpha=0.8,
         )
-        ax_nfe.set_ylabel(
-            "Function Evaluations (NFE)", fontsize=12, color=FORCING_COLOR
-        )
+        ax_nfe.set_ylabel("Function Evaluations (NFE)", color=FORCING_COLOR)
         ax_nfe.tick_params(axis="y", labelcolor=FORCING_COLOR)
 
         lines, labels = ax_loss.get_legend_handles_labels()
         nfe_lines, nfe_labels = ax_nfe.get_legend_handles_labels()
-        ax_loss.legend(
-            lines + nfe_lines, labels + nfe_labels, fontsize=10, loc="upper right"
-        )
+        ax_loss.legend(lines + nfe_lines, labels + nfe_labels, loc="upper right")
     else:
-        ax_loss.legend(fontsize=10)
+        ax_loss.legend()
 
     fig.tight_layout()
     _save(
@@ -163,14 +217,13 @@ def plot_predictions_vs_actuals(actuals, predictions, mae, rmse, r2, plots_folde
     hi = max(actuals.max(), predictions.max())
     ax.plot([lo, hi], [lo, hi], "r--", linewidth=2, label="Perfect Prediction")
 
-    ax.set_xlabel("Actual Values", fontsize=12)
-    ax.set_ylabel("Predicted Values", fontsize=12)
+    ax.set_xlabel("Actual Values")
+    ax.set_ylabel("Predicted Values")
     ax.set_title(
         f"Predictions vs Actual Values\n"
         f"R² = {r2:.4f} | RMSE = {rmse:.4f} | MAE = {mae:.4f}",
-        fontsize=14,
     )
-    ax.legend(fontsize=10)
+    ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     _save(
@@ -197,18 +250,17 @@ def _plot_residuals_linear(delta_predictions, residuals, plots_folder):
         delta_predictions, residuals, alpha=0.5, s=20, edgecolors="k", linewidth=0.5
     )
     axes[0].axhline(y=0, color="r", linestyle="--", linewidth=2)
-    axes[0].set_xlabel("Predicted Δc", fontsize=12)
-    axes[0].set_ylabel("Residuals (Actual Δc - Predicted Δc)", fontsize=12)
-    axes[0].set_title("Concentration Change Residuals", fontsize=14)
+    axes[0].set_xlabel("Predicted Δc")
+    axes[0].set_ylabel("Residuals (Actual Δc - Predicted Δc)")
+    axes[0].set_title("Concentration Change Residuals")
     axes[0].grid(True, alpha=0.3)
 
     axes[1].hist(residuals, bins=50, edgecolor="black", alpha=0.7, color="steelblue")
     axes[1].axvline(x=0, color="r", linestyle="--", linewidth=2)
-    axes[1].set_xlabel("Residuals (Δc)", fontsize=12)
+    axes[1].set_xlabel("Residuals (Δc)")
     axes[1].set_title(
         f"Δc Residual Distribution\n"
         f"Mean: {residuals.mean():.4e}, Std: {residuals.std():.4e}",
-        fontsize=14,
     )
     axes[1].grid(True, alpha=0.3)
 
@@ -263,10 +315,10 @@ def _plot_residuals_loglog(delta_predictions, residuals, plots_folder):
 
         axes[0].set_xscale("log")
         axes[0].set_yscale("log")
-        axes[0].set_xlabel("|Predicted Δc| (log scale)", fontsize=12)
-        axes[0].set_ylabel("|Residuals| (log scale)", fontsize=12)
-        axes[0].set_title("Δc Residuals (Log-Log Scale)", fontsize=14)
-        axes[0].legend(fontsize=10)
+        axes[0].set_xlabel("|Predicted Δc| (log scale)")
+        axes[0].set_ylabel("|Residuals| (log scale)")
+        axes[0].set_title("Δc Residuals (Log-Log Scale)")
+        axes[0].legend()
         axes[0].grid(True, which="both", alpha=0.3)
 
         valid = abs_residuals[nonzero_residual]
@@ -279,12 +331,11 @@ def _plot_residuals_loglog(delta_predictions, residuals, plots_folder):
         )
         axes[1].set_xscale("log")
         axes[1].set_yscale("log")
-        axes[1].set_xlabel("|Δc Residuals| (log scale)", fontsize=12)
-        axes[1].set_ylabel("Frequency (log scale)", fontsize=12)
+        axes[1].set_xlabel("|Δc Residuals| (log scale)")
+        axes[1].set_ylabel("Frequency (log scale)")
         axes[1].set_title(
             f"|Δc Residual| Distribution (Log Scale)\n"
             f"Median: {np.median(valid):.4e}, Mean: {np.mean(valid):.4e}",
-            fontsize=14,
         )
         axes[1].grid(True, which="both", alpha=0.3)
 
@@ -357,13 +408,11 @@ def plot_prediction_comparison(
             zorder=3,
         )
 
-    ax1.set_ylabel(f"{target_name}", fontsize=14, fontweight="bold")
-    ax1.set_title(
-        f"{target_name} - Prediction Comparison", fontsize=16, fontweight="bold", pad=15
-    )
-    ax1.legend(loc="best", fontsize=12, framealpha=0.95, edgecolor="black")
+    ax1.set_ylabel(concentration_label(target_name), fontweight="bold")
+    ax1.set_title(f"{target_name} — Prediction Comparison", fontweight="bold", pad=15)
+    ax1.legend(loc="best")
     ax1.grid(True, alpha=0.4, linestyle="--", linewidth=0.8)
-    ax1.tick_params(labelbottom=False, labelsize=11)
+    ax1.tick_params(labelbottom=False)
 
     ax2 = fig.add_subplot(gs[1], sharex=ax1)
     for preds, color, marker, label in (
@@ -386,11 +435,10 @@ def plot_prediction_comparison(
         )
 
     ax2.axhline(y=0, color="k", linestyle="--", linewidth=1.5, alpha=0.6, zorder=1)
-    ax2.set_ylabel("Residuals", fontsize=12, fontweight="bold")
-    ax2.set_xlabel("Time Steps", fontsize=14, fontweight="bold")
+    ax2.set_ylabel("Residuals", fontweight="bold")
+    ax2.set_xlabel("Time Steps", fontweight="bold")
     ax2.grid(True, alpha=0.4, linestyle="--", linewidth=0.8)
-    ax2.legend(loc="best", fontsize=10, framealpha=0.95, edgecolor="black")
-    ax2.tick_params(labelsize=11)
+    ax2.legend(loc="best")
 
     _save(
         fig,
@@ -460,17 +508,16 @@ def plot_error_growth_metric(
             label=f"{tag} ±1σ",
         )
 
-    ax.set_xlabel("Time Step", fontsize=13, fontweight="bold")
-    ax.set_ylabel(ylabel, fontsize=13, fontweight="bold")
+    ax.set_xlabel("Time Step", fontweight="bold")
+    ax.set_ylabel(ylabel, fontweight="bold")
     ax.set_title(
         f"{metric_name} Growth Over Time: {target_name}\n"
         f"(Averaged over {num_runs} runs — final AR {metric_name}: "
         f"{float(avg_ar_error[-1]):.4f})",
-        fontsize=14,
         fontweight="bold",
         pad=15,
     )
-    ax.legend(fontsize=10, loc="best", framealpha=0.9)
+    ax.legend(loc="best")
     ax.grid(True, alpha=0.3, linestyle="--")
     fig.tight_layout()
 
@@ -512,20 +559,22 @@ def plot_feature_importance(
             position,
             f"{value:.4f}±{std:.4f}",
             va="center",
-            fontsize=11,
             fontweight="bold",
         )
 
-    # Room for the value labels.
-    ax.set_xlim(ax.get_xlim()[0], ax.get_xlim()[1] * 1.25)
+    # Room for the value labels, measured against the axis *span*. Scaling the
+    # upper bound instead adds almost nothing when that bound sits near zero —
+    # which it does whenever the top feature's importance is small or the axis
+    # runs negative — and the labels then run off the figure.
+    lo, hi = ax.get_xlim()
+    ax.set_xlim(lo, hi + 0.40 * (hi - lo))
     ax.set_yticks(range(n_top))
     ax.set_yticklabels([feature_names[i] for i in top_indices])
-    ax.set_xlabel(f"Permutation Importance {metric_name}", fontsize=12)
-    ax.set_ylabel("Features", fontsize=12)
+    ax.set_xlabel(f"Permutation Importance {metric_name}")
+    ax.set_ylabel("Features")
     ax.set_title(
         f"Top {n_top} Most Important Features\n"
         f"Baseline {metric_name} = {baseline:.4f}",
-        fontsize=14,
     )
     ax.invert_yaxis()
     ax.grid(True, alpha=0.3, axis="x")
@@ -540,57 +589,111 @@ def plot_feature_importance(
 # ── Trajectories ─────────────────────────────────────────────────────────────
 
 
-def plot_trajectory(t, pred, true, power, title, save_path, xlabel="Time"):
-    """Three-panel plot: power forcing, prediction vs truth, residual.
+def _r2_of(true, pred):
+    """Scalar R² for one trajectory, however `metrics.r2` shapes its answer."""
+    return float(np.atleast_1d(metrics.r2(np.asarray(true), np.asarray(pred)))[0])
+
+
+def plot_trajectory(
+    t,
+    pred,
+    true,
+    power,
+    title,
+    save_path,
+    xlabel="Time",
+    ylabel="Concentration",
+    power_label="Power",
+):
+    """Two panels: the forcing history above, prediction against truth below.
+
+    This is the manuscript's trajectory figure. There used to be a third panel
+    holding the residual, and it was dropped: on a well-fitted channel the
+    residual is a fraction of a line width, the panel it needed cost a third of
+    the figure's height, and error along the trajectory is reported properly by
+    the `*_growth_linear` figures. What replaced it is the R² of *this*
+    trajectory, carried in the legend, so a single figure says how good the fit
+    it shows actually is.
+
+    Both axes are in physical units — W/g and atom/barn-cm — because both models
+    hand this function unscaled arrays; *ylabel* and *power_label* name them.
 
     *xlabel* because the two models measure the axis differently — the NODE
-    integrates over a real time span, the DNN only counts steps.
+    integrates over a real (normalised) time span, the DNN only counts steps.
     """
-    fig, (ax1, ax2, ax3) = plt.subplots(
-        3,
+    fig, (ax_power, ax_conc) = plt.subplots(
+        2,
         1,
-        figsize=(10, 8),
-        height_ratios=[1, 2, 1],
+        figsize=(11, 8),
+        height_ratios=[1, 2],
         sharex=True,
-        gridspec_kw={"hspace": 0.1},
+        # Wide enough for the concentration axis's `1e-6` multiplier, which
+        # matplotlib draws above the axes and which the forcing panel's bottom
+        # spine otherwise strikes through.
+        gridspec_kw={"hspace": 0.16},
     )
 
-    ax1.plot(t, power, color="tab:orange", linewidth=1.0)
-    ax1.set_ylabel("Power (scaled)")
-    ax1.set_title(title, fontsize=14, fontweight="bold")
-    ax1.grid(True, alpha=0.3)
+    # Black, thin and unlabelled: the forcing is context for the panel below,
+    # not a third series competing with truth and prediction for attention.
+    ax_power.plot(t, power, color="black", linewidth=1.2)
+    ax_power.set_ylabel(power_label)
+    ax_power.set_title(title, fontweight="bold")
+    ax_power.grid(True, alpha=0.3)
 
-    ax2.plot(t, true, label="Truth", linewidth=1.5)
-    ax2.plot(t, pred, label="Prediction", linewidth=1.5, linestyle="--")
-    ax2.set_ylabel("Concentration (scaled)")
-    ax2.legend(fontsize=10)
-    ax2.grid(True, alpha=0.3)
+    ax_conc.plot(t, true, label="Truth", color=TRUTH_COLOR, linewidth=2.5)
+    ax_conc.plot(
+        t,
+        pred,
+        label="Prediction",
+        color=PREDICTION_COLOR,
+        linewidth=2.5,
+        linestyle="--",
+    )
+    ax_conc.set_ylabel(ylabel)
+    ax_conc.set_xlabel(xlabel)
+    ax_conc.grid(True, alpha=0.3)
 
-    ax3.plot(t, pred - true, color="tab:red", linewidth=0.8)
-    ax3.axhline(0, color="black", linewidth=0.5, linestyle="--")
-    ax3.set_ylabel("Residual")
-    ax3.set_xlabel(xlabel)
-    ax3.grid(True, alpha=0.3)
+    # An invisible handle, so the R² lines up with the two labels above it
+    # instead of sitting in a second legend or floating in an annotation box.
+    handles, labels = ax_conc.get_legend_handles_labels()
+    handles.append(Line2D([], [], linestyle="none"))
+    labels.append(f"$R^2 = {_r2_of(true, pred):.4f}$")
+    ax_conc.legend(handles, labels, loc="upper left")
 
     _save(fig, save_path, "Trajectory plot saved to")
 
 
-def plot_trajectory_summary(t, all_preds, all_trues, title, save_path, xlabel="Time"):
-    """Overlay every trajectory, with the mean absolute residual beneath."""
+def plot_trajectory_summary(
+    t,
+    all_preds,
+    all_trues,
+    title,
+    save_path,
+    xlabel="Time",
+    ylabel="Concentration",
+):
+    """Overlay every trajectory, with the mean absolute residual beneath.
+
+    The residual panel stays here, unlike on the single-trajectory figure: with
+    every run drawn at 0.3 alpha the overlay itself shows nothing about error,
+    and the mean |residual| across runs is the only thing that does.
+    """
     fig, (ax1, ax2) = plt.subplots(
         2,
         1,
-        figsize=(12, 7),
+        figsize=(12, 8),
         height_ratios=[3, 1],
         sharex=True,
-        gridspec_kw={"hspace": 0.05},
+        # Room for the residual axis's scientific-notation multiplier — see the
+        # same note on `plot_trajectory`.
+        gridspec_kw={"hspace": 0.12},
     )
 
     for i in range(len(all_preds)):
         ax1.plot(
             t,
             all_trues[i],
-            color="tab:blue",
+            color=TRUTH_COLOR,
             alpha=0.3,
             linewidth=0.5,
             label="Truth" if i == 0 else None,
@@ -598,22 +701,26 @@ def plot_trajectory_summary(t, all_preds, all_trues, title, save_path, xlabel="T
         ax1.plot(
             t,
             all_preds[i],
-            color="tab:red",
+            color=PREDICTION_COLOR,
             alpha=0.3,
             linewidth=0.5,
             label="Prediction" if i == 0 else None,
         )
 
-    ax1.set_ylabel("Concentration (scaled)", fontsize=12)
-    ax1.set_title(title, fontsize=14, fontweight="bold")
-    ax1.legend(fontsize=10)
+    ax1.set_ylabel(ylabel)
+    ax1.set_title(title, fontweight="bold")
+    # The overlaid lines are drawn at 0.3 alpha and half a point wide; the
+    # legend's keys inherit that and come out fainter than anything they name.
+    for handle in ax1.legend(loc="upper left").get_lines():
+        handle.set_alpha(1.0)
+        handle.set_linewidth(2.5)
     ax1.grid(True, alpha=0.3)
 
     mean_abs_res = np.mean(np.abs(np.array(all_preds) - np.array(all_trues)), axis=0)
-    ax2.plot(t, mean_abs_res, color="tab:red", linewidth=1.0)
-    ax2.axhline(0, color="black", linewidth=0.5, linestyle="--")
-    ax2.set_ylabel("Mean |Residual|", fontsize=12)
-    ax2.set_xlabel(xlabel, fontsize=12)
+    ax2.plot(t, mean_abs_res, color="tab:red", linewidth=1.5)
+    ax2.axhline(0, color="black", linewidth=0.8, linestyle="--")
+    ax2.set_ylabel("Mean |Residual|")
+    ax2.set_xlabel(xlabel)
     ax2.grid(True, alpha=0.3)
 
     _save(fig, save_path, "Trajectory summary saved to")

@@ -10,6 +10,7 @@ Array convention throughout: ``(runs, steps, targets)``, in physical units.
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 
@@ -23,6 +24,13 @@ from nuclear_surrogates.utils import metrics, plot
 MALE_EPSILON = 1e-20
 
 TEST_METRICS_NAME = "test_metrics.json"
+
+# The DNN's importance outputs, named to sit beside the NODE's
+# `stepwise_importance.{csv,md}` without colliding with them: the two measure
+# different things (a whole-test-set permutation against a per-step one) and a
+# results directory may hold either.
+IMPORTANCE_CSV_NAME = "permutation_importance.csv"
+IMPORTANCE_TABLE_NAME = "permutation_importance.md"
 
 
 def align_to_initial(series, initial):
@@ -257,6 +265,7 @@ def report_trajectories(
     target_names,
     result_dir,
     xlabel="Time",
+    forcing_name=None,
     num_examples=2,
 ):
     """A couple of individual test trajectories per target, plus an all-runs overlay.
@@ -266,12 +275,18 @@ def report_trajectories(
     one-step map with no notion of elapsed time and can only count steps. That
     distinction is worth showing on the axis rather than hiding behind a shared
     default.
+
+    *forcing_name* is the dataset column `forcing` was taken from, and is what
+    puts a unit on the forcing panel's axis. Both models pass their first input
+    column, which is `power_W_g` in every shipped config.
     """
     num_runs = trues.shape[0]
+    power_label = plot.forcing_label(forcing_name)
 
     for target_idx, target_name in enumerate(target_names):
         target_dir = os.path.join(result_dir, target_name)
         os.makedirs(target_dir, exist_ok=True)
+        ylabel = plot.concentration_label(target_name)
 
         for i in range(min(num_examples, num_runs)):
             plot.plot_trajectory(
@@ -282,6 +297,8 @@ def report_trajectories(
                 title=f"{target_name} — Test Trajectory {i + 1}",
                 save_path=os.path.join(target_dir, f"test_traj_{i + 1}.png"),
                 xlabel=xlabel,
+                ylabel=ylabel,
+                power_label=power_label,
             )
 
         plot.plot_trajectory_summary(
@@ -291,7 +308,209 @@ def report_trajectories(
             title=f"{target_name} — All Test Trajectories ({num_runs} runs)",
             save_path=os.path.join(target_dir, "test_all_trajectories.png"),
             xlabel=xlabel,
+            ylabel=ylabel,
         )
+
+
+def importance_percentages(means):
+    """Each feature's share of the total importance, as a percentage.
+
+    Negative importances are permutation noise — a shuffled column that happens
+    to score better than the original — so they are clipped away before
+    normalising rather than being allowed to inflate everything else's share.
+    The same convention `analysis.importance` uses, so the DNN's percentages and
+    the NODE's can be read in the same table.
+    """
+    clipped = np.clip(np.asarray(means, dtype=float), 0.0, None)
+    total = clipped.sum()
+    return 100.0 * clipped / total if total > 0 else np.zeros_like(clipped)
+
+
+def report_feature_importance(
+    importances, feature_names, feature_types, target_names, result_dir, log, n_repeats
+):
+    """Log, tabulate and plot the DNN's permutation importances.
+
+    The NODE's per-step sweep already writes a CSV per target, one markdown
+    table for the write-up, and a metric per feature through `self.log` — see
+    `analysis.importance.stepwise_importance`. The DNN's importances used to
+    reach a PNG and nothing else, so the numbers behind the published bar charts
+    could not be read back out of a results directory. This puts the two models'
+    importance output on the same footing.
+
+    *importances* is ``{target: {metric: (means, stds, baseline)}}``, keyed by
+    the metric names the plots are titled with, and every array is indexed by
+    *feature_names*.
+    """
+    _banner("FEATURE IMPORTANCE (permutation, whole test set)")
+
+    metric_names = list(next(iter(importances.values())))
+    lines = [
+        f"_Permutation feature importance — mean ± std over {n_repeats} shuffles "
+        f"of the whole test set. A feature's importance is how much the score "
+        f"worsens when its column is permuted, so larger is more important._",
+        "",
+    ]
+
+    for target_name in target_names:
+        per_metric = importances[target_name]
+        percentages = {
+            metric: importance_percentages(per_metric[metric][0])
+            for metric in metric_names
+        }
+        # One ordering for the table, the CSV and the log, taken from the first
+        # metric so a reader comparing them is not re-sorting in their head.
+        order = np.argsort(percentages[metric_names[0]])[::-1]
+
+        _log_importance_table(
+            target_name,
+            per_metric,
+            percentages,
+            feature_names,
+            feature_types,
+            metric_names,
+            order,
+            log,
+        )
+        lines += _importance_markdown(
+            target_name,
+            per_metric,
+            percentages,
+            feature_names,
+            feature_types,
+            metric_names,
+            order,
+        )
+        _write_importance_csv(
+            result_dir,
+            target_name,
+            per_metric,
+            percentages,
+            feature_names,
+            feature_types,
+            metric_names,
+            order,
+        )
+
+        for metric_name, (means, stds, baseline) in per_metric.items():
+            plot.plot_feature_importance(
+                means,
+                stds,
+                feature_names,
+                baseline,
+                os.path.join(result_dir, target_name),
+                f"{metric_name}_score",
+                n_top=20,
+            )
+
+    table_path = os.path.join(result_dir, IMPORTANCE_TABLE_NAME)
+    os.makedirs(result_dir, exist_ok=True)
+    with open(table_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    logger.info(f"  Permutation importance tables (markdown): {table_path}")
+
+
+def _log_importance_table(
+    target_name,
+    per_metric,
+    percentages,
+    feature_names,
+    feature_types,
+    metric_names,
+    order,
+    log,
+):
+    """Print the ranking, and send every number to the run's metric sink."""
+    header = "".join(f"{m + ' (mean±std)':>28} {m + ' [%]':>14}" for m in metric_names)
+    logger.info(f"\n  Permutation importance — target: {target_name}")
+    logger.info(f"    {'Feature':<24} {'Type':<10}{header}")
+    for j in order:
+        row = "".join(
+            f"{per_metric[m][0][j]:>14.4e} ± {per_metric[m][1][j]:<11.2e}"
+            f"{percentages[m][j]:>13.2f} "
+            for m in metric_names
+        )
+        logger.info(f"    {feature_names[j]:<24} {feature_types[j]:<10}{row}")
+
+    for metric_name, (means, _, baseline) in per_metric.items():
+        log(f"{target_name}/importance_{metric_name}_baseline", float(baseline))
+        for j, feature in enumerate(feature_names):
+            safe = feature.replace(" ", "_")
+            log(f"{target_name}/importance_{metric_name}/{safe}", float(means[j]))
+            log(
+                f"{target_name}/importance_{metric_name}_pct/{safe}",
+                float(percentages[metric_name][j]),
+            )
+
+
+def _importance_markdown(
+    target_name,
+    per_metric,
+    percentages,
+    feature_names,
+    feature_types,
+    metric_names,
+    order,
+):
+    baselines = ", ".join(f"{m} = {per_metric[m][2]:.4f}" for m in metric_names)
+    columns = "".join(f" Δ{m} | {m} Imp. [%] |" for m in metric_names)
+    lines = [
+        f"#### Target: `{target_name}`",
+        "",
+        f"Baseline {baselines}",
+        "",
+        f"| Feature | Type |{columns}",
+        "|---|---|" + "---|---|" * len(metric_names),
+    ]
+    for j in order:
+        cells = "".join(
+            f" {per_metric[m][0][j]:.4e} ± {per_metric[m][1][j]:.2e} | "
+            f"{percentages[m][j]:.2f} |"
+            for m in metric_names
+        )
+        lines.append(f"| {feature_names[j]} | {feature_types[j]} |{cells}")
+    lines.append("")
+    return lines
+
+
+def _write_importance_csv(
+    result_dir,
+    target_name,
+    per_metric,
+    percentages,
+    feature_names,
+    feature_types,
+    metric_names,
+    order,
+):
+    output_dir = os.path.join(result_dir, target_name)
+    os.makedirs(output_dir, exist_ok=True)
+    csv_path = os.path.join(output_dir, IMPORTANCE_CSV_NAME)
+
+    header = ["Feature", "Type"]
+    for metric_name in metric_names:
+        header += [
+            f"{metric_name}_importance_mean",
+            f"{metric_name}_importance_std",
+            f"{metric_name}_importance_pct",
+            f"{metric_name}_baseline",
+        ]
+
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        for j in order:
+            row = [feature_names[j], feature_types[j]]
+            for metric_name in metric_names:
+                means, stds, baseline = per_metric[metric_name]
+                row += [
+                    f"{means[j]:.6e}",
+                    f"{stds[j]:.6e}",
+                    f"{percentages[metric_name][j]:.4f}",
+                    f"{baseline:.6e}",
+                ]
+            writer.writerow(row)
+    logger.info(f"  Permutation importance CSV: {csv_path}")
 
 
 def write_test_metrics(result_dir, test_metrics):

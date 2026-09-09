@@ -357,12 +357,14 @@ test_metrics.json                per-isotope MAE / RMSE / R² / MARE, averaged t
   residuals_combined*.png        residual structure, linear and log-log
   <t>_prediction_comparison.png  truth vs TF vs AR for one run
   <t>_{MAE,MALE}_growth_linear.png  error against timestep, TF and AR
-  test_traj_N.png                a couple of individual test runs
+  test_traj_N.png                power history over truth vs prediction, with R²
   test_all_trajectories.png      every test run overlaid, with mean |residual|
   {r2,mse}_score_importance.png  permutation importance (DNN)
+  permutation_importance.csv     the numbers behind those two charts (DNN)
   jacobian_*                     sensitivity analysis (NODE)
   stepwise_importance*           per-step permutation importance (NODE)
 depletion_matrix_{mean,evolution}.png   the learned A, in physical units (NODE)
+permutation_importance.md        importance tables, ready to paste (DNN)
 stepwise_importance.md           importance tables, ready to paste (NODE)
 training_loss_log.png            loss curves, plus NFE for the NODE
 ```
@@ -370,7 +372,19 @@ training_loss_log.png            loss curves, plus NFE for the NODE
 Both models emit the same figures except where the physics differs: permutation
 feature importance is a DNN output, and the Jacobian sweep, the depletion matrix
 and the per-step importance need the ODE's right-hand side so they exist only for
-the NODE. Everything else — the scatter, the residuals, the growth curves, the
+the NODE. Each model's importance leaves the same three things behind — a
+per-feature metric through `self.log`, a CSV per target, and one markdown table
+at the root — so a results directory can be read back without re-running
+anything. The DNN's `Type` column splits its inputs the way the NODE's does:
+`State` for a feature that is also a target, `Forcing` for everything else.
+
+The percentages in both tables are a feature's share of the total, with negative
+importances (a shuffled column that happened to score *better*) clipped to zero
+first. For the DNN the R² and MSE columns rank identically by construction —
+R² = 1 − MSE/Var at fixed truth, so one is an affine map of the other — and the
+two are kept because the absolute numbers are read in different units.
+
+Everything else — the scatter, the residuals, the growth curves, the
 trajectories — is drawn by the same code, fed the same quantities on the same
 100-point window, so the head-to-head comparison of §5 is like-for-like.
 

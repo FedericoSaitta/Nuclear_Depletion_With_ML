@@ -1,5 +1,3 @@
-import os
-
 import lightning as L
 import numpy as np
 import torch
@@ -12,6 +10,10 @@ from nuclear_surrogates.models.model_architectures import Deep_Neural_Network
 from nuclear_surrogates.models.model_helper import get_loss_fn
 from nuclear_surrogates.utils import metrics, plot
 from nuclear_surrogates.utils.paths import result_dir
+
+# Shuffles per feature in the permutation-importance sweep. It multiplies the
+# number of forward passes, and the whole test set goes through each one.
+IMPORTANCE_REPEATS = 5
 
 
 class DNN_Model(L.LightningModule):
@@ -220,6 +222,7 @@ class DNN_Model(L.LightningModule):
                 target_names,
                 self.result_dir,
                 xlabel="Time step",
+                forcing_name=ordered_names(datamodule.col_index_map)[0],
             )
 
         self._write_test_metrics(mae_arr, rmse_arr, r2_arr, per_target_metrics)
@@ -335,40 +338,53 @@ class DNN_Model(L.LightningModule):
     # ── Feature importance ───────────────────────────────────────────────────
 
     def _compute_feature_importance(self, target_names, datamodule, loader):
-        """Permutation feature importance per target, under R² and MSE."""
+        """Permutation feature importance per target, under R² and MSE.
+
+        Computes only. The logging, the CSVs, the markdown table and the bar
+        charts are `evaluation.report_feature_importance`'s job, which is what
+        puts this on the same footing as the NODE's per-step sweep — that one
+        has always written its numbers out beside the figures, and this one used
+        to leave nothing behind but a PNG.
+        """
         logger.info(f"\n{'=' * 20}")
-        logger.info("FEATURE IMPORTANCE ANALYSIS")
+        logger.info(f"FEATURE IMPORTANCE ANALYSIS (K={IMPORTANCE_REPEATS})")
         logger.info(f"{'=' * 20}")
 
-        feature_names = [
-            key
-            for key, _ in sorted(datamodule.col_index_map.items(), key=lambda x: x[1])
+        feature_names = ordered_names(datamodule.col_index_map)
+        # The same Forcing/State split the NODE's importance tables carry: a
+        # feature that is also a target is the model's own state fed back in.
+        target_set = set(target_names)
+        feature_types = [
+            "State" if name in target_set else "Forcing" for name in feature_names
         ]
 
+        importances = {}
         for idx, target_name in enumerate(target_names):
-            output_dir = os.path.join(self.result_dir, target_name)
             logger.info(f"\nComputing feature importance for: {target_name}")
-
-            for metric_name, direction in (("r2", "increasing"), ("mse", "decreasing")):
-                means, stds, baseline = metrics.calculate_feature_importance(
+            importances[target_name] = {
+                metric_name: metrics.calculate_feature_importance(
                     self.model,
                     loader,
                     self.device,
-                    n_repeats=5,
+                    n_repeats=IMPORTANCE_REPEATS,
                     metric={"name": metric_name, "direction": direction},
                     output_idx=idx,
                 )
-                plot.plot_feature_importance(
-                    means,
-                    stds,
-                    feature_names,
-                    baseline,
-                    output_dir,
-                    f"{metric_name}_score",
-                    n_top=20,
+                for metric_name, direction in (
+                    ("r2", "increasing"),
+                    ("mse", "decreasing"),
                 )
+            }
 
-            logger.info(f"  Feature importance plots saved to: {output_dir}")
+        evaluation.report_feature_importance(
+            importances,
+            feature_names,
+            feature_types,
+            target_names,
+            self.result_dir,
+            self.log,
+            n_repeats=IMPORTANCE_REPEATS,
+        )
 
     # ── Bookkeeping ──────────────────────────────────────────────────────────
 
