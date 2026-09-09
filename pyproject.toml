@@ -16,7 +16,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nuclear-transport-with-ml"
-version = "0.1.0"
+version = "1.0.0"
 description = "DNN and Neural-ODE surrogates for OpenMC depletion calculations"
 readme = "README.md"
 authors = [

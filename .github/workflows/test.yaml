@@ -3,6 +3,9 @@ name: Tests
 on:
   push:
     branches: [ main ]
+    # Release tags too. A tag can point at a commit that main never saw, and a
+    # release archived to Zenodo is the one build that must not be untested.
+    tags: [ 'v*' ]
   pull_request:
   workflow_dispatch:
 

@@ -12,14 +12,7 @@ authors:
     given-names: "Federico"
     orcid: "https://orcid.org/0009-0001-6063-1184"
 
-contributors:
-  - family-names: "Christie"
-    given-names: "Stuart"
-    affiliation: "The University of Manchester"
-    role: "lecturer"
-    orcid: "https://orcid.org/0009-0000-5970-0835"
-
-version: "0.1.0"
+version: "1.0.0"
 date-released: "2026-09-09"
 license: MIT
 
