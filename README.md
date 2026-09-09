@@ -1,5 +1,3 @@
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21975132.svg)](https://doi.org/10.5281/zenodo.21975132)
-
 # Nuclear_Depletion_With_ML
 
 Machine-learning surrogates for OpenMC fuel-depletion calculations. A Monte-Carlo
