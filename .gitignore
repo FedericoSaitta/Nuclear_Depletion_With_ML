@@ -37,6 +37,12 @@ data_generation/results/
 # specific bundle deliberately (Zenodo, a release) rather than tracking the
 # whole directory.
 /bundles/
+# The published run outputs and the Zenodo staging area, both by the same rule.
+# MPHYS_FINAL_RESULST/ is a results drop — bundles, metrics and ~245 MB of
+# figures — and zenodo_upload_data/ holds a 518 MB dataset. Neither belongs in
+# git history; both are published as Zenodo records instead.
+/MPHYS_FINAL_RESULST/
+/zenodo_upload_data/
 *.h5
 *.hdf5
 

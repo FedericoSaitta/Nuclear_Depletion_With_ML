@@ -6,6 +6,7 @@ title: "Nuclear Transport With Machine Learning"
 authors:
   - family-names: "Castañeda Rodriguez"
     given-names: "Abel"
+    orcid: "https://orcid.org/0009-0001-6035-7525"
 
   - family-names: "Saitta"
     given-names: "Federico"
@@ -19,7 +20,8 @@ contributors:
     orcid: "https://orcid.org/0009-0000-5970-0835"
 
 version: "0.1.0"
-date-released: "2026-08-18"
+date-released: "2026-09-09"
+license: MIT
 
 repository-code: "https://github.com/FedericoSaitta/Nuclear_Depletion_With_ML"
 url: "https://github.com/FedericoSaitta/Nuclear_Depletion_With_ML.git"
